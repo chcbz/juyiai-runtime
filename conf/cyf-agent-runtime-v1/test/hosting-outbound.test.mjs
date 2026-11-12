@@ -9,6 +9,7 @@ import { eventMessage } from '../lib/message-envelope.mjs';
 import { hostingFixture, quotedPreparation, fixtureInventory, unchangedPeers } from './hosting-fixture.mjs';
 import { readPrivateJson } from '../lib/security.mjs';
 
+const activationWire = JSON.parse(await readFile(new URL('./fixtures/hosting-activation-v1.json', import.meta.url)));
 const sharedWire = JSON.parse(await readFile(new URL('./fixtures/hosting-outbound-v1.json', import.meta.url)));
 const scope = { tenantId: '0', clientId: 'fixture-client', ownerJiacn: 'fixture-owner', canonicalAgentId: 'agt_outbound_new' };
 const grant = { ...sharedWire.authorization, token: `rth1_${'a'.repeat(64)}` };
@@ -226,7 +227,7 @@ test('setup registration fixture publishes only the local bearer hash, not execu
 });
 
 test('SETUP discovers a separate exact CONTROL worker without changing the operator file or exposing tokens', async t => {
-  const controlAuthorization = { ...sharedWire.authorization, authorizationId: 'hca_control', purpose: 'CONTROL' };
+  const controlAuthorization = activationWire.activationResponse.data.controlAuthorization;
   const authorization = { ...grant, controlToken: `rth1_${'b'.repeat(64)}` };
   let controlSeen;
   const seen = new Promise(done => { controlSeen = done; });
@@ -255,4 +256,12 @@ test('SETUP cannot accept CONTROL metadata for another owner or promote its own 
   await assert.rejects(ctx.worker.exchange(), hasCode('HOSTING_OUTBOUND_CONTROL_REJECTED'));
   assert.equal(ctx.worker.controlEntry, null);
   assert.throws(() => new HostingOutbound({ ...ctx.options, authorization: { ...authorization, controlToken: grant.token } }), hasCode('HOSTING_OUTBOUND_AUTHORIZATION_INVALID'));
+});
+
+test('shared target M fixture prepares only the isolated target before payment', async t => {
+  const ctx = await fixture(t, body => response(body.requestId, activationWire.response.data));
+  await ctx.worker.exchange();
+  assert.equal(ctx.worker.state.result.data.outcome, 'TARGET_READY');
+  assert.deepEqual(Object.keys(ctx.worker.control.state.subjects), []);
+  assert.equal(ctx.f.enrollmentCount(), 0);
 });

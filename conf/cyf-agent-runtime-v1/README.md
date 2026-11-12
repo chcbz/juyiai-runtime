@@ -18,7 +18,7 @@ evidence/gates, not a current declaration that all deployed hosts are unaccepted
 `lib/hosting-outbound.mjs` implements a per-authorization outbound HTTP worker
 around the existing `HostingControl`, with no listener. It uses the common Q/R
 HTTP and M lifecycle envelopes; the synthetic wire fixture is
-`test/fixtures/hosting-outbound-v1.json`. SETUP is restricted to capability and
+`test/fixtures/hosting-outbound-v1.json`. SETUP is restricted to capabilities, isolated target preparation and
 inventory reads; CONTROL is a separate API-issued authorization, not an Agent
 execution credential. Each authorization fixes host, tenant, client, owner and
 Agent. Pending commands/results use a private, exclusively owned transport file;
@@ -26,23 +26,19 @@ existing lifecycle operations remain in the existing hosting journal. A lost
 reply resends the exact saved result. An interrupted command needs authenticated
 API redelivery before recovery; an empty poll or revoked grant cannot resume it.
 
-**Implementation boundary:** this is an unreleased transport candidate, not a
-working onboarding feature. The API exchange authentication and durable server
-queue have separate Java/MySQL integration evidence. Restricted invitation
-registration/quotation is still a disabled API candidate; daemon startup wiring,
-new target preparation and the Web quote flow are not complete. `agent-runtime.mjs` does not
-start it automatically. Do not fabricate credentials, configure an inbound
-listener, or deploy this partial candidate as the completed lease-separation
-solution. Tests use an actual loopback HTTP server and the real lifecycle handler,
-but those local servers remain fixtures; actual Java/MySQL pair evidence is kept
-in the CYF task handoff, not inferred from Node-only results.
+**Implementation boundary:** this is an unreleased candidate. The daemon now supervises
+outbound workers on the same RuntimeHost, including empty-host bootstrap. Target preparation,
+reserved CONTROL discovery and the Web registration/quote consumer have source implementations;
+formal cross-end business acceptance and deployment remain outstanding. Do not configure an
+inbound listener as an onboarding workaround or call local fixtures production proof.
 
 An actual target inventory observation carries `inventorySource: "TARGET"`.
 The legacy model-template empty inventory has no such marker and cannot satisfy
 the new setup quote contract. An observation failure does not produce this marker.
-This distinction does not create the new user's target directories or enroll an
-Agent. The hash-only registration Q/R example is `test/fixtures/hosting-setup-v1.json`;
-its credential is synthetic, and the CLI/daemon registration consumer is still pending.
+The separate `hosting.target` operation creates the isolated directories without enrollment.
+The historical `hosting-setup-v1.json` stays unchanged; the new complete target/control exchange
+example is `test/fixtures/hosting-activation-v1.json`. See HOSTING-CONTROL.md for the private
+one-time pairing utility; no production credentials are included.
 
 ## Artifact and configuration
 
@@ -571,8 +567,7 @@ releasing their writer locks.
 
 An outbound-configured host may start with `agents: []` for first onboarding;
 a host without outbound control still requires explicit Agents. This only boots
-the control infrastructure, not a billable installation. New-target preparation,
-CONTROL issuance following wallet reservation, and Web handoff remain separate
-unfinished business integration; do not publish this partial candidate as the
-complete invitation flow. Existing inbound configs remain available only for
+the control infrastructure, not a billable installation. New-target preparation and
+post-reserve CONTROL discovery are implemented, but managed-host automatic pairing,
+existing-lease authority migration and real business acceptance remain release prerequisites. Existing inbound configs remain available only for
 current deployments pending the coordinated consumer migration.
