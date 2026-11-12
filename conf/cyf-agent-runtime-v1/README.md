@@ -13,6 +13,28 @@ and a new-item acceptance. The installer alone does not perform these operations
 The earlier M3/UR03 acceptance lists later in this document are historical scoped
 evidence/gates, not a current declaration that all deployed hosts are unaccepted.
 
+## Outbound hosting transport candidate (2026-11-12)
+
+`lib/hosting-outbound.mjs` implements a per-authorization outbound HTTP worker
+around the existing `HostingControl`, with no listener. It uses the common Q/R
+HTTP and M lifecycle envelopes; the synthetic wire fixture is
+`test/fixtures/hosting-outbound-v1.json`. SETUP is restricted to capability and
+inventory reads; CONTROL is a separate API-issued authorization, not an Agent
+execution credential. Each authorization fixes host, tenant, client, owner and
+Agent. Pending commands/results use a private, exclusively owned transport file;
+existing lifecycle operations remain in the existing hosting journal. A lost
+reply resends the exact saved result. An interrupted command needs authenticated
+API redelivery before recovery; an empty poll or revoked grant cannot resume it.
+
+**Implementation boundary:** this is an unreleased transport candidate, not a
+working onboarding feature. The API grant/exchange endpoints and durable server
+queue, daemon configuration/startup wiring, restricted target preparation and
+Web quote flow are not implemented by this module. `agent-runtime.mjs` does not
+start it automatically. Do not fabricate credentials, configure an inbound
+listener, or deploy this partial candidate as the completed lease-separation
+solution. Tests use an actual loopback HTTP server and the real lifecycle handler,
+but the server is a fixture, not the production Java authentication/queue stack.
+
 ## Artifact and configuration
 
 `install.sh --target ABSOLUTE_NEW_DIRECTORY` prepares a new artifact containing
