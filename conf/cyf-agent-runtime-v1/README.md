@@ -27,13 +27,22 @@ reply resends the exact saved result. An interrupted command needs authenticated
 API redelivery before recovery; an empty poll or revoked grant cannot resume it.
 
 **Implementation boundary:** this is an unreleased transport candidate, not a
-working onboarding feature. The API grant/exchange endpoints and durable server
-queue, daemon configuration/startup wiring, restricted target preparation and
-Web quote flow are not implemented by this module. `agent-runtime.mjs` does not
+working onboarding feature. The API exchange authentication and durable server
+queue have separate Java/MySQL integration evidence. Restricted invitation
+registration/quotation is still a disabled API candidate; daemon startup wiring,
+new target preparation and the Web quote flow are not complete. `agent-runtime.mjs` does not
 start it automatically. Do not fabricate credentials, configure an inbound
 listener, or deploy this partial candidate as the completed lease-separation
 solution. Tests use an actual loopback HTTP server and the real lifecycle handler,
-but the server is a fixture, not the production Java authentication/queue stack.
+but those local servers remain fixtures; actual Java/MySQL pair evidence is kept
+in the CYF task handoff, not inferred from Node-only results.
+
+An actual target inventory observation carries `inventorySource: "TARGET"`.
+The legacy model-template empty inventory has no such marker and cannot satisfy
+the new setup quote contract. An observation failure does not produce this marker.
+This distinction does not create the new user's target directories or enroll an
+Agent. The hash-only registration Q/R example is `test/fixtures/hosting-setup-v1.json`;
+its credential is synthetic, and the CLI/daemon registration consumer is still pending.
 
 ## Artifact and configuration
 

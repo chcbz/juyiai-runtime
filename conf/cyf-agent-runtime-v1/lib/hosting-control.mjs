@@ -225,8 +225,8 @@ export class HostingControl {
     }
     // New managed subjects have fresh HOME/work roots and a validated model-only
     // template: no skill/plugin source is copied. Do not create an instance to quote.
-    return agent ? await this.observeInventory({ profile: agent.profile,
-      manager: stoppedSkillManager({ agent, apiOrigin: this.apiOrigin, instanceId: this.host.instanceId }) })
+    return agent ? { ...await this.observeInventory({ profile: agent.profile,
+      manager: stoppedSkillManager({ agent, apiOrigin: this.apiOrigin, instanceId: this.host.instanceId }) }), inventorySource: 'TARGET' }
       : skillInventorySnapshot({ discovery: { data: [{ cwd: '', skills: [], errors: [] }] }, cwd: '', codexHome: '' });
   }
   async handle(input) {

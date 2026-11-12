@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { createServer } from 'node:http';
@@ -211,4 +212,15 @@ test('mismatched HTTP request correlation and changed command cannot execute a h
   ctx.worker.fetchFn = async (_, options) => response(JSON.parse(options.body).requestId, reply(inventory('next')));
   await assert.rejects(ctx.worker.exchange(), hasCode('HOSTING_OUTBOUND_COMMAND_PENDING'));
   assert.equal(ctx.worker.state.command.messageId, 'inventory-1');
+});
+
+test('setup registration fixture publishes only the local bearer hash, not execution credentials', async () => {
+  const fixture = JSON.parse(await readFile(new URL('./fixtures/hosting-setup-v1.json', import.meta.url)));
+  const token = `rth1_${'c'.repeat(64)}`;
+  assert.equal(fixture.registrationRequest.data.tokenSha256, createHash('sha256').update(token).digest('hex'));
+  assert.equal(JSON.stringify(fixture).includes(token), false);
+  assert.equal(fixture.registrationResponse.data.authorization.purpose, 'SETUP');
+  assert.equal(fixture.registrationResponse.data.status, 'WAITING_INVENTORY');
+  assert.equal(fixture.registrationResponse.data.authorization.canonicalAgentId, fixture.registrationResponse.data.agentId);
+  assert.equal(fixture.targetInventorySource, 'TARGET');
 });

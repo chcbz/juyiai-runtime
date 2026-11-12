@@ -634,12 +634,16 @@ test('public inventory is scoped, has no paths or provisioning side effects, and
   const before = await readFile(control.path, 'utf8');
   const empty = await control.handle(request);
   assert.equal(empty.installedSkillCount, '0'); assert.equal(empty.inventoryVersion, '1');
+  assert.equal(Object.hasOwn(empty, 'inventorySource'), false); // A template assumption is not a target observation.
   assert.equal(f.enrollmentCount(), 0); assert.equal(await readFile(control.path, 'utf8'), before);
   let observations = 0;
   control.observeInventory = async ({ profile }) => { observations++; assert.equal(profile.agentId, f.peers[0].manifest.canonicalAgentId);
     return { inventoryVersion: '1', inventorySha256: 'a'.repeat(64), installedSkillCount: '1', skills: [{ skillKey: 'manual', source: 'NATIVE', revision: 'b'.repeat(64), enabled: true, installation: null }] }; };
   const existing = await control.handle({ ...request, canonicalAgentId: f.peers[0].manifest.canonicalAgentId });
   assert.equal(existing.installedSkillCount, '1'); assert.equal(observations, 1);
+  assert.equal(existing.inventorySource, 'TARGET');
+  control.observeInventory = async () => { throw Error('target observation failed'); };
+  await assert.rejects(control.handle({ ...request, canonicalAgentId: f.peers[0].manifest.canonicalAgentId }), /target observation failed/);
   await assert.rejects(control.handle({ ...request, ownerJiacn: 'other' }), code('HOSTING_SCOPE_REJECTED'));
   assert.equal(observations, 1); assert.equal(await readFile(control.path, 'utf8'), before);
   assert.throws(() => validateHostingAssociation({ ...request, codexHome: '/caller-selected' }));
