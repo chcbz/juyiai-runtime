@@ -47,10 +47,11 @@ test('pinned Python actually reads/edits/reopens DOCX/XLSX/PPTX inside native mo
   const run = command => spawnSync('/usr/bin/bwrap', [...args, ...command], { encoding: 'utf8', env: { LANG: 'C.UTF-8' } })
   const probe = run(['/usr/bin/python3', '-I', '-B', DOCUMENT_PROBE])
   assert.equal(probe.status, 0, probe.stderr); assert.equal(probe.stdout.trim(), 'native-documents-ready')
-  for (const extension of ['docx', 'xlsx']) copyFileSync(resolve(options.scratchDirectory, `probe.${extension}`), resolve(options.inputDirectory, `input.${extension}`))
+  for (const extension of ['docx', 'xlsx', 'pptx']) copyFileSync(resolve(options.scratchDirectory, `probe.${extension}`), resolve(options.inputDirectory, `input.${extension}`))
   const result = run(['/usr/bin/python3', '-I', '-B', '-c', `from pathlib import Path
 from docx import Document
 from openpyxl import load_workbook
+from pptx import Presentation
 import socket
 assert not Path(${JSON.stringify(options.sourceHome)}).exists()
 assert not Path('/etc/shadow').exists()
@@ -79,6 +80,11 @@ book.active['A2'] = 15
 book.save('/outputs/result.xlsx')
 assert load_workbook('/outputs/result.xlsx', data_only=False).active['C2'].value == '=A2*B2'
 assert load_workbook('/inputs/input.xlsx').active['A2'].value == 12
+deck = Presentation('/inputs/input.pptx')
+assert len(deck.slides) == 1
+deck.slides[0].shapes.title.text = '演示文稿已修改'
+deck.save('/outputs/result.pptx')
+assert Presentation('/outputs/result.pptx').slides[0].shapes.title.text == '演示文稿已修改'
 print('native-document-edit-pass')`])
   assert.equal(result.status, 0, result.stderr); assert.equal(result.stdout.trim(), 'native-document-edit-pass')
   for (const [extension, mime] of [['docx', DOCUMENT_MIMES[0]], ['xlsx', DOCUMENT_MIMES[1]], ['pptx', DOCUMENT_MIMES[2]]]) {
