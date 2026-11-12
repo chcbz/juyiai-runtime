@@ -54,7 +54,8 @@ export async function acquireRuntimeOwnership(root, { hostId, instanceId, subjec
 
 export class RuntimeHost {
   constructor({ config, instanceId = randomUUID(), createExecutor, flushEvidence, cleanPrivateData, admitRelationship, logger = () => {} }) {
-    if (typeof createExecutor !== 'function' || !config?.agents?.length) throw error('RUNTIME_HOST_CONFIG_REQUIRED');
+    if (typeof createExecutor !== 'function' || !Array.isArray(config?.agents)
+        || !config.agents.length && !config.hostingControl?.outbound) throw error('RUNTIME_HOST_CONFIG_REQUIRED');
     if (typeof instanceId !== 'string' || !instanceId || instanceId === config.hostId) throw error('RUNTIME_INSTANCE_ID_INVALID');
     this.config = config; this.instanceId = instanceId; this.createExecutor = createExecutor; this.flushEvidence = flushEvidence; this.cleanPrivateData = cleanPrivateData; this.admitRelationship = admitRelationship; this.logger = logger;
     this.agents = new Map(config.agents.map(agent => [runtimeSubjectKey(agent.manifest), {

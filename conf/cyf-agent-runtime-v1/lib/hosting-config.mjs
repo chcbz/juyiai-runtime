@@ -26,13 +26,19 @@ export async function canonicalHostingPath(path) {
   }
 }
 export function validateHostingConfig(value) {
-  const configFields = ['configVersion', 'socketPath', 'socketGid', 'managedRoot', 'scopes', 'template', 'enrollmentTtlMs'];
+  const outbound = Object.hasOwn(value || {}, 'outbound');
+  const configFields = ['configVersion', 'managedRoot', 'scopes', 'template', 'enrollmentTtlMs',
+    ...(outbound ? ['outbound'] : ['socketPath', 'socketGid'])];
   if (Object.hasOwn(value || {}, 'remote')) configFields.push('remote');
   if (!fields(value, configFields)
-      || value.configVersion !== 1 || !Number.isSafeInteger(value.socketGid) || value.socketGid < 0
+      || value.configVersion !== 1 || !outbound && (!Number.isSafeInteger(value.socketGid) || value.socketGid < 0)
       || !Number.isSafeInteger(value.enrollmentTtlMs) || value.enrollmentTtlMs < 1
       || !Array.isArray(value.scopes) || !value.scopes.length
       || value.template !== null && !fields(value.template, ['profile', 'codexConfig', 'providerEnvironment'])) throw hostingError('HOSTING_CONFIG_INVALID');
+  if (outbound && (value.remote !== undefined || !fields(value.outbound, ['authorizationsPath', 'pollIntervalMs'])
+      || !exactHostingId(value.outbound.authorizationsPath) || !isAbsolute(value.outbound.authorizationsPath)
+      || !Number.isSafeInteger(value.outbound.pollIntervalMs) || value.outbound.pollIntervalMs < 1))
+    throw hostingError('HOSTING_OUTBOUND_CONFIG_INVALID');
   if (value.remote !== undefined) {
     const remote = value.remote;
     if (!fields(remote, ['listenHost', 'port', 'certificatePath', 'privateKeyPath', 'clientCaPath'])
@@ -87,17 +93,26 @@ export function validateHostingConfig(value) {
 export async function readHostingConfig(path, hostConfig) {
   await canonicalHostingPath(path);
   const value = validateHostingConfig(await readPrivateJson(path, null));
-  await canonicalHostingPath(value.socketPath); await canonicalHostingPath(value.managedRoot);
+  if (!value.outbound) await canonicalHostingPath(value.socketPath);
+  await canonicalHostingPath(value.managedRoot);
   const overlap = (a, b) => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
   const roots = [hostConfig.stateRoot, ...hostConfig.agents.flatMap(agent => [agent.stateRoot,
     ...['codexHome', 'codexWorkdir', 'chatWorkdir', 'workspaceFallbackWorkdir', 'workspaceFileRootDir', 'typedInspectionRootDir',
       'typedInspectionStateRoot', 'controlledImageHttpLedgerRoot'].map(key => agent.profile[key]).filter(Boolean)])];
-  if (roots.some(root => overlap(root, value.managedRoot)) || overlap(dirname(value.socketPath), value.managedRoot)) throw hostingError('HOSTING_CONFIG_ROOTS_OVERLAP');
+  if (roots.some(root => overlap(root, value.managedRoot)) || !value.outbound && overlap(dirname(value.socketPath), value.managedRoot)) throw hostingError('HOSTING_CONFIG_ROOTS_OVERLAP');
   const managed = await lstat(value.managedRoot);
   if (!managed.isDirectory() || managed.uid !== process.getuid() || managed.mode & 0o077) throw hostingError('HOSTING_CONFIG_ROOT_UNSAFE');
-  const parent = await lstat(dirname(value.socketPath));
-  if (!parent.isDirectory() || parent.uid !== process.getuid() || parent.gid !== value.socketGid
-      || ![0o710, 0o750].includes(parent.mode & 0o777)) throw hostingError('HOSTING_SOCKET_PARENT_UNSAFE');
+  if (value.outbound) {
+    await canonicalHostingPath(value.outbound.authorizationsPath);
+    if ([...roots, value.managedRoot].some(root => overlap(root, value.outbound.authorizationsPath)))
+      throw hostingError('HOSTING_OUTBOUND_CREDENTIAL_ROOT_UNSAFE');
+    // Content/subject admission occurs in the transport supervisor, not in each caller.
+    await readPrivateJson(value.outbound.authorizationsPath, null);
+  } else {
+    const parent = await lstat(dirname(value.socketPath));
+    if (!parent.isDirectory() || parent.uid !== process.getuid() || parent.gid !== value.socketGid
+        || ![0o710, 0o750].includes(parent.mode & 0o777)) throw hostingError('HOSTING_SOCKET_PARENT_UNSAFE');
+  }
   if (value.remote) {
     for (const field of ['certificatePath', 'privateKeyPath', 'clientCaPath']) {
       const path = value.remote[field];

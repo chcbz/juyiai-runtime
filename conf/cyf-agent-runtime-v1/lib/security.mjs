@@ -8,8 +8,8 @@ const REDACTED = '[REDACTED]';
 export function redact(value, knownSecrets = []) {
   if (typeof value === 'string') {
     return knownSecrets.filter(Boolean).reduce((result, secret) => result.split(secret).join(REDACTED), value)
-      .replace(/(?:Bearer|AgentRuntime)\s+[^\s,;]+/gi, `Authorization ${REDACTED}`)
-      .replace(/rts1_[0-9a-f]{64}/g, REDACTED);
+      .replace(/(?:Bearer|AgentRuntime|RuntimeHosting)\s+[^\s,;]+/gi, `Authorization ${REDACTED}`)
+      .replace(/(?:rts1|rth1)_[0-9a-f]{64}/g, REDACTED);
   }
   if (Array.isArray(value)) return value.map(item => redact(item, knownSecrets));
   if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [

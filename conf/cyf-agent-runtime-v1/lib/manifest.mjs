@@ -102,7 +102,7 @@ export async function readRuntimeHostConfig(configPath) {
   const path = resolve(configPath);
   const config = await jsonFile(path);
   if (!object(config) || !['agents,configVersion,hostId,stateRoot', 'agents,configVersion,hostId,hostingControlPath,stateRoot'].includes(Object.keys(config).sort().join(','))
-      || config.configVersion !== 1 || !exact(config.hostId) || !Array.isArray(config.agents) || !config.agents.length) throw configError('RUNTIME_HOST_CONFIG_INVALID');
+      || config.configVersion !== 1 || !exact(config.hostId) || !Array.isArray(config.agents) || !config.agents.length && !config.hostingControlPath) throw configError('RUNTIME_HOST_CONFIG_INVALID');
   await canonicalPath(config.stateRoot);
   const subjects = new Set(); const installations = new Set(); const roots = [];
   const contains = (left, right) => { const tail = relative(left, right); return tail === '' || (!tail.startsWith(`..${sep}`) && tail !== '..' && !isAbsolute(tail)); };
@@ -141,5 +141,6 @@ export async function readRuntimeHostConfig(configPath) {
   }
   const result = { configVersion: 1, hostId: config.hostId, stateRoot: config.stateRoot, agents };
   if (Object.hasOwn(config, 'hostingControlPath')) result.hostingControl = await readHostingConfig(await canonicalPath(config.hostingControlPath), result);
+  if (!agents.length && !result.hostingControl?.outbound) throw configError('RUNTIME_HOST_CONFIG_INVALID');
   return deepFreeze(result);
 }

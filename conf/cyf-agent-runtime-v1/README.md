@@ -535,3 +535,44 @@ namespace. Missing optional dependencies disable only the browser capability;
 base/document capabilities are measured separately. A successful synthetic probe
 is not proof of a production model turn or a remote transaction. External effects
 with unknown outcomes must not be automatically resubmitted.
+
+### Outbound host integration (1.3.106 candidate, not deployed)
+
+`hostingControlPath` now supports an outbound-only operator configuration. Keep
+`configVersion`, `managedRoot`, `scopes`, `template` and `enrollmentTtlMs`; replace
+`socketPath`/`socketGid` with:
+
+```json
+"outbound": {
+  "authorizationsPath": "/private/operator/hosting-authorizations.json",
+  "pollIntervalMs": 1000
+}
+```
+
+Do not specify `remote`, `socketPath` or `socketGid` in this mode. No Unix/TCP/TLS
+listener or socket directory is created. The credential file must be private,
+canonical, owned by the service account, and outside host/Agent/managed mutable
+roots. Its shape is `{ "configVersion": 1, "authorizations": [...] }`; each entry
+has the API-issued authorization metadata and its matching locally retained
+`token` (see `hosting-outbound.mjs`). Never fabricate production grants or copy
+credentials between users. The API stores the registered token hash, not this
+file. This file cannot replace API permission checks or issue execution sessions.
+
+One `HostingControl` and `RuntimeHost` serve all entries. Startup and each host
+heartbeat reread the file; atomically replacing it can add/remove transport
+workers without restarting the host. Removing an entry aborts and joins only
+that worker; durable receipts remain under `managedRoot/outbound/<id-sha256>`.
+It does not delete assets, stop billing, or claim business unbinding. Same-ID
+credential/subject changes and duplicate IDs reject the replacement without
+stopping healthy transports. A permanent worker failure is isolated and is not
+restarted by unchanged heartbeat reloads. API revocation is checked on every
+exchange regardless of local file contents. Shutdown aborts/joins workers before
+releasing their writer locks.
+
+An outbound-configured host may start with `agents: []` for first onboarding;
+a host without outbound control still requires explicit Agents. This only boots
+the control infrastructure, not a billable installation. New-target preparation,
+CONTROL issuance following wallet reservation, and Web handoff remain separate
+unfinished business integration; do not publish this partial candidate as the
+complete invitation flow. Existing inbound configs remain available only for
+current deployments pending the coordinated consumer migration.

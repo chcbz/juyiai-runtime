@@ -8,6 +8,7 @@ import { chmod, chown, lstat, realpath } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { TextDecoder } from 'node:util';
 import { HostingControl } from './hosting-control.mjs';
+import { HostingOutboundHost } from './hosting-outbound-host.mjs';
 import { canonicalHostingPath, hostingError, readHostingTlsOptions } from './hosting-config.mjs';
 import { parseHostingJson, validateHostingRequest, hostingReply } from './hosting-wire.mjs';
 
@@ -107,6 +108,10 @@ export async function createHostingControlServer(options) {
   const control = new HostingControl(options);
   await control.initialize();
   try {
-    const server = await startHostingServer({ control }); control.resumeAdmitted(); return server;
+    const server = options.config.outbound
+      ? new HostingOutboundHost({ control, apiOrigin: options.apiOrigin, logger: options.logger })
+      : await startHostingServer({ control });
+    try { await server.refresh?.(); } catch (error) { await server.close(); throw error; }
+    control.resumeAdmitted(); return server;
   } catch (cause) { await control.close(); await control.releaseOwnership(); throw cause; }
 }

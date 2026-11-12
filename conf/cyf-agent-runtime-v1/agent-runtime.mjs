@@ -60,6 +60,12 @@ export async function runUnifiedRuntime({ config, apiOrigin, instanceId = random
       // Every activation has its own rejection handler above.
       void Promise.allSettled(activate);
       while (!signal.aborted) {
+        // Reload only operator-owned grants. One malformed replacement leaves existing
+        // transports intact; API revocation remains authoritative on every exchange.
+        // A removed grant may still be joining an unknown operation; do not
+        // hold every Agent's heartbeat behind that one transport.
+        void Promise.resolve().then(() => controlServer?.refresh?.()).catch(() =>
+          logger('hosting-outbound-config-rejected', { code: 'HOSTING_OUTBOUND_CONFIG_REJECTED' }));
         await adapters.heartbeat();
         // Observation only: no credentials, business payloads or authority. A failed write
         // cannot stop healthy channels; the external monitor detects stale/missing evidence.
@@ -73,8 +79,14 @@ export async function runUnifiedRuntime({ config, apiOrigin, instanceId = random
       }
     } finally { signal.removeEventListener('abort', stop); }
   } finally {
-    try { await controlServer?.close(); await host.stop(); await adapters.close(); }
-    finally { if (!host.releaseHost) await controlServer?.control.releaseOwnership(); }
+    try { await controlServer?.close(); }
+    finally {
+      try { await host.stop(); }
+      finally {
+        try { await adapters.close(); }
+        finally { if (!host.releaseHost) await controlServer?.control.releaseOwnership(); }
+      }
+    }
   }
   return host.snapshot();
 }
