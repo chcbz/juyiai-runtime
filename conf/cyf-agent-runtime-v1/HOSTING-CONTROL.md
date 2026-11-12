@@ -182,3 +182,37 @@ Clean shutdown releases owned locks and its socket; reboot recreates the `/run`
 parent, while persistent private state remains.
 
 Node measured during development: **v20.20.2**. No version gate added.
+
+## Outbound invitation target and one-time pairing
+
+A SETUP grant now permits `hosting.target` in addition to capabilities/inventory.
+The target request is an M envelope with only tenantId/clientId/ownerJiacn/canonicalAgentId in data.
+Its result echoes these and reports hostId/outcome=TARGET_READY. This is directory preparation,
+NOT an installation, enrollment, service-ready proof or a payment event. Target metadata and
+model-only template are saved before filesystem creation; unrelated orphan roots are refused.
+Inventory uses the actual catalog observer in that private target, including installed disabled skills.
+
+Use the repository's operator utility (not an API command runner):
+
+```sh
+node "$REPO/shell/cyf_runtime_hosting_setup.mjs" prepare --host-id HOST_ID --output /absolute/private/NEW_DIRECTORY
+# Submit only NEW_DIRECTORY/request.json in the invitation panel. Never upload pending.json.
+# Save the returned public authorization metadata as authorization.json, chmod 600 it.
+node "$REPO/shell/cyf_runtime_hosting_setup.mjs" attach --pending /absolute/private/NEW_DIRECTORY/pending.json --authorization /absolute/private/authorization.json --authorizations /absolute/private/authorizations.json
+```
+
+The configured `outbound.authorizationsPath` must be that authorization file; the host and exact
+local allowed scope must already be configured. The utility serializes updates and preserves
+other entries. One service reloads the file without restarting other Agents. Pairing is once per
+new target, not once per HTTP connection. It does not yet automate managed-host assignment or
+new-owner local scope policy installation.
+
+The SETUP entry retains a separate `controlToken`. API returns optional/null `controlAuthorization`
+only after reserve commits. The worker verifies the same host and subject and starts an independent
+CONTROL worker with its own journal; no bearer appears in the API response or journals. On restart,
+metadata is rediscovered from authenticated SETUP polling. Different owner/Agent, same credential
+promotion or replacement of an existing CONTROL identity is rejected. Revoking/removing the parent
+stops its child transport; it does not delete self-hosted assets or assert remote cleanup.
+
+Do not enable outbound globally on an existing installation until the old lease control-authority
+migration has been completed: an unmapped lease does not silently fall back to inbound sockets.
