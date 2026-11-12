@@ -81,7 +81,7 @@ assert load_workbook('/outputs/result.xlsx', data_only=False).active['C2'].value
 assert load_workbook('/inputs/input.xlsx').active['A2'].value == 12
 print('native-document-edit-pass')`])
   assert.equal(result.status, 0, result.stderr); assert.equal(result.stdout.trim(), 'native-document-edit-pass')
-  for (const [extension, mime] of [['docx', DOCUMENT_MIMES[0]], ['xlsx', DOCUMENT_MIMES[1]]]) {
+  for (const [extension, mime] of [['docx', DOCUMENT_MIMES[0]], ['xlsx', DOCUMENT_MIMES[1]], ['pptx', DOCUMENT_MIMES[2]]]) {
     assert.equal(await validateNativeOutputSnapshot(resolve(options.draftsDirectory, `result.${extension}`), mime), mime)
     assert.deepEqual(readFileSync(resolve(options.inputDirectory, `input.${extension}`)), readFileSync(resolve(options.scratchDirectory, `probe.${extension}`)))
   }

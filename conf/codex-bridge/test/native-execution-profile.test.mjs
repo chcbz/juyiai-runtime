@@ -567,7 +567,7 @@ test('Office declaration requires actual document reopens; document failure reta
     }
     runtime.releaseAdapter = async id => { runtime.activeAdapters.delete(id) }
     const ready = await runtime.measureNativeExecution()
-    assert.deepEqual(ready.outputMimeTypes.slice(-2), DOCUMENT_MIMES)
+    assert.deepEqual(ready.outputMimeTypes.slice(-DOCUMENT_MIMES.length), DOCUMENT_MIMES)
     assert.ok(ready.outputMimeTypes.includes('image/png'))
     success = false
     const failed = await runtime.measureNativeExecution()
@@ -605,7 +605,7 @@ test('browser readiness requires a successful process probe and retains text/Off
     const ready = await runtime.measureNativeExecution()
     assert.equal(runtime.nativeBrowserReady, true)
     assert.ok(ready.outputMimeTypes.includes('image/png'))
-    assert.deepEqual(ready.outputMimeTypes.slice(-2), DOCUMENT_MIMES)
+    assert.deepEqual(ready.outputMimeTypes.slice(-DOCUMENT_MIMES.length), DOCUMENT_MIMES)
     success = false
     const failed = await runtime.measureNativeExecution()
     assert.equal(runtime.nativeBrowserReady, false)
