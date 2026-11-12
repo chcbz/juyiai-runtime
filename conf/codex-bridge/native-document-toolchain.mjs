@@ -1,0 +1,185 @@
+/** RB-03/05: fixed document libraries in the existing file-manifest sandbox.
+ * Installed images expose a fixed manifest-closed read-only directory view;
+ * no broad host directory, package installation, or document workflow selection. */
+import { spawnSync } from 'node:child_process'
+import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads'
+import { createHash } from 'node:crypto'
+import { readFileSync, readdirSync, realpathSync, lstatSync, existsSync } from 'node:fs'
+import { basename, dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { readNativeToolchainImage, validateNativeExecutionToolchain, validateNativeExecutionToolchainAsync } from './native-execution-profile.mjs'
+
+export const DOCUMENT_MIMES = Object.freeze(['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'])
+export const DOCUMENT_PROBE = '/usr/lib/cyf-documents/document_probe.py'
+export const PDF_PROBE = '/usr/lib/cyf-browser/pdf-probe.mjs'
+const root = fileURLToPath(new URL('.', import.meta.url))
+const fail = code => { throw Object.assign(new Error(code), { code }) }
+const pin = (sourcePath, sandboxPath) => {
+  const source = realpathSync(sourcePath)
+  return { sourcePath: source, sandboxPath, sha256: createHash('sha256').update(readFileSync(source)).digest('hex') }
+}
+
+export function measureNativeDocumentToolchain({ base, pythonBin = resolve(root, '.toolchain/bin/python'), requirementsPath = resolve(root, 'toolchain/requirements.txt'), probePath = resolve(root, 'toolchain/document_probe.py'), pdfProbePath = resolve(root, 'toolchain/pdf-probe.mjs'), readmePath = resolve(root, 'toolchain/documents/README.md') }) {
+  const files = [...base.files, pin(pythonBin, '/usr/bin/python3')]
+  // The installed venv can still reference an external base interpreter. Check
+  // that protected base location before Python imports any of its stdlib.
+  const config = resolve(dirname(pythonBin), '../pyvenv.cfg')
+  validateNativeExecutionToolchain({ shell: base.shell, files })
+  if (existsSync(config)) {
+    validateNativeExecutionToolchain({ shell: base.shell, files: [...files, pin(config, '/usr/lib/cyf-documents/pyvenv.cfg')] })
+    const home = /^home\s*=\s*(.+)$/m.exec(readFileSync(config, 'utf8'))?.[1]?.trim()
+    if (!home || resolve(home) !== home || realpathSync(home) !== home) fail('NATIVE_DOCUMENT_BASE_UNSAFE')
+    for (let cursor = home; ; cursor = dirname(cursor)) {
+      const stat = lstatSync(cursor)
+      if (!stat.isDirectory() || ![0, process.geteuid()].includes(stat.uid) || stat.mode & 0o022) fail('NATIVE_DOCUMENT_BASE_UNSAFE')
+      if (cursor === '/' || (stat.uid === process.geteuid() && (stat.mode & 0o077) === 0)) break
+    }
+    validateNativeExecutionToolchain({ shell: base.shell, files: [...files, pin(resolve(home, 'python3'), '/usr/lib/cyf-documents/base-python')] })
+  } else {
+    // Frozen artifacts have no venv redirect. Verify their local stdlib paths
+    // before starting Python, rather than trusting an external build prefix.
+    const prefix = resolve(dirname(pythonBin), '..')
+    const libraries = ['lib', 'lib64'].flatMap(name => {
+      const directory = resolve(prefix, name)
+      return existsSync(directory) ? readdirSync(directory).filter(name => /^python3\.\d+$/.test(name)).map(name => resolve(directory, name)) : []
+    })
+    if (!libraries.length) fail('NATIVE_DOCUMENT_BASE_UNSAFE')
+    for (const library of libraries) {
+      validateNativeExecutionToolchain({ shell: base.shell, files: [...files, pin(resolve(library, 'os.py'), '/usr/lib/cyf-documents/os.py'), pin(resolve(library, 'encodings/__init__.py'), '/usr/lib/cyf-documents/encodings.py')] })
+    }
+  }
+  const measured = spawnSync(pythonBin, ['-I', '-B', '-c', `import json, os, sys, sysconfig, pkg_resources, importlib.metadata
+wanted = {'python-docx', 'openpyxl', 'pypdf'}
+requirements = []
+for line in open(sys.argv[1]):
+ line = line.strip()
+ if line and not line.startswith('#') and line.split('==')[0] in wanted:
+  requirements.append(line)
+assert len(requirements) == len(wanted), 'DOCUMENT_REQUIREMENTS_MISSING'
+packages = set()
+for dist in pkg_resources.require(requirements):
+ if dist.has_metadata('top_level.txt'):
+  packages.update(name.strip() for name in dist.get_metadata('top_level.txt').splitlines() if name.strip())
+ else:
+  # Modern wheels need not contain setuptools' optional top_level.txt.
+  packages.update(path.parts[0] for path in importlib.metadata.distribution(dist.project_name).files or [] if len(path.parts) == 2 and path.parts[1] == '__init__.py')
+print(json.dumps({'version': '%s.%s' % sys.version_info[:2], 'stdlib': sysconfig.get_path('stdlib'), 'platlib': sysconfig.get_path('platlib'), 'packages': sorted(packages), 'prefix': sys.prefix, 'basePrefix': sys.base_prefix, 'platlibdir': os.path.basename(os.path.dirname(sysconfig.get_path('stdlib')))}))`, requirementsPath], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' } })
+  if (measured.status !== 0) fail('NATIVE_DOCUMENT_TOOLCHAIN_UNAVAILABLE')
+  const info = JSON.parse(measured.stdout)
+  if (!/^3\.\d+$/.test(info.version) || !['lib', 'lib64'].includes(info.platlibdir)) fail('NATIVE_DOCUMENT_TOOLCHAIN_INVALID')
+  if (!existsSync(config) && (info.prefix !== resolve(dirname(pythonBin), '..') || info.basePrefix !== info.prefix || !info.stdlib.startsWith(info.prefix + '/'))) fail('NATIVE_DOCUMENT_BASE_UNSAFE')
+  // Use the interpreter's actual library directory convention. -I can then find
+  // its standard library without trusting PYTHONPATH or a user site directory.
+  const library = `/usr/${info.platlibdir}/python${info.version}`
+  const omitted = new Set(['__pycache__', 'test', 'tests', 'idlelib', 'tkinter', 'ensurepip', 'pip', 'setuptools', 'pkg_resources', '_distutils_hack'])
+  const walk = (source, target, standard = false) => {
+    for (const item of readdirSync(source, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      // The desktop tkinter package is omitted above; its native GUI extension
+      // must also stay outside this headless document dependency closure.
+      if ((standard && /^_tkinter(?:\.|$)/.test(item.name)) || omitted.has(item.name) || /\.(?:pyc|pyo)$/.test(item.name) || (standard && item.name === 'site-packages')) continue
+      const path = resolve(source, item.name), dest = `${target}/${item.name}`
+      if (item.isDirectory()) walk(path, dest, standard)
+      else if (item.isFile()) files.push(pin(path, dest))
+      else fail('NATIVE_DOCUMENT_TOOLCHAIN_UNSAFE')
+    }
+  }
+  walk(realpathSync(info.stdlib), library, true)
+  for (const name of info.packages) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) fail('NATIVE_DOCUMENT_PACKAGE_INVALID')
+    const source = resolve(realpathSync(info.platlib), name)
+    if (lstatSync(source).isSymbolicLink()) fail('NATIVE_DOCUMENT_TOOLCHAIN_UNSAFE')
+    walk(source, `${library}/site-packages/${name}`)
+  }
+  files.push(pin(probePath, DOCUMENT_PROBE), pin(pdfProbePath, PDF_PROBE), pin(readmePath, '/usr/lib/cyf-documents/README.md'))
+  // Shared objects may reference bundled libraries outside /usr. Only those
+  // measured dependencies are copied into the namespace, never their parents.
+  validateNativeExecutionToolchain({ shell: base.shell, files })
+  const ldd = realpathSync('/usr/bin/ldd')
+  validateNativeExecutionToolchain({ shell: base.shell, files: [...base.files, pin(ldd, '/usr/bin/ldd')] })
+  const targets = new Map(files.map(file => [file.sandboxPath, file]))
+  const binaries = files.filter(file => file.sandboxPath === '/usr/bin/python3' || /\.so(?:\.\d+)*$/.test(file.sandboxPath))
+  for (const binary of binaries) {
+    const result = spawnSync(ldd, [binary.sourcePath], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', LANG: 'C' } })
+    if (result.status !== 0 || /=> not found/.test(result.stdout)) throw Object.assign(new Error('NATIVE_DOCUMENT_DEPENDENCIES_UNVERIFIED'), { code: 'NATIVE_DOCUMENT_DEPENDENCIES_UNVERIFIED', file: binary.sourcePath, diagnostic: result.stdout || result.stderr })
+    for (const path of result.stdout.match(/\/[^\s()]+/g) || []) {
+      const target = /^\/(?:usr\/)?lib(?:64)?\//.test(path) ? path : `/usr/lib/${basename(path)}`
+      const file = pin(path, target), old = targets.get(target)
+      if (old && old.sha256 !== file.sha256) fail('NATIVE_DOCUMENT_LIBRARY_CONFLICT')
+      if (!old) { targets.set(target, file); files.push(file) }
+    }
+  }
+  return validateNativeExecutionToolchain({ shell: base.shell, files })
+}
+
+// Load the installed immutable image off the WS thread. No Python, ldd or
+// browser discovery at startup; those belong to installation preparation.
+if (!isMainThread && workerData?.kind === 'native-toolchain-image-load') {
+  const started = performance.now()
+  try {
+    const result = readNativeToolchainImage(resolve(root, '.sandbox-toolchain'))
+    parentPort.postMessage({ ...result, timings: [{ phase: 'image-load', durationMs: performance.now() - started }] })
+  } catch (error) { parentPort.postMessage({ code: error.code || 'NATIVE_TOOLCHAIN_IMAGE_REQUIRED' }) }
+}
+
+const loadSharedToolchain = () => new Promise((resolve, reject) => {
+  const worker = new Worker(new URL(import.meta.url), { execArgv: [], workerData: { kind: 'native-toolchain-image-load' } })
+  let result
+  worker.once('message', value => { result = value })
+  worker.once('error', reject)
+  worker.once('exit', async () => {
+    // Fixed stage names and numeric timings only: never log provider data or local paths.
+    for (const timing of result?.timings || []) console.info(JSON.stringify({ event: 'native-toolchain-timing', ...timing }))
+    if (!result?.toolchain) { reject(Object.assign(new Error(result?.code || 'NATIVE_EXECUTION_TOOLCHAIN_REQUIRED'), { code: result?.code || 'NATIVE_EXECUTION_TOOLCHAIN_REQUIRED' })); return }
+    const started = performance.now()
+    try {
+      const toolchain = await validateNativeExecutionToolchainAsync(result.toolchain)
+      resolve(Object.freeze({ toolchain, documentFailure: result.documentFailure, browserFailure: result.browserFailure }))
+    } catch (error) { reject(error) }
+    finally { console.info(JSON.stringify({ event: 'native-toolchain-timing', phase: 'final-verification', durationMs: performance.now() - started })) }
+  })
+})
+
+// One slot, not a cache per Agent/skill/request. The installed image is fixed by
+// this installed module and the process executable; subjects contribute no paths.
+// Identity changes cannot reuse the slot. The existing verifier still detects
+// file/ancestor drift before attachment, and before every execution layout.
+export function createNativeToolchainInitializer({ measure = loadSharedToolchain,
+  verify = validateNativeExecutionToolchain,
+  identity = () => `${process.geteuid()}:${process.getegid()}:${realpathSync(process.execPath)}` } = {}) {
+  let shared = null
+  const acquire = () => {
+    const key = identity()
+    if (!shared || shared.key !== key) {
+      const entry = { key, promise: null }
+      entry.promise = Promise.resolve().then(measure).catch(error => {
+        if (shared === entry) shared = null
+        throw error
+      })
+      shared = entry
+    }
+    return shared
+  }
+  return async runtime => {
+    if (runtime.disposed) return null
+    if (runtime.nativeToolchainPending) return runtime.nativeToolchainPending
+    if (runtime.nativeToolchain) return runtime.nativeToolchain
+    const entry = acquire()
+    const pending = entry.promise.then(result => {
+      if (runtime.disposed) return null
+      // A changed execution identity must not attach a result measured by its predecessor.
+      if (identity() !== entry.key) fail('NATIVE_EXECUTION_TOOLCHAIN_IDENTITY_CHANGED')
+      let verified
+      try { verified = verify(result.toolchain) }
+      catch (error) { if (shared === entry) shared = null; throw error }
+      runtime.nativeDocumentMeasurementFailure = result.documentFailure ? { stage: 'toolchain', code: result.documentFailure } : null
+      runtime.nativeBrowserMeasurementFailure = result.browserFailure ? { stage: 'toolchain', code: result.browserFailure } : null
+      runtime.nativeToolchain = verified
+      return verified
+    })
+    runtime.nativeToolchainPending = pending
+    try { return await pending }
+    finally { if (runtime.nativeToolchainPending === pending) runtime.nativeToolchainPending = null }
+  }
+}
+
+export const initializeNativeToolchain = createNativeToolchainInitializer()

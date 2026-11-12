@@ -1,0 +1,18 @@
+pkgs/
+
+node_modules
+
+# Private credentials, host state and local-only history
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+.evidence/
+node_modules/
+__pycache__/
+*.py[cod]

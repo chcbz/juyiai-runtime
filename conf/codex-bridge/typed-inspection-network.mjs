@@ -1,0 +1,361 @@
+import { waitForSandboxStartup } from './sandbox-startup.mjs'
+import { spawn } from 'node:child_process'
+import { inspectExecutable, fileStamp } from './executable-integrity.mjs'
+import { createHash } from 'node:crypto'
+import { readFileSync, readlinkSync, readdirSync, statSync } from 'node:fs'
+import { createServer as createHttpServer } from 'node:http'
+import { connect, createServer as createNetServer } from 'node:net'
+
+const fail = (code, message = code) => { const error = new Error(message); error.code = code; throw error }
+const sha256File = path => createHash('sha256').update(readFileSync(path)).digest('hex')
+const processStat = pid => {
+  const raw = readFileSync(`/proc/${pid}/stat`, 'utf8'); const fields = raw.slice(raw.lastIndexOf(') ') + 2).trim().split(/\s+/)
+  return { ppid: Number(fields[1]), startticks: fields[19] }
+}
+const namespaceIdentity = pid => { const stat = statSync(`/proc/${pid}/ns/net`, { bigint: true }); return { dev: String(stat.dev), ino: String(stat.ino), link: readlinkSync(`/proc/${pid}/ns/net`) } }
+const sameNamespace = (left, right) => left.dev === right.dev && left.ino === right.ino && left.link === right.link
+const digestHex = value => String(value || '').replace(/^sha256:/, '')
+const sameExecutable = (left, right) => left.dev === right.dev && left.ino === right.ino && left.size === right.size && digestHex(left.sha256) === digestHex(right.sha256)
+const descendantOf = (pid, rootPid) => {
+  let current = pid; const seen = new Set()
+  while (current > 1 && !seen.has(current)) { if (current === rootPid) return true; seen.add(current); try { current = processStat(current).ppid } catch { return false } }
+  return false
+}
+const defaultProcessInspector = () => ({
+  currentPid: () => process.pid,
+  stat: processStat,
+  namespace: namespaceIdentity,
+  executable: pid => inspectExecutable(`/proc/${pid}/exe`),
+  executableStamp: pid => fileStamp(statSync(`/proc/${pid}/exe`, { bigint: true })),
+  pids: () => readdirSync('/proc').filter(value => /^[1-9][0-9]*$/.test(value)).map(Number),
+  descendantOf
+})
+const exactAuthority = url => `${url.hostname.includes(':') ? `[${url.hostname}]` : url.hostname}:${url.port || '443'}`.toLowerCase()
+const positiveInteger = value => Number.isSafeInteger(value) && value > 0
+const cancelled = signal => {
+  if (signal?.aborted) fail('TYPED_INSPECTION_EGRESS_CANCELLED')
+}
+
+export const buildProviderTlsProbe = ({ timeoutSeconds, proxyPort, authority, host, caPath }) => String.raw`import socket,ssl,sys,json,hashlib
+t=${JSON.stringify(timeoutSeconds)};proxy=('10.0.2.2',${proxyPort});authority=${JSON.stringify(authority)};host=${JSON.stringify(host)};ca=${JSON.stringify(caPath)}
+s=socket.create_connection(proxy,t);s.settimeout(t);s.sendall(('CONNECT '+authority+' HTTP/1.1\r\nHost: '+authority+'\r\n\r\n').encode('ascii'));d=b''
+while b'\r\n\r\n' not in d and len(d)<4096:
+ chunk=s.recv(4096)
+ if not chunk:break
+ d+=chunk
+if b' 200 ' not in d.split(b'\r\n',1)[0]:print(d[:128].decode('ascii','replace'));sys.exit(9)
+ctx=ssl.create_default_context(cafile=ca);tls=ctx.wrap_socket(s,server_hostname=host);cert=tls.getpeercert(binary_form=True);print(json.dumps({'protocol':tls.version(),'peerCertificateSha256':'sha256:'+hashlib.sha256(cert).hexdigest()}));tls.close()
+`
+
+export const buildRestrictedNetworkProbe = ({ timeoutSeconds, proxyPort, canaryPort }) => String.raw`import socket,sys
+t=${JSON.stringify(timeoutSeconds)};p=${proxyPort};cport=${canaryPort}
+def c(host,port,payload=b''):
+ s=socket.socket();s.settimeout(t)
+ try:
+  r=s.connect_ex((host,port))
+  if r:return ('blocked',b'')
+  if payload:s.sendall(payload)
+  d=b''
+  try:
+   while True:
+    chunk=s.recv(128)
+    if not chunk:
+     if payload:sys.stderr.write('phase=recv error=EOF\n')
+     break
+    d+=chunk
+    if not payload or b'\r\n' in d or len(d)>=4096:break
+  except Exception as exc:sys.stderr.write('phase=recv error='+type(exc).__name__+'\n')
+  return ('connected',d)
+ finally:s.close()
+a=c('10.0.2.2',p,b'CONNECT forbidden.invalid:443 HTTP/1.1\r\nHost: forbidden.invalid:443\r\n\r\n')
+b=c('10.0.2.2',cport)
+c=c('1.1.1.1',443)
+print(a[0],a[1].split(b'\r\n',1)[0].decode('ascii','replace'),b[0],c[0])
+sys.exit(0 if a[0]=='connected' and b' 403 ' in a[1].split(b'\r\n',1)[0] and b[0]=='blocked' and c[0]=='blocked' else 7)
+`
+
+export const restrictedProviderNetworkPolicy = (baseUrl, { connectTimeoutMs, additionalOrigins = [] } = {}) => {
+  let url
+  try { url = new URL(baseUrl) } catch { fail('TYPED_INSPECTION_PROVIDER_ORIGIN_REQUIRED') }
+  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) fail('TYPED_INSPECTION_PROVIDER_ORIGIN_REQUIRED')
+  if (!positiveInteger(connectTimeoutMs)) fail('TYPED_INSPECTION_NETWORK_CONNECT_TIMEOUT_REQUIRED')
+  if (!Array.isArray(additionalOrigins)) fail('TYPED_INSPECTION_EGRESS_ORIGINS_INVALID')
+  const origins = [...new Set(additionalOrigins.map(origin => {
+    let extra; try { extra = new URL(origin) } catch { fail('TYPED_INSPECTION_EGRESS_ORIGINS_INVALID') }
+    if (typeof origin !== 'string' || extra.protocol !== 'https:' || extra.origin !== origin || extra.username || extra.password) fail('TYPED_INSPECTION_EGRESS_ORIGINS_INVALID')
+    return origin
+  }))].sort()
+  return Object.freeze({
+    schemaVersion: 1,
+    providerOrigin: url.origin,
+    providerAuthority: exactAuthority(url),
+    ...(origins.length ? { additionalOrigins: Object.freeze(origins) } : {}),
+    transport: 'fixed-connect-proxy-v1',
+    connectTimeoutMs: String(connectTimeoutMs),
+    namespace: 'private-slirp4netns-v1',
+    slirpMountIsolation: 'unshare-mount-recursive-private-v1',
+    slirpTarget: 'exact-owner-netns-path-v1',
+    directEgress: 'nft-default-drop-readback-v1',
+    hostLoopback: 'proxy-port-only',
+    dns: 'proxy-side-only'
+  })
+}
+
+const listen = server => new Promise((resolve, reject) => {
+  server.once('error', reject)
+  server.listen(0, '127.0.0.1', () => { server.off('error', reject); resolve(server.address()) })
+})
+const closeServer = server => new Promise(resolve => {
+  try { server.closeAllConnections?.() } catch {}
+  server.close(() => resolve())
+})
+const collectChild = (child, signal, input = null) => new Promise((resolve, reject) => {
+  let stdout = ''; let stderr = ''; let settled = false; let stdinError = null
+  const cleanup = () => { signal?.removeEventListener('abort', abort); child.off('error', error); child.off('close', close) }
+  const finish = (callback, value) => { if (settled) return; settled = true; cleanup(); callback(value) }
+  const abort = () => { try { if (child.exitCode === null) child.kill('SIGKILL') } catch {}; const errorValue = new Error('TYPED_INSPECTION_EGRESS_CANCELLED'); errorValue.code = 'TYPED_INSPECTION_EGRESS_CANCELLED'; finish(reject, errorValue) }
+  const error = value => finish(reject, value)
+  const close = (status, exitSignal) => status === 0 && stdinError
+    ? finish(reject, stdinError) : finish(resolve, { status, signal: exitSignal, stdout, stderr })
+  child.stdout?.on('data', chunk => { if (stdout.length < 65536) stdout += chunk.toString('utf8') })
+  child.stderr?.on('data', chunk => { if (stderr.length < 65536) stderr += chunk.toString('utf8') })
+  child.once('error', error); child.once('close', close); signal?.addEventListener('abort', abort, { once: true })
+  // A rejected namespace command may close stdin before the rules are written.
+  // Keep its exit status/stderr rather than crashing the whole Runtime on EPIPE.
+  child.stdin?.on?.('error', value => { stdinError = value })
+  if (input === null) child.stdin?.end(); else child.stdin?.end(input)
+})
+const waitForSlirpReady = (child, signal) => new Promise((resolve, reject) => {
+  let settled = false; const ready = child.stdio?.[3]
+  const cleanup = () => { signal?.removeEventListener('abort', abort); child.off('error', error); child.off('close', close); ready?.off('data', data) }
+  const finish = (callback, value) => { if (settled) return; settled = true; cleanup(); callback(value) }
+  const abort = () => { try { if (child.exitCode === null) child.kill('SIGKILL') } catch {}; const value = new Error('TYPED_INSPECTION_EGRESS_CANCELLED'); value.code = 'TYPED_INSPECTION_EGRESS_CANCELLED'; finish(reject, value) }
+  const error = value => finish(reject, value)
+  const close = () => { const value = new Error('TYPED_INSPECTION_EGRESS_SLIRP_FAILED'); value.code = 'TYPED_INSPECTION_EGRESS_SLIRP_FAILED'; finish(reject, value) }
+  const data = chunk => { if (chunk.length > 0) finish(resolve) }
+  if (!ready) { const value = new Error('TYPED_INSPECTION_EGRESS_SLIRP_READY_FD_MISSING'); value.code = 'TYPED_INSPECTION_EGRESS_SLIRP_READY_FD_MISSING'; reject(value); return }
+  child.once('error', error); child.once('close', close); ready.once('data', data); signal?.addEventListener('abort', abort, { once: true })
+})
+const hostCanaryControl = (port, timeoutMs) => new Promise((resolve, reject) => {
+  const socket = connect(port, '127.0.0.1'); let received = ''
+  socket.setTimeout(timeoutMs)
+  socket.on('data', chunk => { received += chunk.toString('utf8') })
+  socket.once('timeout', () => { socket.destroy(); reject(Object.assign(new Error('TYPED_INSPECTION_EGRESS_HOST_CANARY_TIMEOUT'), { code: 'TYPED_INSPECTION_EGRESS_HOST_CANARY_TIMEOUT' })) })
+  socket.once('error', reject)
+  socket.once('close', () => {
+    if (received === 'cyf-typed-inspection-host-canary\n') resolve(Object.freeze({ reachable: true, port }))
+    else reject(Object.assign(new Error('TYPED_INSPECTION_EGRESS_HOST_CANARY_INVALID'), { code: 'TYPED_INSPECTION_EGRESS_HOST_CANARY_INVALID' }))
+  })
+})
+const chainBody = (readback, name) => {
+  const match = readback.match(new RegExp(`chain\\s+${name}\\s*\\{([\\s\\S]*?)\\n\\s*\\}`))
+  return match?.[1] || ''
+}
+export const verifyRestrictedNftReadback = (readback, proxyPort, canaryPort) => {
+  const input = chainBody(readback, 'input'); const output = chainBody(readback, 'output')
+  const inputAccepts = input.split(/\r?\n/).map(line => line.trim()).filter(line => /\baccept\b/.test(line))
+  const outputLines = output.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+  const outputAccepts = outputLines.filter(line => /\baccept\b/.test(line))
+  const terminalReject = 'reject with icmpx admin-prohibited'
+  const proxyRule = new RegExp(`^ip daddr 10\\.0\\.2\\.2 tcp dport ${proxyPort} accept$`)
+  if (!/policy drop;/.test(input) || !/policy drop;/.test(output) || inputAccepts.length !== 2 || outputAccepts.length !== 3 ||
+      !inputAccepts.includes('ct state established,related accept') || !inputAccepts.includes('iifname "lo" accept') ||
+      !outputAccepts.includes('ct state established,related accept') || !outputAccepts.includes('oifname "lo" accept') ||
+      !outputAccepts.some(line => proxyRule.test(line)) || outputLines.at(-1) !== terminalReject ||
+      outputLines.filter(line => /\breject\b/.test(line)).length !== 1 || readback.includes(`dport ${canaryPort}`)) fail('TYPED_INSPECTION_EGRESS_NFT_READBACK_MISMATCH', `nft exact readback ${JSON.stringify({ proxyPort, canaryPort, readback })}`)
+  return Object.freeze({ validated: true, digest: `sha256:${createHash('sha256').update(readback).digest('hex')}` })
+}
+
+// The network namespace can belong to an ancestor of the sandbox process's
+// user namespace (e.g. bwrap's final uid-65534 view). Join its kernel-reported
+// owner, not /proc/<pid>/ns/user. No sudo, host capabilities or root service.
+const namespaceEntry = `import os,sys,fcntl
+net=os.open('/proc/'+sys.argv[2]+'/ns/net',os.O_RDONLY)
+user=fcntl.ioctl(net,0xb701) # NS_GET_USERNS from linux/nsfs.h
+os.set_inheritable(user,True)
+args=[sys.argv[1],'--preserve-credentials','--user=/proc/self/fd/'+str(user)]
+if sys.argv[3]=='network':
+ os.set_inheritable(net,True)
+ args.append('--net=/proc/self/fd/'+str(net))
+args+=['--']+sys.argv[4:]
+os.execv(sys.argv[1],args)
+`
+export const ownedNamespaceCommand = (pid, command, { network = true, pythonBin = '/usr/bin/python3', nsenterBin = '/usr/bin/nsenter' } = {}) => ({
+  executable: pythonBin,
+  args: ['-c', namespaceEntry, nsenterBin, String(pid), network ? 'network' : 'user', ...command]
+})
+
+// slirp stays on the host network side, but needs the netns-owning user namespace
+// to configure tap0 and create a recursively private mount tree. Preserve the
+// sandbox/seccomp/ready-fd restrictions; never retry without mount isolation.
+export const isolatedSlirpCommand = (slirpBin, pid, options = {}) => ownedNamespaceCommand(pid,
+  ['/usr/bin/unshare', '--mount', '--propagation', 'private', '--', slirpBin,
+    '--configure', '--mtu=65520', '--disable-dns', '--enable-sandbox',
+    '--enable-seccomp', '--ready-fd=3', '--netns-type=path', `/proc/${pid}/ns/net`, 'tap0'],
+  { ...options, network: false })
+
+export class RestrictedProviderEgress {
+  constructor({ providerBaseUrl, networkConnectTimeoutMs, additionalOrigins = [], slirpBin = '/usr/bin/slirp4netns', nftBin = '/usr/sbin/nft', nsenterBin = '/usr/bin/nsenter', pythonBin = '/usr/bin/python3', spawnFn = spawn, processInspector = defaultProcessInspector() } = {}) {
+    this.policy = restrictedProviderNetworkPolicy(providerBaseUrl, { connectTimeoutMs: networkConnectTimeoutMs, additionalOrigins })
+    this.networkConnectTimeoutMs = networkConnectTimeoutMs
+    this.slirpBin = slirpBin; this.nftBin = nftBin; this.nsenterBin = nsenterBin; this.pythonBin = pythonBin
+    this.spawnFn = spawnFn; this.processInspector = processInspector; this.server = null; this.canaryServer = null; this.slirp = null; this.port = 0; this.canaryPort = 0; this.attestation = null; this.owner = null; this.hostCanary = null
+    this.lifecycle = new AbortController()
+    this.sockets = new Set()
+  }
+  async bindOwner(child, expectedWrapperExecutable, { signal = this.lifecycle.signal } = {}) {
+    const began = performance.now(), phases = {}, counts = { rounds: 0, pids: 0, descendants: 0 }; let ready = false
+    const sync = (phase, fn) => { const at = performance.now(); try { return fn() } finally { phases[phase] = (phases[phase] || 0) + performance.now() - at } }
+    const asyncPhase = async (phase, fn) => { const at = performance.now(); try { return await fn() } finally { phases[phase] = (phases[phase] || 0) + performance.now() - at } }
+    try {
+      if (this.owner || !child || !Number.isInteger(child.pid) || child.pid <= 0 || !expectedWrapperExecutable?.sha256) fail('TYPED_INSPECTION_EGRESS_OWNER_INVALID')
+      cancelled(signal)
+      const inspector = this.processInspector; const currentPid = inspector.currentPid(); const rootPid = child.pid; const hostNamespace = inspector.namespace(currentPid)
+      const rootStat = inspector.stat(rootPid); const rootExecutable = await asyncPhase('rootExecutableMs', () => inspector.executable(rootPid))
+      if (rootStat.ppid !== currentPid || child.exitCode !== null || !sameExecutable(rootExecutable, expectedWrapperExecutable)) fail('TYPED_INSPECTION_EGRESS_OWNER_INVALID')
+      // bwrap reports its stable PID-namespace reaper. Bind the namespace owner,
+      // not an app executable which may not have reached exec/initialize yet.
+      const startup = await asyncPhase('startupInfoMs', () => waitForSandboxStartup(child, signal))
+      cancelled(signal)
+      const pid = startup.pid
+      if (child.exitCode !== null || pid === rootPid || !sync('ancestryMs', () => inspector.descendantOf(pid, rootPid))) fail('TYPED_INSPECTION_EGRESS_OWNER_INVALID')
+      const stat = inspector.stat(pid); const namespace = inspector.namespace(pid)
+      if (sameNamespace(namespace, hostNamespace)) fail('TYPED_INSPECTION_EGRESS_SANDBOX_NAMESPACE_SHARED')
+      if (namespace.ino !== startup.netNamespaceIno) fail('TYPED_INSPECTION_EGRESS_OWNER_DRIFT')
+      const executable = await asyncPhase('holderExecutableMs', () => inspector.executable(pid))
+      if (!sameExecutable(executable, expectedWrapperExecutable)) fail('TYPED_INSPECTION_EGRESS_OWNER_INVALID')
+      const holder = { pid, startticks: stat.startticks, namespace, executable }
+      counts.descendants = 1
+      this.owner = Object.freeze({ child, rootPid, rootStartticks: rootStat.startticks, rootPpid: rootStat.ppid, rootExecutable: Object.freeze({ ...rootExecutable }), hostNamespace: Object.freeze({ ...hostNamespace }), holder: Object.freeze({ ...holder, namespace: Object.freeze({ ...holder.namespace }), executable: Object.freeze({ ...holder.executable }) }) })
+      await asyncPhase('finalOwnerCheckMs', () => this._assertOwner())
+      ready = true
+      return Object.freeze({ rootPid, rootStartticks: rootStat.startticks, pid: holder.pid, startticks: holder.startticks, namespace: Object.freeze({ ...holder.namespace }) })
+    } finally {
+      // One aggregate per bind; no per-process log, provider URL or file bytes.
+      try { console.info(JSON.stringify({ event: 'egress-owner-bind-timing', atMs: Date.now(), ready,
+        durationMs: performance.now() - began, counts, phases })) } catch {}
+    }
+  }
+  async _assertOwner() {
+    const owner = this.owner; const inspector = this.processInspector; const currentPid = inspector.currentPid()
+    if (!owner || owner.child.pid !== owner.rootPid || owner.child.exitCode !== null) fail('TYPED_INSPECTION_EGRESS_OWNER_LOST')
+    let rootStat; let rootExecutable; let holderStat; let holderNamespace; let holderExecutable; let currentNamespace
+    try {
+      rootStat = inspector.stat(owner.rootPid); rootExecutable = await inspector.executable(owner.rootPid)
+      holderStat = inspector.stat(owner.holder.pid); holderNamespace = inspector.namespace(owner.holder.pid); holderExecutable = await inspector.executable(owner.holder.pid); currentNamespace = inspector.namespace(currentPid)
+    } catch { fail('TYPED_INSPECTION_EGRESS_OWNER_LOST') }
+    if (inspector.executableStamp && (inspector.executableStamp(owner.rootPid) !== rootExecutable.stamp || inspector.executableStamp(owner.holder.pid) !== holderExecutable.stamp)) fail('TYPED_INSPECTION_EGRESS_OWNER_DRIFT')
+    if (owner.child.exitCode !== null || inspector.stat(owner.rootPid).startticks !== rootStat.startticks
+        || inspector.stat(owner.rootPid).ppid !== rootStat.ppid || inspector.stat(owner.holder.pid).startticks !== holderStat.startticks
+        || !sameNamespace(inspector.namespace(owner.holder.pid), holderNamespace) || !sameNamespace(inspector.namespace(currentPid), currentNamespace)) fail('TYPED_INSPECTION_EGRESS_OWNER_DRIFT')
+    if (rootStat.startticks !== owner.rootStartticks || rootStat.ppid !== owner.rootPpid || owner.rootPpid !== currentPid || !sameExecutable(rootExecutable, owner.rootExecutable) ||
+        holderStat.startticks !== owner.holder.startticks || !sameNamespace(holderNamespace, owner.holder.namespace) || sameNamespace(holderNamespace, currentNamespace) || !sameNamespace(currentNamespace, owner.hostNamespace) ||
+        !sameExecutable(holderExecutable, owner.holder.executable) || !inspector.descendantOf(owner.holder.pid, owner.rootPid)) fail('TYPED_INSPECTION_EGRESS_OWNER_DRIFT')
+    for (const pid of inspector.pids()) {
+      let candidate
+      try { candidate = inspector.namespace(pid) } catch { continue }
+      if (sameNamespace(candidate, owner.holder.namespace) && !inspector.descendantOf(pid, owner.rootPid)) fail('TYPED_INSPECTION_EGRESS_NAMESPACE_FOREIGN_PROCESS')
+    }
+    return owner
+  }
+  async start() {
+    if (this.server) return this
+    // CONNECT sockets are detached from HTTP ownership: closeAllConnections
+    // does not close them. Keep only live transport resources until disposal.
+    const track = socket => {
+      this.sockets.add(socket)
+      socket.once('close', () => this.sockets.delete(socket))
+      socket.on('error', () => socket.destroy())
+      return socket
+    }
+    const server = createHttpServer((_request, response) => { response.writeHead(405, { Connection: 'close' }); response.end() })
+    server.on('connection', track)
+    server.on('connect', (request, client, head) => {
+      const authority = String(request.url || '').toLowerCase()
+      const destination = [this.policy.providerOrigin, ...(this.policy.additionalOrigins || [])].find(origin => exactAuthority(new URL(origin)) === authority)
+      if (!destination) { client.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return }
+      const provider = new URL(destination); const upstream = track(connect(Number(provider.port || 443), provider.hostname))
+      const abort = () => { try { client.destroy() } catch {}; try { upstream.destroy() } catch {} }
+      upstream.setTimeout(this.networkConnectTimeoutMs, abort); upstream.once('error', abort); client.once('error', abort)
+      upstream.once('connect', () => {
+        upstream.setTimeout(0); client.write('HTTP/1.1 200 Connection Established\r\n\r\n')
+        if (head?.length) upstream.write(head); client.pipe(upstream); upstream.pipe(client)
+      })
+    })
+    const canaryServer = createNetServer(socket => track(socket).end('cyf-typed-inspection-host-canary\n'))
+    try {
+      const address = await listen(server); const canaryAddress = await listen(canaryServer)
+      this.server = server; this.port = address.port; this.canaryServer = canaryServer; this.canaryPort = canaryAddress.port
+      this.hostCanary = await hostCanaryControl(this.canaryPort, this.networkConnectTimeoutMs)
+      return this
+    } catch (error) {
+      for (const socket of this.sockets) socket.destroy()
+      this.sockets.clear()
+      await closeServer(server).catch(() => {}); await closeServer(canaryServer).catch(() => {}); throw error
+    }
+  }
+  get proxyUrl() { if (!this.port) fail('TYPED_INSPECTION_EGRESS_NOT_STARTED'); return `http://10.0.2.2:${this.port}` }
+  async _nsenter(pid, args, { input = null, signal = this.lifecycle.signal } = {}) {
+    cancelled(signal); await this._assertOwner(); cancelled(signal)
+    const command = ownedNamespaceCommand(pid, args, { pythonBin: this.pythonBin, nsenterBin: this.nsenterBin })
+    const child = this.spawnFn(command.executable, command.args, { stdio: ['pipe', 'pipe', 'pipe'], env: { PATH: '' } })
+    const result = await collectChild(child, signal, input)
+    await this._assertOwner(); cancelled(signal); return result
+  }
+  async attach({ signal = this.lifecycle.signal } = {}) {
+    if (!this.server || !this.canaryServer || !this.hostCanary?.reachable) fail('TYPED_INSPECTION_EGRESS_ATTACH_INVALID')
+    cancelled(signal); const owner = await this._assertOwner(); const pid = owner.holder.pid
+    // Keep fail-closed policies and the exact allowlist. Explicitly reject denied
+    // output so both real negative probes finish without two transport timeouts.
+    // This changes no allowed destination and keeps every namespace probe.
+    const rules = `table inet cyf_typed_inspection {\n chain input { type filter hook input priority 0; policy drop; ct state established,related accept; iifname "lo" accept; }\n chain output { type filter hook output priority 0; policy drop; ct state established,related accept; oifname "lo" accept; ip daddr 10.0.2.2 tcp dport ${this.port} accept; reject with icmpx type admin-prohibited; }\n}\n`
+    const applied = await this._nsenter(pid, [this.nftBin, '-f', '-'], { input: rules, signal })
+    if (applied.status !== 0) fail('TYPED_INSPECTION_EGRESS_NFT_FAILED', applied.stderr || 'nft failed')
+    const listed = await this._nsenter(pid, [this.nftBin, 'list', 'table', 'inet', 'cyf_typed_inspection'], { signal })
+    if (listed.status !== 0) fail('TYPED_INSPECTION_EGRESS_NFT_READBACK_FAILED', listed.stderr || 'nft readback failed')
+    const ruleReadback = verifyRestrictedNftReadback(listed.stdout, this.port, this.canaryPort)
+    // _nsenter readback already checked ownership; no async gap here.
+    const slirpCommand = isolatedSlirpCommand(this.slirpBin, pid, { pythonBin: this.pythonBin, nsenterBin: this.nsenterBin })
+    this.slirp = this.spawnFn(slirpCommand.executable, slirpCommand.args, { stdio: ['ignore', 'pipe', 'pipe', 'pipe'], env: { PATH: '' } })
+    let stderr = ''; this.slirp.stderr?.on('data', chunk => { if (stderr.length < 65536) stderr += chunk.toString('utf8') })
+    try { await waitForSlirpReady(this.slirp, signal) } catch (error) { if (error.code === 'TYPED_INSPECTION_EGRESS_SLIRP_FAILED' && stderr.trim()) error.message = stderr.trim(); throw error }
+    await this._assertOwner()
+    const routes = readFileSync(`/proc/${pid}/net/route`, 'utf8')
+    if (!/\btap0\b/.test(routes)) fail('TYPED_INSPECTION_EGRESS_SLIRP_ROUTE_MISSING')
+    const timeoutSeconds = this.networkConnectTimeoutMs / 1000
+    const probe = buildRestrictedNetworkProbe({ timeoutSeconds, proxyPort: this.port, canaryPort: this.canaryPort })
+    const tested = await this._nsenter(pid, [this.pythonBin, '-c', probe], { signal })
+    if (tested.status !== 0) fail('TYPED_INSPECTION_EGRESS_CANARY_FAILED', `${tested.stdout || ''}${tested.stderr || ''}`.trim())
+    this.attestation = Object.freeze({ schemaVersion: 1, measured: true, policy: this.policy, hostCanaryReachableControl: true, forbiddenConnectRejected: true, otherHostPortBlocked: true, sandboxCanaryBlocked: true, nftDefaultDropReadback: true, nftRulesDigest: ruleReadback.digest, directInternetProbeBlocked: true, directInternetBlocked: true })
+    return this.attestation
+  }
+  async measureAllowedConnect({ signal = this.lifecycle.signal } = {}) {
+    const owner = await this._assertOwner(); const provider = new URL(this.policy.providerOrigin); const authority = this.policy.providerAuthority; const timeoutSeconds = this.networkConnectTimeoutMs / 1000
+    const probe = `import socket,sys\ns=socket.create_connection(('10.0.2.2',${this.port}),${JSON.stringify(timeoutSeconds)});s.sendall(b'CONNECT ${authority} HTTP/1.1\\r\\nHost: ${authority}\\r\\n\\r\\n');d=s.recv(128);print(d.split(b'\\r\\n',1)[0].decode('ascii','replace'));s.close();sys.exit(0 if b' 200 ' in d else 9)\n`
+    const tested = await this._nsenter(owner.holder.pid, [this.pythonBin, '-c', probe], { signal })
+    if (tested.status !== 0) fail('TYPED_INSPECTION_EGRESS_ALLOWED_CANARY_FAILED', `${tested.stdout || ''}${tested.stderr || ''}`.trim())
+    return Object.freeze({ measured: true, providerAuthority: authority, connectEstablished: true, targetHost: provider.hostname, targetPort: Number(provider.port || 443) })
+  }
+  async measureAllowedTls({ sandboxPath, sha256: expectedDigest }, { signal = this.lifecycle.signal } = {}) {
+    const owner = await this._assertOwner(); const provider = new URL(this.policy.providerOrigin); const authority = this.policy.providerAuthority; const timeoutSeconds = this.networkConnectTimeoutMs / 1000
+    if (sandboxPath !== '/trust/ca-bundle.pem' || !/^sha256:[a-f0-9]{64}$/.test(expectedDigest || '')) fail('TYPED_INSPECTION_EGRESS_CA_BINDING_INVALID')
+    const caPath = `/proc/${owner.holder.pid}/root${sandboxPath}`
+    if (`sha256:${sha256File(caPath)}` !== expectedDigest) fail('TYPED_INSPECTION_EGRESS_CA_BINDING_INVALID')
+    const probe = buildProviderTlsProbe({ timeoutSeconds, proxyPort: this.port, authority, host: provider.hostname, caPath })
+    const tested = await this._nsenter(owner.holder.pid, [this.pythonBin, '-c', probe], { signal })
+    if (tested.status !== 0) fail('TYPED_INSPECTION_EGRESS_TLS_FAILED', `${tested.stdout || ''}${tested.stderr || ''}`.trim())
+    let readback; try { readback = JSON.parse(String(tested.stdout || '').trim()) } catch { fail('TYPED_INSPECTION_EGRESS_TLS_READBACK_INVALID') }
+    if (!/^TLSv1\.[23]$/.test(readback?.protocol || '') || !/^sha256:[a-f0-9]{64}$/.test(readback?.peerCertificateSha256 || '')) fail('TYPED_INSPECTION_EGRESS_TLS_READBACK_INVALID')
+    return Object.freeze({ measured: true, providerAuthority: authority, tlsVerified: true, protocol: readback.protocol, peerCertificateSha256: readback.peerCertificateSha256, caBundleSha256: expectedDigest })
+  }
+  async dispose() {
+    if (!this.lifecycle.signal.aborted) this.lifecycle.abort()
+    try { if (this.slirp?.exitCode === null) this.slirp.kill('SIGTERM') } catch {}
+    this.slirp = null
+    const servers = [this.server, this.canaryServer].filter(Boolean); this.server = null; this.canaryServer = null
+    const closing = servers.map(server => closeServer(server).catch(() => {}))
+    for (const socket of this.sockets) socket.destroy()
+    this.sockets.clear()
+    await Promise.all(closing)
+  }
+}

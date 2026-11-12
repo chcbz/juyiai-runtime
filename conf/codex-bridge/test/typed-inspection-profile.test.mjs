@@ -1,0 +1,595 @@
+import { EventEmitter } from 'node:events'
+import { PassThrough } from 'node:stream'
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { createServer } from 'node:net'
+import { resolve } from 'node:path'
+import { canonicalSha256 } from '../chat-runtime.mjs'
+import { AppServerAdapter } from '../app-server-adapter.mjs'
+import { buildTypedInspectionCodexConfig, buildTypedInspectionNativeAttestation, loadTypedInspectionCarrierEvidence, TypedInspectionProfileRuntime } from '../typed-inspection-profile.mjs'
+import { RestrictedProviderEgress } from '../typed-inspection-network.mjs'
+
+const enabled = process.env.CYF_TYPED_INSPECTION_NATIVE_PROBE === '1'
+
+
+const evidenceDigest = bytes => `sha256:${createHash('sha256').update(bytes).digest('hex')}`
+const carrierBinding = Object.freeze({
+  profileId: 'inspection-profile', engineContractId: 'engine-contract-v1',
+  enginePolicyDigest: `sha256:${'1'.repeat(64)}`, toolPolicyDigest: `sha256:${'2'.repeat(64)}`,
+  inputPolicyDigest: `sha256:${'3'.repeat(64)}`
+})
+const carrierInput = Object.freeze({ mediaKind: 'image', mimeType: 'image/png', carrier: 'LOCAL_IMAGE', carrierContractDigest: `sha256:${'4'.repeat(64)}` })
+const carrierEvidence = (overrides = {}) => ({
+  schemaVersion: 1, profile: carrierBinding, nativeProbeDigest: `sha256:${'5'.repeat(64)}`,
+  providerId: 'gpt', providerModel: 'gpt-5.6-terra',
+  cases: [{ ...carrierInput, status: 'PASS', sourceSha256: '6'.repeat(64), inputDigest: `sha256:${'7'.repeat(64)}`,
+    resultDigest: `sha256:${'8'.repeat(64)}`, terminalStatus: 'completed', semanticPass: true }],
+  ...overrides
+})
+const writeEvidence = (directory, value = carrierEvidence(), name = 'carrier-evidence.json') => {
+  const path = resolve(directory, name); const bytes = Buffer.from(`${JSON.stringify(value)}\n`)
+  writeFileSync(path, bytes, { mode: 0o600 }); chmodSync(path, 0o600)
+  return { path, bytes, digest: evidenceDigest(bytes) }
+}
+const loadEvidence = ({ path, digest, providerModel = 'gpt-5.6-terra', providerId = 'gpt', binding = carrierBinding } = {}) =>
+  loadTypedInspectionCarrierEvidence({ path, expectedDigest: digest, binding, supportedInputs: [carrierInput],
+    nativeProbeDigest: `sha256:${'5'.repeat(64)}`, providerId, providerModel })
+
+test('carrier readiness evidence is immutable and bound to exact profile, provider, model, source and result digests', () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'typed-inspection-carrier-evidence-')); chmodSync(root, 0o700)
+  try {
+    const written = writeEvidence(root)
+    const loaded = loadEvidence(written)
+    assert.equal(loaded.digest, written.digest)
+    assert.equal(loaded.providerModel, 'gpt-5.6-terra')
+    assert.deepEqual(loaded.cases, [{ ...carrierInput, sourceSha256: '6'.repeat(64), inputDigest: `sha256:${'7'.repeat(64)}`, resultDigest: `sha256:${'8'.repeat(64)}` }])
+    assert.throws(() => loadEvidence({ ...written, providerModel: 'gpt-5.6-sol' }), error => error.code === 'TYPED_INSPECTION_CARRIER_EVIDENCE_INVALID')
+    assert.throws(() => loadEvidence({ ...written, providerId: 'other-provider' }), error => error.code === 'TYPED_INSPECTION_CARRIER_EVIDENCE_INVALID')
+    assert.throws(() => loadEvidence({ ...written, binding: { ...carrierBinding, profileId: 'other-profile' } }), error => error.code === 'TYPED_INSPECTION_CARRIER_EVIDENCE_INVALID')
+
+    writeFileSync(written.path, Buffer.from(`${JSON.stringify(carrierEvidence({ cases: [{ ...carrierEvidence().cases[0], sourceSha256: '9'.repeat(64) }] }))}\n`), { mode: 0o600 })
+    assert.throws(() => loadEvidence(written), error => error.code === 'TYPED_INSPECTION_CARRIER_EVIDENCE_DRIFT')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('carrier readiness evidence rejects writable, relative, symlinked and incomplete files', () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'typed-inspection-carrier-evidence-negative-')); chmodSync(root, 0o700)
+  try {
+    const writable = writeEvidence(root, carrierEvidence(), 'writable.json'); chmodSync(writable.path, 0o622)
+    assert.throws(() => loadEvidence(writable), error => error.code === 'TYPED_INSPECTION_CARRIER_EVIDENCE_UNSAFE')
+    const target = writeEvidence(root, carrierEvidence(), 'target.json'); const link = resolve(root, 'link.json'); symlinkSync(target.path, link)
+    assert.throws(() => loadEvidence({ path: link, digest: target.digest }), error => error.code === 'TYPED_INSPECTION_CARRIER_EVIDENCE_UNSAFE')
+    assert.throws(() => loadEvidence({ path: 'relative.json', digest: target.digest }), error => error.code === 'TYPED_INSPECTION_CARRIER_EVIDENCE_INVALID')
+    const incomplete = writeEvidence(root, carrierEvidence({ cases: [] }), 'incomplete.json')
+    assert.throws(() => loadEvidence(incomplete), error => error.code === 'TYPED_INSPECTION_CARRIER_EVIDENCE_INCOMPLETE')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('accepted exact 1f95 local-image evidence is consumable only under its pinned digest and model', t => {
+  // Git archives retain bytes, not private deployment ownership/mode. Stage the
+  // immutable fixture as operator-owned evidence without changing its digest.
+  const root = mkdtempSync(resolve(tmpdir(), 'pinned-carrier-')); chmodSync(root, 0o700)
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const path = resolve(root, 'evidence.json')
+  writeFileSync(path, readFileSync(resolve(import.meta.dirname, '..', 'evidence', 'typed-inspection-local-image-gpt-5.6-terra-1f95df2.json')), { mode: 0o600 })
+  const binding = {
+    profileId: 'mmd-image-understanding-1f95df2-v1', engineContractId: 'codex-app-server-codex-cli-0.159.2-typed-inspection-v1',
+    enginePolicyDigest: 'sha256:d370907dd5a82c75dee79949a03ad8bb2dfd59f60856be7ac4eba247e003c5be',
+    toolPolicyDigest: 'sha256:150f82829ec43496ae09a4eb1504ed81d5e50d4283bb47f5e428f22961f70d69',
+    inputPolicyDigest: 'sha256:39a5950107a345929d852a8b95ffec823e24c2be1c6f841fd4d3402733466b34'
+  }
+  const supportedInputs = [{ mediaKind: 'image', mimeType: 'image/png', carrier: 'LOCAL_IMAGE', carrierContractDigest: 'sha256:fb699e707ec0bef6f874c285276f6cec324406f34a2a75620ba235cf36d0244e' }]
+  const loaded = loadTypedInspectionCarrierEvidence({ path, expectedDigest: 'sha256:d22de19b1b86c988c81deadb2697e5a577fdbc9abb4982ddc015fefa7fd6bdab', binding, supportedInputs,
+    nativeProbeDigest: 'sha256:3a8e6420a9188bdc7229058ce248558b5acbdcdf4c184571dfa6c90b6ceb321b', providerId: 'gpt', providerModel: 'gpt-5.6-terra' })
+  assert.equal(loaded.cases[0].sourceSha256, '7a5842eba1da2ca948f5d982cbfe80dd061b465d787ae83594daacc9318bcbd3')
+  assert.equal(loaded.cases[0].inputDigest, 'sha256:91305fa61ec6934ae79726122d3e3386669c458560813ab39176b7d5ec3deb95')
+})
+
+
+test('restricted profile explicitly enables Codex system proxy routing without embedding proxy endpoints or credentials', () => {
+  const config = buildTypedInspectionCodexConfig({
+    typedInspectionProviderId: 'gpt', typedInspectionProviderBaseUrl: 'https://provider.example/v1',
+    typedInspectionProviderWireApi: 'responses', typedInspectionProviderNetwork: 'restricted-proxy'
+  })
+  assert.equal(config.endsWith('[features]\nrespect_system_proxy = true\n'), true)
+  assert.match(config, /\[model_providers\."gpt"\]/)
+  assert.doesNotMatch(config, /HTTP_PROXY|HTTPS_PROXY|10\.0\.2\.2|bearer|api[_-]?key\s*=/i)
+  assert.doesNotMatch(buildTypedInspectionCodexConfig({}), /respect_system_proxy/)
+})
+
+test('restricted profile resolves an absolute public CA symlink into private fixed bytes instead of exposing its host target tree', async () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'typed-inspection-ca-stage-')); chmodSync(root, 0o700)
+  const materializerRoot = resolve(root, 'inputs'); const stateRoot = resolve(root, 'state'); const sourceRoot = resolve(root, 'source'); const targetRoot = resolve(root, 'target')
+  for (const directory of [materializerRoot, stateRoot, sourceRoot, targetRoot]) { mkdirSync(directory, { mode: 0o700 }); chmodSync(directory, 0o700) }
+  const target = resolve(targetRoot, 'public-ca.pem'); const link = resolve(sourceRoot, 'ca-bundle.crt')
+  const bytes = Buffer.from('-----BEGIN CERTIFICATE-----\nMIIB-public-test-only\n-----END CERTIFICATE-----\n')
+  writeFileSync(target, bytes, { mode: 0o444 }); chmodSync(target, 0o444); symlinkSync(target, link)
+  const runtime = new TypedInspectionProfileRuntime({
+    profile: { profileId: 'ca-stage', agentId: 'ca-stage-agent', codexBin: '/usr/local/bin/codex', codexHome: '/root/.codex',
+      typedInspectionProviderNetwork: 'restricted-proxy', typedInspectionProviderBaseUrl: 'https://provider.example/v1', typedInspectionNetworkConnectTimeoutMs: 1000,
+      typedInspectionCaBundlePath: link },
+    materializerRoot, stateRoot
+  })
+  try {
+    assert.equal(runtime.providerCaTrust.sourcePath, link)
+    assert.equal(runtime.providerCaTrust.resolvedSourcePath, target)
+    assert.deepEqual(readFileSync(runtime.providerCaTrust.path), bytes)
+    assert.equal(statSync(runtime.providerCaTrust.path).mode & 0o777, 0o400)
+    assert.equal(runtime.providerCaTrust.path.startsWith(`${stateRoot}/profile-resources/`), true)
+    assert.equal(runtime.providerCaTrust.path.startsWith(sourceRoot), false)
+  } finally { await runtime.dispose(); rmSync(root, { recursive: true, force: true }) }
+})
+
+test('provider-restricted initialization fails closed when native config readback does not enable system proxy routing', async () => {
+  const runtime = Object.create(TypedInspectionProfileRuntime.prototype)
+  const adapter = {
+    typedInspectionNetworkMode: 'provider-restricted',
+    initialize: async () => ({ processExecutable: { pid: process.pid }, config: { config: { features: { respect_system_proxy: false } } } })
+  }
+  await assert.rejects(() => runtime._initializeAndSeal(adapter), error => error.code === 'TYPED_INSPECTION_SYSTEM_PROXY_NOT_ENABLED')
+})
+
+test('native attestation digest excludes process and filesystem instance telemetry but changes with trusted policy', () => {
+  const base = {
+    schemaMeasurement: { schemaContractId: 'codex-cli-0.159.2', bundleSha256: 'bundle', binaryIdentityDigest: 'sha256:' + '1'.repeat(64) },
+    bwrap: { path: '/usr/bin/bwrap', version: 'bubblewrap 0.8.0', sha256: 'sha256:' + '2'.repeat(64), dev: '1', ino: '2', size: '3' },
+    view: { inputVisible: true, hostCanaryHidden: true, sourceHomeHidden: true, credentialPathAbsent: true, curlAbsent: true, networkNamespaceIsolated: true, defaultRouteAbsent: true, networkInterfaces: ['lo'], stateDev: '9', inputDev: '10' },
+    isolatedConfigDigest: 'sha256:' + '3'.repeat(64), mcpCatalogCount: 0
+  }
+  const first = canonicalSha256(buildTypedInspectionNativeAttestation(base))
+  const remeasured = canonicalSha256(buildTypedInspectionNativeAttestation({ ...base, bwrap: { ...base.bwrap, dev: '99', ino: '100' }, view: { ...base.view, stateDev: '101', inputDev: '102' } }))
+  assert.equal(remeasured, first)
+  const network = { schemaVersion: 1, measured: true, policy: { transport: 'fixed-connect-proxy-v1' }, hostCanaryReachableControl: true,
+    forbiddenConnectRejected: true, otherHostPortBlocked: true, sandboxCanaryBlocked: true, nftDefaultDropReadback: true,
+    nftRulesDigest: `sha256:${'6'.repeat(64)}`, proxyPort: 31001, canaryPort: 31002, packetCounters: { accepted: 1, dropped: 2 },
+    runtimeRoot: '/tmp/measurement-first', directInternetProbeBlocked: true, directInternetBlocked: true }
+  const rerunNetwork = { ...network, nftRulesDigest: `sha256:${'7'.repeat(64)}`, proxyPort: 41001, canaryPort: 41002,
+    packetCounters: { accepted: 30, dropped: 40 }, runtimeRoot: '/tmp/measurement-second' }
+  assert.equal(canonicalSha256(buildTypedInspectionNativeAttestation({ ...base, executionNetworkAttestation: rerunNetwork })), canonicalSha256(buildTypedInspectionNativeAttestation({ ...base, executionNetworkAttestation: network })))
+  const providerTls = { measured: true, providerAuthority: 'provider.example:443', tlsVerified: true, protocol: 'TLSv1.3', peerCertificateSha256: `sha256:${'8'.repeat(64)}`, caBundleSha256: `sha256:${'9'.repeat(64)}` }
+  const withTls = canonicalSha256(buildTypedInspectionNativeAttestation({ ...base, executionNetworkAttestation: { ...network, providerTls } }))
+  assert.equal(withTls, canonicalSha256(buildTypedInspectionNativeAttestation({ ...base, executionNetworkAttestation: { ...network, providerTls: { ...providerTls, protocol: 'TLSv1.2', peerCertificateSha256: `sha256:${'a'.repeat(64)}` } } })))
+  assert.notEqual(withTls, canonicalSha256(buildTypedInspectionNativeAttestation({ ...base, executionNetworkAttestation: { ...network, providerTls: { ...providerTls, caBundleSha256: `sha256:${'b'.repeat(64)}` } } })))
+  assert.notEqual(canonicalSha256(buildTypedInspectionNativeAttestation({ ...base, isolatedConfigDigest: 'sha256:' + '4'.repeat(64) })), first)
+  assert.notEqual(canonicalSha256(buildTypedInspectionNativeAttestation({ ...base, bwrap: { ...base.bwrap, sha256: 'sha256:' + '5'.repeat(64) } })), first)
+})
+
+test('real bwrap profile performs a non-paid native app-server handshake with private filesystem and isolated network', { skip: !enabled }, async () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'typed-inspection-native-profile-')); chmodSync(root, 0o700)
+  const inputs = resolve(root, 'inputs'); const state = resolve(root, 'state')
+  const profile = {
+    profileId: 'native-probe', agentId: 'native-probe-agent', codexBin: process.env.CYF_CODEX_BIN || '/usr/local/bin/codex',
+    codexHome: process.env.CYF_CODEX_HOME || '/root/.codex', appServerSchemaContractId: 'codex-cli-0.159.2',
+    typedInspectionSupportedInputs: [{ mediaKind: 'text', mimeType: 'text/plain', carrier: 'DIRECT_TEXT', carrierContractDigest: `sha256:${'1'.repeat(64)}` }],
+    typedInspectionProviderId: 'typed-inspection-probe', typedInspectionProviderBaseUrl: process.env.CYF_TYPED_INSPECTION_PROBE_PROVIDER_URL || 'https://provider.invalid/v1',
+    typedInspectionProviderNetwork: 'restricted-proxy', typedInspectionNetworkConnectTimeoutMs: 1000
+  }
+  const secondInputs = resolve(root, 'inputs-second'); const secondState = resolve(root, 'state-second')
+  const runtime = new TypedInspectionProfileRuntime({ profile, materializerRoot: inputs, stateRoot: state })
+  const secondRuntime = new TypedInspectionProfileRuntime({ profile, materializerRoot: secondInputs, stateRoot: secondState })
+  try {
+    const measured = await runtime.measure(); const remeasured = await secondRuntime.measure()
+    assert.equal(measured.measured, true); assert.equal(measured.contractReady, false)
+    assert.equal(measured.nativeProbe.view.inputVisible, true)
+    assert.equal(measured.nativeProbe.view.hostCanaryHidden, true)
+    assert.equal(measured.nativeProbe.view.sourceHomeHidden, true)
+    assert.equal(measured.nativeProbe.view.credentialPathAbsent, true)
+    assert.equal(measured.nativeProbe.credentialIsolation.bootstrapCredentialRemoved, true)
+    assert.equal(measured.nativeProbe.credentialIsolation.modelPhaseCredentialPathAbsent, true)
+    assert.equal(measured.nativeProbe.view.curlAbsent, true)
+    assert.equal(measured.nativeProbe.view.networkNamespaceIsolated, true)
+    assert.equal(measured.nativeProbe.view.defaultRouteAbsent, true)
+    assert.deepEqual(measured.nativeProbe.view.networkInterfaces, ['lo'])
+    assert.equal(measured.nativeProbe.mcpCatalogCount, 0)
+    assert.equal(measured.nativeProbe.providerSystemProxyEnabled, true)
+    assert.equal(measured.providerSystemProxyEnabled, true)
+    assert.equal(measured.nativeProbe.providerCaTrust.readable, true)
+    assert.equal(measured.nativeProbe.providerCaTrust.mountReadOnly, true)
+    assert.equal(measured.nativeProbe.providerCaTrust.writeDenied, true)
+    assert.match(measured.providerCaTrustDigest, /^sha256:[a-f0-9]{64}$/)
+    assert.equal(measured.providerCaTrustDigest, measured.nativeProbe.providerCaTrust.sha256)
+    assert.equal(measured.nativeAttestation.network.execution.measured, true)
+    assert.equal(measured.nativeAttestation.network.execution.forbiddenConnectRejected, true)
+    assert.equal(measured.nativeAttestation.network.execution.otherHostPortBlocked, true)
+    assert.equal(measured.nativeAttestation.network.execution.hostCanaryReachableControl, true)
+    assert.equal(measured.nativeAttestation.network.execution.sandboxCanaryBlocked, true)
+    assert.equal(measured.nativeAttestation.network.execution.nftDefaultDropReadback, true)
+    assert.match(measured.providerExecutionNetworkAttestation.nftRulesDigest, /^sha256:[a-f0-9]{64}$/)
+    assert.equal(measured.nativeAttestation.network.execution.directInternetBlocked, true)
+    assert.match(measured.nativeAttestationDigest, /^sha256:[a-f0-9]{64}$/)
+    assert.equal(remeasured.nativeAttestationDigest, measured.nativeAttestationDigest)
+    assert.notEqual(remeasured.nativeProbe.processExecutable.pid, measured.nativeProbe.processExecutable.pid)
+    assert.equal(runtime.contractReadback, null)
+    await assert.rejects(() => runtime.openAdapter(inputs), error => error.code === 'TYPED_INSPECTION_CARRIER_EVIDENCE_REQUIRED')
+
+    const requestAInputs = resolve(inputs, 'request-a'); const requestBInputs = resolve(inputs, 'request-b')
+    for (const directory of [requestAInputs, requestBInputs]) { mkdirSync(directory, { mode: 0o700 }); chmodSync(directory, 0o700) }
+    const binding = suffix => ({ schemaVersion: 1, requestKey: `request-${suffix}`, authorizationId: `inspection_${suffix.repeat(40)}`,
+      manifestDigest: `sha256:${suffix.repeat(64)}`, requestId: `request-${suffix}`, turnId: `turn-${suffix}`, inputPolicyDigest: `sha256:${suffix.repeat(64)}` })
+    const stateA = runtime._prepareRequestState(binding('a')); const stateACanary = resolve(stateA.directory, 'codex-home', 'request-a-sensitive-history')
+    writeFileSync(stateACanary, 'request-a-sensitive-history\n', { mode: 0o600 })
+    const adapterA = await runtime._spawnAdapter({ inputDirectory: requestAInputs, engineState: stateA, schemaMeasurement: runtime.nativeReadback.schema, networkMode: 'isolated' })
+    try {
+      const readbackA = await runtime._initializeAndSeal(adapterA); const rootA = `/proc/${readbackA.processExecutable.pid}/root`
+      assert.equal(readFileSync(resolve(rootA, 'state', 'codex-home', 'request-a-sensitive-history'), 'utf8'), 'request-a-sensitive-history\n')
+      assert.equal(existsSync(resolve(rootA, 'state', 'codex-home', 'auth.json')), false)
+    } finally { await adapterA.shutdown({ timeoutMs: 1000 }).catch(() => {}) }
+    const stateB = runtime._prepareRequestState(binding('b')); const adapterB = await runtime._spawnAdapter({ inputDirectory: requestBInputs, engineState: stateB, schemaMeasurement: runtime.nativeReadback.schema, networkMode: 'isolated' })
+    try {
+      const readbackB = await runtime._initializeAndSeal(adapterB); const rootB = `/proc/${readbackB.processExecutable.pid}/root`
+      assert.equal(existsSync(stateACanary), true)
+      assert.equal(existsSync(resolve(rootB, 'state', 'codex-home', 'request-a-sensitive-history')), false)
+      assert.equal(existsSync(resolve(rootB, 'state', 'codex-home', 'auth.json')), false)
+    } finally { await adapterB.shutdown({ timeoutMs: 1000 }).catch(() => {}); rmSync(stateA.directory, { recursive: true, force: true }); rmSync(stateB.directory, { recursive: true, force: true }) }
+
+    const target = createServer(socket => socket.end('local-provider-probe'))
+    await new Promise((resolveListen, rejectListen) => { target.once('error', rejectListen); target.listen(0, '127.0.0.1', () => { target.off('error', rejectListen); resolveListen() }) })
+    const allowedDirectory = resolve(inputs, 'allowed-connect-probe'); mkdirSync(allowedDirectory, { mode: 0o700 }); chmodSync(allowedDirectory, 0o700)
+    const egress = new RestrictedProviderEgress({ providerBaseUrl: `https://127.0.0.1:${target.address().port}`, networkConnectTimeoutMs: profile.typedInspectionNetworkConnectTimeoutMs }); await egress.start()
+    const allowedState = runtime._prepareEphemeralState('allowed-connect')
+    const allowedAdapter = await runtime._spawnAdapter({ inputDirectory: allowedDirectory, engineState: allowedState, schemaMeasurement: runtime.nativeReadback.schema, networkMode: 'provider-restricted', proxyUrl: egress.proxyUrl })
+    try { await egress.bindOwner(allowedAdapter.child, runtime.bwrap); await egress.attach(); await runtime._initializeAndSeal(allowedAdapter); const allowed = await egress.measureAllowedConnect(); assert.equal(allowed.connectEstablished, true) }
+    finally { await allowedAdapter.shutdown({ timeoutMs: 1000 }).catch(() => {}); await egress.dispose(); rmSync(allowedState.directory, { recursive: true, force: true }); await new Promise(resolveClose => target.close(() => resolveClose())) }
+  } finally { await runtime.dispose(); await secondRuntime.dispose(); rmSync(root, { recursive: true, force: true }) }
+})
+
+test('recovery of missing original engine state fails before creating directories, staging credentials or spawning an adapter', () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'typed-recovery-state-missing-')); chmodSync(root, 0o700)
+  try {
+    const binding = { schemaVersion: 1, requestKey: 'original-key', authorizationId: 'original-auth',
+      manifestDigest: `sha256:${'a'.repeat(64)}`, requestId: 'original-request', turnId: 'original-turn', inputPolicyDigest: `sha256:${'b'.repeat(64)}` }
+    const runtime = { stateRoot: root, profile: {} }
+    assert.throws(() => TypedInspectionProfileRuntime.prototype._prepareRequestState.call(runtime, binding, { requireExistingState: true }),
+      error => error.code === 'TYPED_INSPECTION_RECOVERY_STATE_MISSING')
+    assert.equal(existsSync(resolve(root, 'requests')), false)
+    const directory = resolve(root, 'requests', canonicalSha256(binding).slice('sha256:'.length)); mkdirSync(directory, { recursive: true, mode: 0o700 })
+    assert.throws(() => TypedInspectionProfileRuntime.prototype._prepareRequestState.call(runtime, binding, { requireExistingState: true }),
+      error => error.code === 'TYPED_INSPECTION_RECOVERY_STATE_MISSING')
+    assert.equal(existsSync(resolve(directory, 'codex-home')), false)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+for (const failureStage of ['start', 'spawn']) test(`failed inspection ${failureStage} disposes proxy and request state`, async () => {
+  const directory = mkdtempSync(resolve(tmpdir(), 'inspection-failed-start-'))
+  let disposed = 0
+  const expected = new Error(`failed-${failureStage}`)
+  const runtime = Object.create(TypedInspectionProfileRuntime.prototype)
+  Object.assign(runtime, {
+    profile: { typedInspectionProviderNetwork: 'restricted-proxy' },
+    activeAdapters: new Map(), nativeReadback: { schema: {} },
+    measure: async () => ({ contractReady: true }),
+    _prepareRequestState: () => ({ directory, created: true }),
+    egressFactory: () => ({ start: async () => { if (failureStage === 'start') throw expected }, dispose: async () => { disposed++ } }),
+    _spawnAdapter: () => { throw expected }
+  })
+  const binding = { schemaVersion: 1, requestKey: 'key', authorizationId: 'auth', manifestDigest: 'digest', requestId: 'req', turnId: 'turn', inputPolicyDigest: 'policy' }
+  try {
+    await assert.rejects(runtime.openAdapter(directory, 'key', binding), error => error === expected)
+    assert.equal(disposed, 1)
+    assert.equal(existsSync(directory), false)
+    assert.equal(runtime.activeAdapters.size, 0)
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})
+
+ test('changed retained native mapping is explicit and never restaged or rewritten', () => {
+  const root=mkdtempSync(resolve(tmpdir(),'native-mapping-change-')); chmodSync(root,0o700)
+  try {
+    const binding={schemaVersion:1,requestKey:'key',authorizationId:'auth',manifestDigest:'digest',requestId:'request',turnId:'turn',inputPolicyDigest:'policy'}
+    const directory=resolve(root,'requests',canonicalSha256(binding).slice('sha256:'.length));mkdirSync(directory,{recursive:true,mode:0o700})
+    writeFileSync(resolve(directory,'binding.json'),JSON.stringify(binding)+'\n',{mode:0o400})
+    const marker=resolve(directory,'native-binding.json'), original=JSON.stringify({schemaVersion:1,executionId:'execution'})+'\n'
+    writeFileSync(marker,original,{mode:0o400})
+    const runtime={stateRoot:root,profile:{}}, options={requireExistingState:true,nativeExecution:true,nativeBinding:{schemaVersion:1,executionId:'execution',modelCatalogSha256:'a'.repeat(64)}}
+    assert.throws(()=>TypedInspectionProfileRuntime.prototype._prepareRequestState.call(runtime,binding,options),{code:'NATIVE_EXECUTION_RECOVERY_ENVIRONMENT_CHANGED'})
+    assert.equal(readFileSync(marker,'utf8'),original);assert.equal(existsSync(resolve(directory,'codex-home')),false)
+    chmodSync(marker,0o600)
+    assert.throws(()=>TypedInspectionProfileRuntime.prototype._prepareRequestState.call(runtime,binding,options),{code:'TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT'})
+  } finally {rmSync(root,{recursive:true,force:true})}
+ })
+
+function conversationStateFixture(t) {
+  const root = mkdtempSync(resolve(tmpdir(), 'inspection-conversation-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const source = resolve(root, 'source'); mkdirSync(source, { mode: 0o700 })
+  writeFileSync(resolve(source, 'auth.json'), '{"synthetic":true}', { mode: 0o600 })
+  const runtime = Object.assign(Object.create(TypedInspectionProfileRuntime.prototype), {
+    stateRoot: root, profile: { codexHome: source }, activeAdapters: new Map(), conversationOwners: new Map()
+  })
+  const binding = suffix => ({ schemaVersion: 1, requestKey: `key-${suffix}`, authorizationId: `auth-${suffix}`,
+    manifestDigest: `manifest-${suffix}`, requestId: `request-${suffix}`, turnId: `turn-${suffix}`, inputPolicyDigest: 'policy' })
+  return { root, runtime, binding, conversationKey: canonicalSha256({ conversation: 'A' }) }
+}
+
+test('material request cleanup and restart cleanup preserve only the separately owned conversation history', async t => {
+  const { runtime, binding, conversationKey } = conversationStateFixture(t)
+  const first = runtime._prepareRequestState(binding('1'), { conversationKey })
+  const history = resolve(first.codexHome, 'synthetic-history'); writeFileSync(history, 'prior turn')
+  let stopped = false, disposed = false
+  runtime.conversationOwners.set(conversationKey, 'key-1')
+  runtime.activeAdapters.set('key-1', { engineState: first, adapter: { shutdown: async () => { stopped = true } }, egress: { dispose: async () => { disposed = true } } })
+  await runtime.suspendAdapter('key-1')
+  assert.ok(stopped && disposed); assert.equal(runtime.conversationOwners.size, 0)
+  assert.ok(existsSync(first.directory)); assert.equal(readFileSync(history, 'utf8'), 'prior turn')
+  const second = runtime._prepareRequestState(binding('2'), { conversationKey })
+  assert.notEqual(first.directory, second.directory); assert.equal(first.codexHome, second.codexHome)
+  // A late ACK for the previous request must not remove the current conversation.
+  await runtime.releaseAdapter('key-1', { requestBinding: binding('1'), conversationKey })
+  assert.equal(existsSync(first.directory), false); assert.ok(existsSync(second.directory)); assert.ok(existsSync(history))
+  const restarted = Object.assign(Object.create(TypedInspectionProfileRuntime.prototype), {
+    stateRoot: runtime.stateRoot, profile: {}, activeAdapters: new Map()
+  })
+  await restarted.releaseAdapter('key-2', { requestBinding: binding('2'), conversationKey })
+  assert.equal(existsSync(second.directory), false); assert.ok(existsSync(history))
+})
+
+test('conversation recovery requires the original mapping and Home; it cannot recreate or redirect missing history', t => {
+  const { runtime, binding, conversationKey } = conversationStateFixture(t)
+  const first = runtime._prepareRequestState(binding('1'), { conversationKey })
+  assert.throws(() => runtime._prepareRequestState(binding('1'), { conversationKey: canonicalSha256('other'), requireExistingState: true }), /BINDING_CONFLICT/)
+  assert.throws(() => runtime._prepareRequestState(binding('1')), /BINDING_CONFLICT/)
+  rmSync(first.conversationDirectory, { recursive: true })
+  assert.throws(() => runtime._prepareRequestState(binding('1'), { conversationKey, requireExistingState: true }), /RECOVERY_STATE_MISSING/)
+  assert.equal(existsSync(first.conversationDirectory), false)
+})
+
+test('different conversations never share Home and native execution cannot opt into conversation storage', t => {
+  const { runtime, binding, conversationKey } = conversationStateFixture(t)
+  const first = runtime._prepareRequestState(binding('1'), { conversationKey })
+  const second = runtime._prepareRequestState(binding('2'), { conversationKey: canonicalSha256('B') })
+  assert.notEqual(first.codexHome, second.codexHome)
+  writeFileSync(resolve(first.codexHome, 'private-history'), 'A')
+  assert.equal(existsSync(resolve(second.codexHome, 'private-history')), false)
+  assert.throws(() => runtime._prepareRequestState(binding('3'), { nativeExecution: true, conversationKey }), /BINDING_INVALID/)
+})
+
+test('a conversation has one engine owner until both shutdown and egress cleanup finish', async t => {
+  const { runtime, binding, conversationKey } = conversationStateFixture(t)
+  const first = runtime._prepareRequestState(binding('1'), { conversationKey })
+  let finishShutdown, finishEgress
+  runtime.conversationOwners.set(conversationKey, 'key-1')
+  runtime.activeAdapters.set('key-1', { engineState: first,
+    adapter: { shutdown: () => new Promise(resolve => { finishShutdown = resolve }) },
+    egress: { dispose: () => new Promise(resolve => { finishEgress = resolve }) } })
+  const closed = runtime.suspendAdapter('key-1')
+  await assert.rejects(runtime.openAdapter(runtime.stateRoot, 'key-2', binding('2'), { conversationKey }), /CONVERSATION_IN_USE/)
+  finishShutdown(); await new Promise(resolve => setImmediate(resolve))
+  await assert.rejects(runtime.openAdapter(runtime.stateRoot, 'key-2', binding('2'), { conversationKey }), /CONVERSATION_IN_USE/)
+  finishEgress(); await closed
+  assert.equal(runtime.conversationOwners.has(conversationKey), false)
+})
+
+test('production inspection mount builder exposes only the selected conversation Home, not the shared state root', async t => {
+  const { runtime, binding, conversationKey, root } = conversationStateFixture(t)
+  const state = runtime._prepareRequestState(binding('1'), { conversationKey })
+  const input = resolve(root, 'inputs'); mkdirSync(input, { mode: 0o700 }); runtime.materializerRoot = input
+  const launcher = resolve(root, 'synthetic-launcher'); const bytes = Buffer.from('synthetic launcher; never executed')
+  writeFileSync(launcher, bytes, { mode: 0o700 })
+  const stat = statSync(launcher, { bigint: true })
+  runtime.bwrap = { path: launcher, dev: String(stat.dev), ino: String(stat.ino), size: String(stat.size), sha256: evidenceDigest(bytes) }
+  let args
+  runtime.spawnFn = (_binary, actualArgs, options) => {
+    args = actualArgs
+    assert.deepEqual(options.stdio, ['pipe', 'pipe', 'pipe', 'pipe'])
+    assert.deepEqual(args.slice(0, 2), ['--info-fd', '3'])
+    const pipe = new PassThrough(), child = Object.assign(new EventEmitter(), { exitCode: null, stdio: [null, null, null, pipe] })
+    queueMicrotask(() => pipe.end(JSON.stringify({ 'child-pid': 123, 'net-namespace': 456 })))
+    return child
+  }
+  const original = AppServerAdapter.spawnAsync
+  AppServerAdapter.spawnAsync = async (_profile, options) => { options.spawnFn('unused', ['app-server'], {}); return {} }
+  try {
+    const adapter = await runtime._spawnAdapter({ inputDirectory: input, engineState: state,
+      schemaMeasurement: { snapshotPath: resolve(root, 'snapshot', 'bin', 'codex') } })
+    const bind = args.indexOf('--bind')
+    assert.deepEqual(args.slice(bind, bind + 3), ['--bind', state.conversationDirectory, state.conversationDirectory])
+    assert.equal(args.includes(state.directory), false)
+    assert.equal(args.includes(runtime.stateRoot), false)
+    assert.equal(args.includes(runtime.profile.codexHome), false)
+    assert.equal(adapter.typedInspectionEngineState, state)
+    assert.equal(args.includes('/state'), false, 'do not add a second alias for indexed native history')
+    const env = name => args[args.indexOf(name) + 1]
+    assert.equal(env('CODEX_HOME'), state.codexHome)
+    assert.equal(env('HOME'), resolve(state.conversationDirectory, 'home'))
+    assert.equal(args[args.indexOf('--chdir') + 1], state.chatWorkdir)
+    assert.equal(state.chatWorkdir, resolve(state.conversationDirectory, 'chat'))
+    assert.equal(existsSync(state.chatWorkdir), true)
+  } finally { AppServerAdapter.spawnAsync = original }
+})
+
+test('disposing during inspection startup joins preparation and never leaves a conversation engine owner', async t => {
+  const { runtime, binding, conversationKey, root } = conversationStateFixture(t)
+  let finishMeasurement
+  runtime.measure = () => new Promise(resolve => { finishMeasurement = resolve })
+  const opening = runtime.openAdapter(root, 'key-1', binding('1'), { conversationKey })
+  const rejected = assert.rejects(opening, /PROFILE_DISPOSED/)
+  const disposed = runtime.dispose()
+  finishMeasurement({ contractReady: true })
+  await rejected; await disposed
+  assert.equal(runtime.conversationOwners.size, 0); assert.equal(runtime.pendingInspectionAdapters.size, 0)
+  assert.equal(existsSync(resolve(root, 'requests')), false)
+})
+
+test('failed material adapter startup removes staged credentials but preserves previous conversation history', async t => {
+  const { runtime, binding, conversationKey, root } = conversationStateFixture(t)
+  const original = runtime._prepareRequestState(binding('1'), { conversationKey })
+  const history = resolve(original.codexHome, 'synthetic-history'); writeFileSync(history, 'completed earlier turn')
+  runtime.profile.typedInspectionProviderNetwork = 'restricted-proxy'
+  runtime.measure = async () => ({ contractReady: true })
+  runtime.egressFactory = () => ({ start: async () => { throw new Error('SYNTHETIC_START_FAILURE') }, dispose: async () => {} })
+  await assert.rejects(runtime.openAdapter(root, 'key-2', binding('2'), { conversationKey }), /SYNTHETIC_START_FAILURE/)
+  assert.equal(readFileSync(history, 'utf8'), 'completed earlier turn')
+  assert.equal(existsSync(resolve(original.codexHome, 'auth.json')), false)
+  assert.equal(existsSync(resolve(root, 'requests', canonicalSha256(binding('2')).slice(7))), false)
+  assert.equal(runtime.conversationOwners.size, 0)
+})
+
+test('read-only startup measurement uses the same canonical-path layout as conversation execution', t => {
+  const { runtime } = conversationStateFixture(t)
+  const state = runtime._prepareEphemeralState('canonical-layout')
+  assert.equal(state.sandboxStatePath, state.directory)
+  assert.equal(state.codexHome, resolve(state.sandboxStatePath, 'codex-home'))
+  assert.equal(state.chatWorkdir, resolve(state.sandboxStatePath, 'chat'))
+  assert.equal(existsSync(state.chatWorkdir), true)
+  assert.equal(existsSync(state.authPath), true)
+})
+
+function warmConversationFixture(t) {
+  const fixture = conversationStateFixture(t), { runtime } = fixture
+  const spawned = [], closed = [], environments = []
+  runtime.measure = () => { throw new Error('ordinary CHAT must not wait for material readiness') }
+  const original = AppServerAdapter.spawnAsync
+  AppServerAdapter.spawnAsync = async (profile, options) => {
+    options.spawnFn('synthetic-unused', [], { env: { CODEX_HOME: profile.codexHome } })
+    const adapter = { closed: false, readback: { tools: { data: [] }, processExecutable: { pid: process.pid } },
+      verifySpawnedExecutable: async () => {}, initialize: async () => {},
+      shutdown: async () => { adapter.closed = true; closed.push(adapter) } }
+    spawned.push(adapter); return adapter
+  }
+  t.after(async () => { await runtime.dispose(); AppServerAdapter.spawnAsync = original })
+  const options = { environment: { TEST_RUNTIME_IDENTITY: 'synthetic', CODEX_HOME: '/wrong-profile-home' },
+    spawnFn: (_binary, _args, options) => { environments.push(options.env) } }
+  return { ...fixture, spawned, closed, environments, options }
+}
+
+test('ordinary CHAT keeps one idle warm engine, seals auth and retains conversation history on switching', async t => {
+  const { runtime, conversationKey, spawned, closed, environments, options } = warmConversationFixture(t)
+  const first = await runtime.openWarmChatAdapter(conversationKey, 'request-1', options)
+  const state = first.typedInspectionEngineState
+  assert.equal(environments[0].CODEX_HOME, state.codexHome)
+  assert.equal(environments[0].HOME, resolve(state.directory, 'home'))
+  assert.equal(environments[0].TEST_RUNTIME_IDENTITY, 'synthetic')
+  assert.equal(existsSync(state.authPath), false)
+  writeFileSync(resolve(state.codexHome, 'history'), 'retained')
+  await runtime.finishWarmChatAdapter(conversationKey, 'request-1')
+  assert.equal(await runtime.openWarmChatAdapter(conversationKey, 'request-2', options), first)
+  assert.equal(spawned.length, 1); assert.equal(existsSync(state.authPath), false)
+  await runtime.finishWarmChatAdapter(conversationKey, 'request-2')
+  const nextKey = canonicalSha256('other-conversation')
+  const second = await runtime.openWarmChatAdapter(nextKey, 'request-3', options)
+  assert.equal(closed.includes(first), true)
+  assert.equal(runtime.warmChatAdapters.size, 1)
+  assert.notEqual(second.typedInspectionEngineState.codexHome, state.codexHome)
+  assert.equal(readFileSync(resolve(state.codexHome, 'history'), 'utf8'), 'retained')
+})
+
+test('unknown ordinary turn is neither interrupted nor rebound, but does not block a different conversation', async t => {
+  const { runtime, conversationKey, options, closed, binding, root } = warmConversationFixture(t)
+  const first = await runtime.openWarmChatAdapter(conversationKey, 'uncertain-request', options)
+  await assert.rejects(runtime.openWarmChatAdapter(conversationKey, 'new-request', options), /CONVERSATION_IN_USE/)
+  await assert.rejects(runtime.openAdapter(root, 'key-2', binding('2'), { conversationKey }), /CONVERSATION_IN_USE/)
+  await runtime.openWarmChatAdapter(canonicalSha256('different'), 'other-request', options)
+  assert.equal(closed.includes(first), false)
+  assert.equal(await runtime.finishWarmChatAdapter(conversationKey, 'late-other-request'), false)
+  assert.equal(runtime.warmChatAdapters.get(conversationKey).idle, false)
+  assert.equal(await runtime.openWarmChatAdapter(conversationKey, 'uncertain-request', { ...options, requireExistingState: true }), first)
+})
+
+test('ordinary recovery cannot recreate a missing Home or leave credentials after a failed startup', async t => {
+  const { runtime, conversationKey, options, spawned } = warmConversationFixture(t)
+  await assert.rejects(runtime.openWarmChatAdapter(conversationKey, 'recover', { ...options, requireExistingState: true }), /RECOVERY_STATE_MISSING/)
+  assert.equal(spawned.length, 0); assert.equal(runtime.conversationOwners.size, 0)
+  const original = AppServerAdapter.spawnAsync
+  AppServerAdapter.spawnAsync = async (...args) => { const adapter = await original(...args); adapter.initialize = async () => { throw new Error('synthetic-init-failure') }; return adapter }
+  await assert.rejects(runtime.openWarmChatAdapter(conversationKey, 'new', options), /synthetic-init-failure/)
+  assert.equal(existsSync(resolve(runtime._conversationDirectory(conversationKey), 'codex-home', 'auth.json')), false)
+  assert.equal(runtime.conversationOwners.size, 0); assert.equal(runtime.warmChatAdapters.size, 0)
+})
+
+test('warm CHAT does not silently change an existing provider route or credential mechanism', t => {
+  const { runtime } = conversationStateFixture(t)
+  Object.assign(runtime.profile, { typedInspectionProviderNetwork: 'restricted-proxy', typedInspectionProviderId: 'synthetic', typedInspectionProviderBaseUrl: 'https://provider.example/v1' })
+  const readback = { config: { config: { model_provider: 'synthetic', model_providers: { synthetic: {
+    base_url: 'https://provider.example/v1/', wire_api: 'responses', requires_openai_auth: true } } } } }
+  assert.equal(runtime.canShareChatProvider(readback), true)
+  const emptyMaps = structuredClone(readback)
+  Object.assign(emptyMaps.config.config.model_providers.synthetic, { http_headers: {}, env_http_headers: {}, query_params: {} })
+  assert.equal(runtime.canShareChatProvider(emptyMaps), true)
+  emptyMaps.config.config.model_providers.synthetic.http_headers.Authorization = 'synthetic-only'
+  assert.equal(runtime.canShareChatProvider(emptyMaps), false)
+  const other = structuredClone(readback); other.config.config.model_providers.synthetic.base_url = 'https://other.example/v1'
+  assert.equal(runtime.canShareChatProvider(other), false)
+  other.config.config.model_providers.synthetic = { ...readback.config.config.model_providers.synthetic, env_key: 'OTHER_AUTH' }
+  assert.equal(runtime.canShareChatProvider(other), false)
+  assert.equal(runtime.canShareChatProvider({}), false)
+})
+
+test('concurrent recovered turns retain only one idle warm engine', async t => {
+  const { runtime, conversationKey, options, closed } = warmConversationFixture(t)
+  const otherKey = canonicalSha256('concurrent-recovery')
+  const first = await runtime.openWarmChatAdapter(conversationKey, 'first', options)
+  const second = await runtime.openWarmChatAdapter(otherKey, 'second', options)
+  await Promise.all([runtime.finishWarmChatAdapter(conversationKey, 'first'), runtime.finishWarmChatAdapter(otherKey, 'second')])
+  assert.equal(runtime.warmChatAdapters.size, 1)
+  assert.equal(runtime.idleWarmChatKey, otherKey)
+  assert.equal(closed.includes(first), true)
+  assert.equal(closed.includes(second), false)
+})
+
+test('warm Home handoff waits for shutdown and refuses acquisition after disposal', async t => {
+  const { runtime, conversationKey, options, spawned } = warmConversationFixture(t)
+  const first = await runtime.openWarmChatAdapter(conversationKey, 'first', options)
+  await runtime.finishWarmChatAdapter(conversationKey, 'first')
+  let finishShutdown
+  const shutdown = first.shutdown
+  first.shutdown = () => new Promise(resolve => { finishShutdown = async () => { await shutdown(); resolve() } })
+  const closing = runtime._closeWarmChat(conversationKey)
+  const reopening = runtime.openWarmChatAdapter(conversationKey, 'next', options)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(spawned.length, 1)
+  const disposed = runtime.dispose()
+  // dispose joins the same shutdown; the adapter must not be shut down twice.
+  await finishShutdown()
+  await closing
+  await assert.rejects(reopening, /PROFILE_DISPOSED/)
+  await disposed
+  assert.equal(spawned.length, 1)
+})
+
+test('file-enabled ordinary CHAT reuses warm engine, canonical Home and joins egress cleanup', async t => {
+  const { runtime, root, conversationKey } = conversationStateFixture(t)
+  runtime.materializerRoot = resolve(root, 'materializer'); mkdirSync(runtime.materializerRoot, { mode: 0o700 })
+  runtime.profile.typedInspectionSupportedInputs = [{ carrier: 'LOCAL_FILE' }]
+  runtime.nativeReadback = { schema: { snapshotIdentity: {} } }
+  runtime.measure = async () => ({ contractReady: true })
+  const opens = [], disposed = []
+  runtime.egressFactory = () => ({ proxyUrl: 'synthetic', start: async () => {}, bindOwner: async () => {}, attach: async () => {}, dispose: async () => { disposed.push(true) } })
+  runtime._spawnAdapter = async options => {
+    opens.push(options)
+    const adapter = { closed: false, typedInspectionEngineState: options.engineState, readback: { tools: { data: [] }, processExecutable: { pid: process.pid } },
+      initialize: async () => adapter.readback, shutdown: async () => { adapter.closed = true } }
+    return adapter
+  }
+  t.after(() => runtime.dispose())
+  const first = await runtime.openWarmChatAdapter(conversationKey, 'one')
+  assert.equal(existsSync(first.typedInspectionEngineState.authPath), false)
+  const config = readFileSync(resolve(first.typedInspectionEngineState.codexHome, 'config.toml'), 'utf8')
+  assert.match(config, /default_permissions = "chat-files"/)
+  await runtime.finishWarmChatAdapter(conversationKey, 'one')
+  const second = await runtime.openWarmChatAdapter(conversationKey, 'two')
+  assert.equal(second, first); assert.equal(opens.length, 1)
+  assert.equal(opens[0].networkMode, 'provider-restricted')
+  await runtime.finishWarmChatAdapter(conversationKey, 'two')
+  await runtime._closeWarmChat(conversationKey)
+  assert.equal(disposed.length, 1)
+  assert.equal(existsSync(opens[0].inputDirectory), false)
+  assert.equal(existsSync(first.typedInspectionEngineState.codexHome), true)
+  assert.equal(runtime.conversationOwners.size, 0)
+})
+
+
+test('missing recovery state never evicts a healthy idle chat process', async t => {
+  const { runtime, binding, conversationKey } = conversationStateFixture(t)
+  let closed = 0
+  runtime.warmChatAdapters = new Map([[conversationKey, { idle: true, adapter: { closed: false, shutdown: async () => { closed++ } }, owner: 'idle' }]])
+  runtime.idleWarmChatKey = conversationKey
+  for (const options of [{ requireExistingState: true }, { requireExistingState: true, conversationKey }]) {
+    await assert.rejects(runtime.openAdapter(runtime.stateRoot, 'key-missing', binding('missing'), options),
+      { code: 'TYPED_INSPECTION_RECOVERY_STATE_MISSING' })
+    assert.equal(closed, 0); assert.ok(runtime.warmChatAdapters.has(conversationKey))
+    assert.equal(runtime.idleWarmChatKey, conversationKey)
+    assert.equal(runtime.pendingInspectionKeys.size, 0)
+  }
+})

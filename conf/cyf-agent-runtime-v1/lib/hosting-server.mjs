@@ -1,0 +1,112 @@
+// One host-level control boundary: private AF_UNIX and optional mutual TLS.
+// Both use exactly the same newline-framed message and lifecycle handler.
+import { randomUUID } from 'node:crypto';
+import { replyMessage, eventMessage } from './message-envelope.mjs';
+import { createServer } from 'node:net';
+import { createServer as createTlsServer } from 'node:tls';
+import { chmod, chown, lstat, realpath } from 'node:fs/promises';
+import { dirname } from 'node:path';
+import { TextDecoder } from 'node:util';
+import { HostingControl } from './hosting-control.mjs';
+import { canonicalHostingPath, hostingError, readHostingTlsOptions } from './hosting-config.mjs';
+import { parseHostingJson, validateHostingRequest, hostingReply } from './hosting-wire.mjs';
+
+export async function requireHostingSocketParent(config) {
+  const parent = dirname(config.socketPath); await canonicalHostingPath(parent);
+  const stat = await lstat(parent);
+  if (!stat.isDirectory() || stat.uid !== process.getuid() || stat.gid !== config.socketGid
+      || ![0o710, 0o750].includes(stat.mode & 0o777)) throw hostingError('HOSTING_SOCKET_PARENT_UNSAFE');
+  return stat;
+}
+const reasonCodes = new Set(['HOSTING_WIRE_INVALID', 'HOSTING_DUPLICATE_FIELD', 'HOSTING_FIELD_FORBIDDEN', 'HOSTING_SCOPE_REJECTED',
+  'HOSTING_CONTROL_NOT_RUNNING', 'HOSTING_OPERATION_CONFLICT', 'HOSTING_SUBJECT_CONFLICT', 'HOSTING_ASSOCIATION_REJECTED',
+  'HOSTING_OPERATION_PENDING', 'RUNTIME_HANDOVER_PENDING', 'RUNTIME_HANDOVER_CONFLICT', 'HOSTING_LEASE_EXPIRED', 'HOSTING_GENERATION_EXHAUSTED', 'HOSTING_OPERATION_SUPERSEDED']);
+export async function startHostingServer({ control }) {
+  const config = control.config; await requireHostingSocketParent(config);
+  // Never unlink an existing listener, stale socket, symlink or unknown file.
+  try { await lstat(config.socketPath); throw hostingError('HOSTING_SOCKET_EXISTS'); }
+  catch (cause) { if (cause.code !== 'ENOENT') throw cause; }
+  const connections = new Set(); let shuttingDown = false; let identity;
+  const accept = socket => {
+    connections.add(socket); socket.on('close', () => connections.delete(socket));
+    socket.on('error', () => {}); let bytes = Buffer.alloc(0); let received = false;
+    socket.on('data', chunk => {
+      if (received || shuttingDown) { socket.destroy(); return; }
+      // Same request-frame bound as the API producer; never accumulate an unbounded remote frame.
+      if (bytes.length + chunk.length > 16384) { socket.destroy(); return; }
+      bytes = Buffer.concat([bytes, chunk]); const newline = bytes.indexOf(10);
+      if (newline < 0) return;
+      received = true;
+      void (async () => {
+        let message = null;
+        try {
+          if (bytes.length !== newline + 1) throw hostingError('HOSTING_WIRE_INVALID');
+          const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, newline));
+          message = parseHostingJson(text);
+          const request = validateHostingRequest(message);
+          const result = await control.handle(request);
+          if (!socket.destroyed) socket.end(`${JSON.stringify(hostingReply(message, result))}\n`);
+        } catch (cause) {
+          const reason = reasonCodes.has(cause?.code) ? cause.code : 'HOSTING_CONTROL_ERROR';
+          let rejection;
+          try { rejection = replyMessage(message, `${message.messageType}.result`, randomUUID(), reason, 'Hosting request rejected', null); }
+          catch { rejection = eventMessage(randomUUID(), 'protocol.error', randomUUID(), { reasonCode: reason }); }
+          if (!socket.destroyed) socket.end(`${JSON.stringify(rejection)}\n`);
+        }
+      })();
+    });
+    socket.on('end', () => { if (!received) socket.destroy(); });
+  };
+  const server = createServer(accept);
+  let remoteServer = null;
+  // Binding occurs synchronously inside listen; create under 0600 first so there
+  // is never a world-accessible window before the explicitly configured group.
+  const mask = process.umask(0o177);
+  const listening = new Promise((resolve, reject) => { server.once('error', reject); server.once('listening', resolve); });
+  try { server.listen(config.socketPath); } finally { process.umask(mask); }
+  await listening;
+  try {
+    await chown(config.socketPath, process.getuid(), config.socketGid); await chmod(config.socketPath, 0o660);
+    await requireHostingSocketParent(config);
+    identity = await lstat(config.socketPath, { bigint: true });
+    if (await realpath(config.socketPath) !== config.socketPath || !identity.isSocket() || identity.uid !== BigInt(process.getuid())
+        || identity.gid !== BigInt(config.socketGid) || (identity.mode & 0o777n) !== 0o660n) throw hostingError('HOSTING_SOCKET_UNSAFE');
+  } catch (cause) { await new Promise(resolve => server.close(resolve)); throw cause; }
+  if (config.remote) {
+    try {
+      remoteServer = createTlsServer(await readHostingTlsOptions(config.remote), accept);
+      // Include connections still in the TLS handshake so shutdown never leaves an owned socket behind.
+      remoteServer.on('connection', socket => { connections.add(socket); socket.on('close', () => connections.delete(socket)); });
+      remoteServer.on('tlsClientError', () => {}); // Never log certificates or handshake internals.
+      await new Promise((resolve, reject) => {
+        remoteServer.once('error', reject);
+        remoteServer.listen(config.remote.port, config.remote.listenHost, resolve);
+      });
+    } catch (cause) {
+      for (const socket of connections) socket.destroy();
+      if (remoteServer?.listening) await new Promise(resolve => remoteServer.close(resolve));
+      await new Promise(resolve => server.close(resolve));
+      throw cause;
+    }
+  }
+  let closePromise;
+  return {
+    control,
+    remoteAddress: remoteServer?.address() ?? null,
+    close: () => closePromise ||= (async () => {
+      shuttingDown = true; for (const socket of connections) socket.destroy();
+      const current = await lstat(config.socketPath, { bigint: true });
+      if (current.dev !== identity.dev || current.ino !== identity.ino) throw hostingError('HOSTING_SOCKET_OWNERSHIP_LOST');
+      if (remoteServer) await new Promise((resolve, reject) => remoteServer.close(cause => cause ? reject(cause) : resolve()));
+      await new Promise((resolve, reject) => server.close(cause => cause ? reject(cause) : resolve()));
+      await control.close();
+    })()
+  };
+}
+export async function createHostingControlServer(options) {
+  const control = new HostingControl(options);
+  await control.initialize();
+  try {
+    const server = await startHostingServer({ control }); control.resumeAdmitted(); return server;
+  } catch (cause) { await control.close(); await control.releaseOwnership(); throw cause; }
+}

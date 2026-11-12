@@ -1,0 +1,195 @@
+import { constants, link, lstat, mkdir, open, realpath, rename, unlink } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
+
+const SENSITIVE_KEY = /(?:authorization|secret|token|api[_-]?key|credential|password|provider)/i;
+const REDACTED = '[REDACTED]';
+
+export function redact(value, knownSecrets = []) {
+  if (typeof value === 'string') {
+    return knownSecrets.filter(Boolean).reduce((result, secret) => result.split(secret).join(REDACTED), value)
+      .replace(/(?:Bearer|AgentRuntime)\s+[^\s,;]+/gi, `Authorization ${REDACTED}`)
+      .replace(/rts1_[0-9a-f]{64}/g, REDACTED);
+  }
+  if (Array.isArray(value)) return value.map(item => redact(item, knownSecrets));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+    key, SENSITIVE_KEY.test(key) ? REDACTED : redact(item, knownSecrets)
+  ]));
+  return value;
+}
+
+export function createLogger({ write = console.error, knownSecrets = [] } = {}) {
+  return (event, details = {}) => write(JSON.stringify({ event, ...redact(details, knownSecrets) }));
+}
+
+export async function readEnrollmentSecret(env = process.env) {
+  const fromEnv = env.CYF_RUNTIME_V1_ENROLLMENT_SECRET;
+  const fromFile = env.CYF_RUNTIME_V1_ENROLLMENT_SECRET_FILE;
+  if (fromEnv && fromFile) throw new Error('configure exactly one enrollment secret source');
+  if (fromEnv) {
+    const value = fromEnv.trim();
+    if (!value) throw new Error('enrollment secret is empty');
+    return { value, source: 'environment' };
+  }
+  if (!fromFile) throw new Error('enrollment secret must be supplied through protected environment or file');
+  const value = (await readPrivateBytes(fromFile)).trim();
+  if (!value) throw new Error('enrollment secret is empty');
+  return { value, source: 'file', path: fromFile };
+}
+
+// No-follow descriptor reads, current UID, canonical ancestors and identity readback.
+// These checks prevent accidental alias/adoption, not hostile same-UID isolation.
+async function canonical(path) {
+  const absolute = resolve(path);
+  if (await realpath(absolute) !== absolute) throw new Error('private state path must not contain symlinks');
+  return absolute;
+}
+async function readPrivateBytes(path) {
+  const absolute = await canonical(path);
+  const file = await open(absolute, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const before = await file.stat({ bigint: true });
+    if (!before.isFile() || before.uid !== BigInt(process.getuid()) || (before.mode & 0o077n) !== 0n) throw new Error('private state file has unsafe permissions or ownership');
+    const bytes = await file.readFile('utf8');
+    const after = await file.stat({ bigint: true });
+    const current = await lstat(absolute, { bigint: true });
+    await canonical(absolute);
+    if (before.dev !== current.dev || before.ino !== current.ino || before.size !== after.size
+        || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) throw new Error('private state file changed during read');
+    return bytes;
+  } finally { await file.close(); }
+}
+export async function ensurePrivateDirectory(directory) {
+  // Validate existing parent chain before creating only private state directories.
+  let parent = resolve(directory);
+  while (true) {
+    try { await canonical(parent); break; } catch (error) { if (error.code !== 'ENOENT') throw error; parent = dirname(parent); }
+  }
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await canonical(directory);
+  const stat = await lstat(directory);
+  if (!stat.isDirectory() || stat.uid !== process.getuid() || (stat.mode & 0o077) !== 0) throw new Error('state directory must be private and owned');
+}
+export async function readPrivateJson(path, fallback) {
+  try { return JSON.parse(await readPrivateBytes(path)); }
+  catch (error) { if (error.code === 'ENOENT') return fallback; throw error; }
+}
+export async function writePrivateJson(path, value, { exclusive = false } = {}) {
+  const parent = dirname(resolve(path));
+  await ensurePrivateDirectory(parent);
+  const identity = await lstat(parent, { bigint: true });
+  const temporary = join(parent, `.${randomUUID()}.tmp`);
+  const file = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  try { await file.writeFile(`${JSON.stringify(value, null, 2)}\n`); await file.sync(); }
+  finally { await file.close(); }
+  try {
+    await canonical(parent);
+    const current = await lstat(parent, { bigint: true });
+    if (identity.dev !== current.dev || identity.ino !== current.ino) throw new Error('private directory ownership changed');
+    try { await readPrivateBytes(path); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    // One-time credential attempts require an atomic no-replace claim across processes.
+    // A private fsynced temp is linked into place; EEXIST never overwrites another claim.
+    if (exclusive) { await link(temporary, path); await unlink(temporary); }
+    else await rename(temporary, path);
+    const directory = await open(parent, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    try { await directory.sync(); } finally { await directory.close(); }
+  } catch (error) { await unlink(temporary).catch(() => {}); throw error; }
+}
+
+// Explicit operator-owned Provider credentials, keyed by full tenant/client/Agent
+// subject. Never inherit process.env, another subject, or an arbitrary HOME file.
+export async function readRuntimeProviderEnvironments(path, agents) {
+  const fail = () => { throw Object.assign(new Error('RUNTIME_PROVIDER_CONFIG_INVALID'), { code: 'RUNTIME_PROVIDER_CONFIG_INVALID' }); };
+  const required = agents.filter(agent => String(agent.profile.controlledImageHttpEnabled).toLowerCase() === 'true');
+  if (!path) { if (required.length) fail(); return new Map(); }
+  let document;
+  try {
+    if (typeof path !== 'string' || resolve(path) !== path) fail();
+    document = await readPrivateJson(path, null);
+  } catch { fail(); }
+  const object = value => value && typeof value === 'object' && !Array.isArray(value);
+  if (!object(document) || !['configVersion', 'subjects'].every(key => Object.hasOwn(document, key))
+      || Object.keys(document).some(key => !['configVersion', 'subjects', 'scopes'].includes(key))
+      || document.configVersion !== 1 || !object(document.subjects)) fail();
+  const known = new Map(agents.map(agent => [agent.subjectKey, agent]));
+  const allowed = new Map();
+  const sharedAllowed = new Map();
+  // Shared public binding config supplies only credential names. Preserve the
+  // existing private full-subject secret source; never read process.env.
+  const configs = new Map();
+  for (const agent of agents) {
+    const keys = new Set();
+    const sharedKeys = new Set();
+    if (required.includes(agent)) keys.add(agent.profile.controlledImageHttpApiKeyEnv);
+    const file = agent.profile.skillBindingsFile;
+    if (file) {
+      if (!configs.has(file)) {
+        try {
+          const { parseSkillBindings } = await import('../../codex-bridge/skill-bindings.mjs');
+          configs.set(file, parseSkillBindings(await readPrivateJson(file, null)));
+        } catch { fail(); }
+      }
+      const bindings = configs.get(file);
+      const { skillProviderAliases } = await import('../../codex-bridge/skill-bindings.mjs');
+      const aliases = skillProviderAliases(bindings, { ...agent.manifest, agentId: agent.manifest?.canonicalAgentId || agent.profile.agentId });
+      for (const bindingId of Object.values(aliases)) keys.add(bindings.providers[bindingId].credentialEnv);
+      const shared = bindings.scopes.find(item => item.tenantId === agent.manifest?.tenantId && item.clientId === agent.manifest?.clientId);
+      for (const [alias, bindingId] of Object.entries(shared?.providerAliases || {}))
+        if (aliases[alias] === bindingId) sharedKeys.add(bindings.providers[bindingId].credentialEnv);
+    }
+    allowed.set(agent.subjectKey, keys);
+    sharedAllowed.set(agent.subjectKey, sharedKeys);
+  }
+  const result = new Map();
+  for (const [subject, values] of Object.entries(document.subjects)) {
+    const agent = known.get(subject), keys = allowed.get(subject);
+    if (!agent || !object(values) || Object.keys(values).length === 0
+        || Object.keys(values).some(key => !/^[A-Z][A-Z0-9_]*$/.test(key) || !keys.has(key))) fail();
+    for (const value of Object.values(values))
+      if (typeof value !== 'string' || !value || value !== value.trim() || /[\x00-\x1f\x7f]/u.test(value)) fail();
+    result.set(subject, Object.freeze({ ...values }));
+  }
+  // Shared secrets are deliberately scoped by the immutable manifest identity.
+  // Only names referenced by that Agent's bindings enter its private environment.
+  const scopes = document.scopes ?? [];
+  if (!Array.isArray(scopes)) fail();
+  const seen = new Set();
+  for (const scope of scopes) {
+    if (!object(scope) || Object.keys(scope).sort().join(',') !== 'clientId,environment,tenantId'
+        || ![scope.tenantId, scope.clientId].every(value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/.test(value))
+        || !object(scope.environment) || !Object.keys(scope.environment).length) fail();
+    const identity = JSON.stringify([scope.tenantId, scope.clientId]);
+    if (seen.has(identity)) fail();
+    seen.add(identity);
+    const declared = new Set();
+    for (const config of configs.values()) {
+      const bindingScope = config.scopes.find(item => item.tenantId === scope.tenantId && item.clientId === scope.clientId);
+      for (const bindingId of Object.values(bindingScope?.providerAliases || {})) declared.add(config.providers[bindingId].credentialEnv);
+    }
+    for (const [key, value] of Object.entries(scope.environment)) {
+      if (!/^[A-Z][A-Z0-9_]*$/.test(key) || !declared.has(key)
+          || typeof value !== 'string' || !value || value !== value.trim() || /[\x00-\x1f\x7f]/u.test(value)) fail();
+    }
+    for (const agent of agents) {
+      if (agent.manifest?.tenantId !== scope.tenantId || agent.manifest?.clientId !== scope.clientId) continue;
+      const values = Object.fromEntries(Object.entries(scope.environment).filter(([key]) => sharedAllowed.get(agent.subjectKey).has(key)));
+      if (Object.keys(values).length) result.set(agent.subjectKey, Object.freeze({ ...values, ...(result.get(agent.subjectKey) || {}) }));
+    }
+  }
+  if (required.some(agent => !result.has(agent.subjectKey))) fail();
+  return result;
+}
+
+// Operator-classified public baseline, independent of an owner's mutable HOME.
+// Public means reusable by this Agent's next owner, not exposed over the wire.
+export async function readRuntimePublicFiles(path, manifest) {
+  const fail = () => { throw Object.assign(new Error('RUNTIME_PUBLIC_BASELINE_INVALID'), { code: 'RUNTIME_PUBLIC_BASELINE_INVALID' }); };
+  let value;
+  try { value = await readPrivateJson(path, null); } catch { fail(); }
+  if (!value || Object.keys(value).sort().join(',') !== 'canonicalAgentId,clientId,files,tenantId'
+      || ['tenantId', 'clientId', 'canonicalAgentId'].some(field => value[field] !== manifest[field])
+      || !value.files || Array.isArray(value.files) || typeof value.files !== 'object'
+      || typeof value.files['config.toml'] !== 'string' || !value.files['config.toml'].trim()
+      || Object.entries(value.files).some(([name, bytes]) => !['config.toml', 'auth.json'].includes(name) || typeof bytes !== 'string')) fail();
+  return Object.freeze({ ...value.files });
+}

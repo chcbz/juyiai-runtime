@@ -1,0 +1,2055 @@
+import { isManagementMessage, parseManagementMessage } from '../../codex-bridge/skill-management-wire.mjs';
+import { command as managementCommand, packageFixture as managementPackage, activate as managementActivate, policy as managementPolicy } from '../../codex-bridge/test/fixtures/skill-management-fixture.mjs';
+import { replyMessage } from '../../codex-bridge/message-envelope.mjs';
+import { fromAgentWire } from '../../codex-bridge/agent-message-wire.mjs';
+import { agentMessageFixture, httpFixture } from './agent-wire-fixture.mjs';
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { execFileSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { chmod, cp, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { digestManifest, readRuntimeHostConfig, runtimeSubjectKey } from '../lib/manifest.mjs';
+import { acquireRuntimeOwnership, RuntimeHost } from '../lib/runtime-host.mjs';
+import { collateExecutionPayload, createExecutionAdapterFactory, rejectedWireFacts, EXECUTION_PAYLOAD_FILES, RETIRED_EXECUTION_PAYLOAD_PATHS, validateExecutionPayload } from '../lib/execution-adapter.mjs';
+
+// Frozen offline acceptance coverage, before implementation: config -> identity,
+// installation/path collisions and credential allowlist; host -> readiness,
+// independent lifecycle, stop-v-start and writer ownership; executor -> one
+// injected host, exact subject/boot IDs, no legacy network/env; payload -> exact
+// mature catalog, literal import closure and no private-state wildcard copies.
+// Wire/D06 ACK/CHAT-result confirmations are separate, not claimed by this suite.
+const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
+const engineSource = resolve(repo, 'conf/codex-bridge');
+const code = expected => cause => cause?.code === expected;
+
+async function fixture(t, { count = 3, sameAgentId = false, firstIdentity = {} } = {}) {
+  const root = await mkdtemp(resolve(tmpdir(), 'ur01-owned-fixture-'));
+  const cleanups = [];
+  t.after(async () => {
+    try { for (const cleanup of cleanups.reverse()) await cleanup(); }
+    finally { await rm(root, { recursive: true, force: true }); } // only this test's fresh root
+  });
+  const hostRoot = resolve(root, 'host');
+  await mkdir(hostRoot, { mode: 0o700 });
+  const entries = []; const manifests = []; const profiles = [];
+  const json = (path, value) => writeFile(path, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+  for (let i = 0; i < count; i++) {
+    const base = resolve(root, `agent-${i}`); await mkdir(base, { mode: 0o700 });
+    for (const name of ['state', 'home', 'work']) await mkdir(resolve(base, name), { mode: 0o700 });
+    const unsigned = { runtimeProtocolVersion: 'v1', manifestVersion: '1', installationId: `installation-${i}`,
+      tenantId: `tenant-${i}`, clientId: 'client', canonicalAgentId: sameAgentId ? 'agent' : `agent-${i}`, ...(i === 0 ? firstIdentity : {}) };
+    const manifest = { ...unsigned, manifestSha256: digestManifest(unsigned) };
+    const profile = { profileId: `profile-${i}`, agentId: manifest.canonicalAgentId, codexBin: '/bin/true',
+      codexHome: resolve(base, 'home'), codexWorkdir: resolve(base, 'work'), appServerEnabled: false,
+      fastChatEnabled: false, typedInspectionProviderNetwork: 'isolated' };
+    const entry = { manifestPath: resolve(base, 'manifest.json'), profilePath: resolve(base, 'profile.json'), stateRoot: resolve(base, 'state') };
+    await json(entry.manifestPath, manifest); await json(entry.profilePath, profile);
+    entries.push(entry); manifests.push(manifest); profiles.push(profile);
+  }
+  const raw = { configVersion: 1, hostId: 'stable-host', stateRoot: hostRoot, agents: entries };
+  const path = resolve(root, 'host.json'); await json(path, raw);
+  return { root, raw, path, entries, manifests, profiles, json, cleanup: fn => cleanups.push(fn),
+    async config() { await json(path, raw); return readRuntimeHostConfig(path); },
+    async profile(i, change) { Object.assign(profiles[i], change); await json(entries[i].profilePath, profiles[i]); },
+    async manifest(i, change) { Object.assign(manifests[i], change); manifests[i].manifestSha256 = digestManifest(manifests[i]); await json(entries[i].manifestPath, manifests[i]); }
+  };
+}
+
+function executors({ failure = null, unconfirmed = null, wait = null } = {}) {
+  const states = new Map();
+  return { states, createExecutor: async ({ subjectKey }) => {
+    const state = { initialized: 0, closed: 0, paused: 0, bound: false }; states.set(subjectKey, state);
+    return { initialize: async () => { state.initialized++; await wait?.(); if (subjectKey === failure) throw new Error('private fixture detail'); },
+      activate: async () => { state.bound = true; }, ready: () => state.bound,
+      pause: async () => { state.paused++; state.bound = false; },
+      close: async () => { state.closed++; if (subjectKey === unconfirmed) throw new Error('unconfirmed fixture'); } };
+  } };
+}
+
+test('three complete subjects initialize immutable config without writing any state', async t => {
+  const f = await fixture(t, { sameAgentId: true });
+  const before = await Promise.all(f.entries.map(entry => readdir(entry.stateRoot)));
+  const config = await f.config();
+  assert.equal(new Set(config.agents.map(agent => agent.subjectKey)).size, 3);
+  assert.equal(config.hostId, 'stable-host');
+  assert.throws(() => { config.agents[0].manifest.tenantId = 'wrong'; }, TypeError);
+  assert.throws(() => { config.agents[0].profile.codexHome = f.root; }, TypeError);
+  assert.deepEqual(await Promise.all(f.entries.map(entry => readdir(entry.stateRoot))), before);
+});
+
+for (const field of ['nativeExecutionRootDir', 'nativeExecutionStateRoot']) test(`reject cross-subject ${field} overlap`, async t => {
+  const f = await fixture(t)
+  await f.profile(1, { [field]: resolve(f.profiles[0].codexHome, 'native') })
+  await assert.rejects(f.config(), code('RUNTIME_AGENT_ROOTS_OVERLAP'))
+})
+
+test('duplicate complete subjects and installation authorization are rejected independently', async t => {
+  const f = await fixture(t);
+  await f.manifest(1, { tenantId: f.manifests[0].tenantId, clientId: f.manifests[0].clientId, canonicalAgentId: f.manifests[0].canonicalAgentId });
+  await assert.rejects(f.config(), code('RUNTIME_AGENT_IDENTITY_DUPLICATE'));
+  await f.manifest(1, { tenantId: 'another-tenant', installationId: f.manifests[0].installationId });
+  await assert.rejects(f.config(), code('RUNTIME_INSTALLATION_DUPLICATE'));
+});
+
+for (const kind of ['equal', 'nested', 'state', 'host', 'alias', 'ancestor-alias']) test(`reject ${kind} writable root collision without adopting state`, async t => {
+  const f = await fixture(t);
+  const first = f.profiles[0].codexHome;
+  if (kind === 'equal') await f.profile(1, { codexHome: first });
+  if (kind === 'nested') await f.profile(1, { codexHome: resolve(first, 'not-created') });
+  if (kind === 'state') await f.profile(1, { workspaceFileRootDir: resolve(f.entries[0].stateRoot, 'not-created') });
+  if (kind === 'host') await f.profile(1, { codexHome: resolve(f.raw.stateRoot, 'not-created') });
+  if (kind === 'alias') { const link = resolve(f.root, 'home-alias'); await symlink(first, link); await f.profile(1, { codexHome: link }); }
+  if (kind === 'ancestor-alias') { const link = resolve(f.root, 'parent-alias'); await symlink(first, link); await f.profile(1, { codexHome: resolve(link, 'not-created') }); }
+  await assert.rejects(f.config(), code(['alias', 'ancestor-alias'].includes(kind) ? 'RUNTIME_PATH_SYMLINK' : kind === 'host' ? 'RUNTIME_HOST_ROOT_OVERLAP' : 'RUNTIME_AGENT_ROOTS_OVERLAP'));
+  assert.deepEqual(await readdir(f.entries[0].stateRoot), []);
+});
+
+test('identity substitution, legacy credentials and injected runtime keys fail closed', async t => {
+  const f = await fixture(t);
+  await f.profile(0, { agentId: 'other-agent' });
+  await assert.rejects(f.config(), code('RUNTIME_PROFILE_IDENTITY_INVALID'));
+  await f.profile(0, { agentId: f.manifests[0].canonicalAgentId });
+  for (const key of ['apiKey', 'workspaceFileRuntimeAuthHeader', 'runtimeAuthorization', 'runtimeSubjectKey', 'runtimeProviderEnvironment']) {
+    await f.profile(0, { extra: [{ [key]: 'private-never-logged' }] });
+    await assert.rejects(f.config(), code('RUNTIME_PROFILE_CREDENTIAL_FORBIDDEN'));
+  }
+});
+
+test('sealed/config file mutations and symlink replacement are rejected', async t => {
+  const f = await fixture(t);
+  await chmod(f.entries[0].profilePath, 0o666);
+  await assert.rejects(f.config(), code('RUNTIME_CONFIG_FILE_UNSAFE'));
+  await chmod(f.entries[0].profilePath, 0o600);
+  await f.json(f.entries[0].manifestPath, { ...f.manifests[0], clientId: 'tampered' });
+  await assert.rejects(f.config(), /SHA-256 mismatch/);
+  await f.json(f.entries[0].manifestPath, f.manifests[0]);
+  const stored = `${f.entries[0].profilePath}.owned-backup`; await rename(f.entries[0].profilePath, stored);
+  await symlink(stored, f.entries[0].profilePath);
+  await assert.rejects(f.config(), code('RUNTIME_PATH_SYMLINK'));
+});
+
+test('one host boots three isolated executors; initialization never means READY and revoke is per Agent', async t => {
+  const f = await fixture(t); const config = await f.config(); const mock = executors();
+  const host = new RuntimeHost({ config, instanceId: 'boot-one', createExecutor: mock.createExecutor });
+  f.cleanup(() => host.stop());
+  const started = await host.start();
+  assert.deepEqual(started.agents.map(agent => [agent.phase, agent.ready]), [['INITIALIZED', false], ['INITIALIZED', false], ['INITIALIZED', false]]);
+  await Promise.all(config.agents.map(agent => host.activate(agent.subjectKey, {})));
+  assert.equal(host.snapshot().agents.filter(agent => agent.ready).length, 3);
+  await host.isolate(config.agents[1].subjectKey);
+  assert.deepEqual(host.snapshot().agents.map(agent => agent.ready), [true, false, true]);
+  const firstStop = host.stop(); assert.equal(host.stop(), firstStop); await firstStop;
+  assert.equal(host.snapshot().agents.every(agent => agent.phase === 'STOPPED'), true);
+  for (const root of [config.stateRoot, ...config.agents.map(agent => agent.stateRoot)]) assert.deepEqual(await readdir(root), []);
+});
+
+test('one initialization failure is redacted and does not tear down other Agents', async t => {
+  const f = await fixture(t); const config = await f.config(); const logs = [];
+  const host = new RuntimeHost({ config, instanceId: 'boot-one', createExecutor: executors({ failure: config.agents[1].subjectKey }).createExecutor,
+    logger: (...args) => logs.push(args) }); f.cleanup(() => host.stop());
+  await host.start(); assert.deepEqual(host.snapshot().agents.map(agent => agent.phase), ['INITIALIZED', 'ISOLATED', 'INITIALIZED']);
+  assert.equal(JSON.stringify(logs).includes('private fixture detail'), false);
+  assert.deepEqual(await readdir(config.agents[1].stateRoot), []);
+});
+
+test('stop during initialization waits and never opens a late execution channel', async t => {
+  const f = await fixture(t); const config = await f.config();
+  let release; let entered; const started = new Promise(resolve => { entered = resolve; }); const wait = new Promise(resolve => { release = resolve; });
+  const host = new RuntimeHost({ config, instanceId: 'boot-one', createExecutor: executors({ wait: async () => { entered(); await wait; } }).createExecutor });
+  const starting = host.start(); await started; const stopping = host.stop();
+  const late = host.activate(config.agents[0].subjectKey, {}); release(); await starting; await stopping;
+  await assert.rejects(late, code('RUNTIME_AGENT_NOT_INITIALIZED'));
+  await assert.rejects(host.start(), code('RUNTIME_HOST_STOPPED'));
+  assert.deepEqual(await readdir(config.stateRoot), []);
+});
+
+test('unconfirmed executor shutdown retains both Agent and host writer ownership', async t => {
+  const f = await fixture(t); const config = await f.config();
+  const host = new RuntimeHost({ config, instanceId: 'boot-one', createExecutor: executors({ unconfirmed: config.agents[0].subjectKey }).createExecutor });
+  await host.start(); await assert.rejects(host.stop(), code('RUNTIME_HOST_STOP_UNCONFIRMED'));
+  for (const root of [config.stateRoot, config.agents[0].stateRoot]) {
+    await assert.rejects(acquireRuntimeOwnership(root, { hostId: 'other', instanceId: 'boot-two' }), code('RUNTIME_WRITER_BUSY'));
+  }
+});
+
+test('existing stale or replaced writer locks are never stolen/deleted', async t => {
+  const f = await fixture(t); const root = f.raw.stateRoot;
+  const release = await acquireRuntimeOwnership(root, { hostId: 'stable-host', instanceId: 'boot-one' });
+  const lock = resolve(root, '.runtime-writer.lock');
+  const bytes = await readFile(resolve(lock, 'owner.json'), 'utf8');
+  await assert.rejects(acquireRuntimeOwnership(root, { hostId: 'other', instanceId: 'boot-two' }), code('RUNTIME_WRITER_BUSY'));
+  assert.equal(await readFile(resolve(lock, 'owner.json'), 'utf8'), bytes);
+  await rename(lock, `${lock}.owned-backup`); await mkdir(lock, { mode: 0o700 }); await writeFile(resolve(lock, 'owner.json'), bytes, { mode: 0o600 });
+  await assert.rejects(release(), code('RUNTIME_WRITER_OWNERSHIP_LOST'));
+  assert.equal(await readFile(resolve(lock, 'owner.json'), 'utf8'), bytes);
+});
+
+test('replaced private root cannot make an old owner delete a new root lock', async t => {
+  const f = await fixture(t); const root = f.raw.stateRoot;
+  const release = await acquireRuntimeOwnership(root, { hostId: 'stable-host', instanceId: 'boot-one' });
+  await rename(root, `${root}.owned-backup`); await mkdir(root, { mode: 0o700 });
+  await cp(resolve(`${root}.owned-backup`, '.runtime-writer.lock'), resolve(root, '.runtime-writer.lock'), { recursive: true });
+  await assert.rejects(release(), code('RUNTIME_WRITER_OWNERSHIP_LOST'));
+  assert.equal((await lstat(resolve(root, '.runtime-writer.lock'))).isDirectory(), true);
+});
+
+test('writer ownership persists identity and boot IDs independently and releases only once', async t => {
+  const f = await fixture(t); const root = f.raw.stateRoot;
+  const release = await acquireRuntimeOwnership(root, { hostId: 'stable-host', instanceId: 'boot-one' });
+  const owner = JSON.parse(await readFile(resolve(root, '.runtime-writer.lock/owner.json'), 'utf8'));
+  assert.equal(owner.hostId, 'stable-host'); assert.equal(owner.instanceId, 'boot-one');
+  await Promise.all([release(), release()]); await release(); assert.deepEqual(await readdir(root), []);
+});
+
+test('unprotected/symlink state roots are not repaired or adopted', async t => {
+  const f = await fixture(t); const root = f.raw.stateRoot;
+  await chmod(root, 0o755);
+  await assert.rejects(acquireRuntimeOwnership(root, { hostId: 'stable', instanceId: 'boot' }), code('RUNTIME_ROOT_UNSAFE'));
+  assert.deepEqual(await readdir(root), []);
+  const link = resolve(f.root, 'root-alias'); await symlink(root, link);
+  await assert.rejects(acquireRuntimeOwnership(link, { hostId: 'stable', instanceId: 'boot' }), code('RUNTIME_ROOT_UNSAFE'));
+});
+
+test('injected adapter refuses guessed sessions and never imports legacy environment', async t => {
+  const f = await fixture(t); const config = await f.config();
+  await writeFile(resolve(f.root, '.env'), 'UR01_PRIVATE_IMPORT_CANARY=host-secret\nOPENCLAW_API_KEY=foreign-key\n');
+  const stdout = execFileSync(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(resolve(engineSource, 'agent-client.mjs'))}); console.log(process.env.UR01_PRIVATE_IMPORT_CANARY || 'clean')`], { cwd: f.root, encoding: 'utf8' });
+  assert.equal(stdout.trim(), 'clean');
+  const adapter = await createExecutionAdapterFactory({ config, instanceId: 'boot-one', apiOrigin: 'https://api.example.test' });
+  f.cleanup(() => adapter.close());
+  const executor = adapter.createExecutor({ agent: config.agents[0], subjectKey: config.agents[0].subjectKey });
+  await executor.initialize(); assert.equal(executor.ready(), false);
+  await assert.rejects(executor.activate({ madeUpToken: 'fake' }), code('RUNTIME_ENROLLMENT_REQUIRED'));
+  await executor.close();
+});
+
+test('mature executor retains isolated subjects/session namespaces and allowlisted child environment', async t => {
+  const f = await fixture(t, { sameAgentId: true }); const config = await f.config();
+  const { buildRuntimeExecutionEnvironment, createRuntimeExecutionHost } = await import(resolve(engineSource, 'agent-client.mjs'));
+  const engine = createRuntimeExecutionHost({ agents: config.agents, runtimeInstanceId: 'boot-one', apiOrigin: 'https://api.example.test' });
+  f.cleanup(() => engine.close());
+  assert.throws(() => createRuntimeExecutionHost({ agents: config.agents, runtimeInstanceId: 'boot-two', apiOrigin: 'https://api.example.test' }), code('RUNTIME_EXECUTOR_HOST_BUSY'));
+  const states = [];
+  for (const agent of config.agents) {
+    const executor = engine.createExecutor({ subjectKey: agent.subjectKey });
+    await executor.initialize(); const state = executor.state(); states.push(state);
+    assert.equal(state.profile.runtimeIdentity.installationId, agent.manifest.installationId);
+    assert.equal(state.profile.runtimeInstanceId, 'boot-one'); assert.equal(executor.ready(), false);
+    assert.equal(state.processor.paused, true);
+    executor.bindSkillSession({ scope: { tenantId: agent.manifest.tenantId, clientId: agent.manifest.clientId,
+      ownerJiacn: 'fixture-owner', agentId: agent.manifest.canonicalAgentId }, fence: {
+      installationId: agent.manifest.installationId, hostId: 'host-fixture', runtimeInstanceId: 'boot-one', sessionGeneration: '1' } });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(executor.registrationPayload().skillExecution.skills, []);
+    executor.disconnected(); assert.equal(executor.registrationPayload().skillExecution, undefined);
+    assert.throws(() => buildRuntimeExecutionEnvironment(state.profile, { OPENAI_API_KEY: 'foreign' }), code('RUNTIME_EXECUTION_ENV_FORBIDDEN'));
+    const env = buildRuntimeExecutionEnvironment(state.profile);
+    assert.equal(env.HOME, agent.profile.codexHome); assert.equal(env.CODEX_HOME, agent.profile.codexHome);
+    assert.equal(env.OPENCLAW_API_KEY, undefined); assert.equal(env.OPENAI_API_KEY, undefined);
+    state.sessionStore.remember(state.profile, { conversationId: 'conversation' }, `session-${agent.subjectKey}`);
+  }
+  assert.equal(new Set(states.map(state => state.inbox.rootDir)).size, 3);
+  for (const [i, state] of states.entries()) assert.equal(state.sessionStore.get(state.profile, { conversationId: 'conversation' }), `session-${config.agents[i].subjectKey}`);
+});
+
+for (const materialsFailure of [false, true]) test(`native owner survives absent/failed materials initialization (${materialsFailure}) without claiming readiness`, async t => {
+  const f = await fixture(t, { count: 1 })
+  const config = await f.config()
+  const subject = structuredClone(config.agents[0])
+  Object.assign(subject.profile, { workspaceFileApiOrigin: 'https://api.example.test', workspaceFileRootDir: resolve(f.root, 'files'),
+    nativeExecutionRootDir: resolve(f.root, 'native-inputs'), nativeExecutionStateRoot: resolve(f.root, 'native-state') })
+  if (materialsFailure) Object.assign(subject.profile, { inputCarriers: {}, typedInspectionRootDir: resolve(f.root, 'material-inputs'), typedInspectionStateRoot: subject.profile.codexHome })
+  // Source-only checkout has no prepared delivery venv. Create an isolated
+  // copied library with a never-invoked interpreter fixture; do not alter source
+  // or weaken the release-local toolchain prerequisite.
+  const library = resolve(f.root, 'test-engine')
+  await collateExecutionPayload(engineSource, library)
+  await symlink(resolve(engineSource, 'node_modules'), resolve(library, 'node_modules'))
+  await mkdir(resolve(library, '.toolchain/bin'), { recursive: true })
+  await symlink('/usr/bin/python3', resolve(library, '.toolchain/bin/python'))
+  const { createRuntimeExecutionHost } = await import(resolve(library, 'agent-client.mjs'))
+  const engine = createRuntimeExecutionHost({ agents: [subject], runtimeInstanceId: 'native-owner-test', apiOrigin: 'https://api.example.test' })
+  f.cleanup(() => engine.close())
+  const executor = engine.createExecutor({ subjectKey: subject.subjectKey })
+  await executor.initialize()
+  const state = executor.state()
+  assert.equal(state.typedInspectionProfileRuntime, null)
+  assert.ok(state.nativeExecutionProfileRuntime)
+  assert.equal(state.nativeExecutionProfileRuntime.nativeExecutionDeclaration(), null)
+  assert.equal(state.nativeExecutionProfileFailure.code, 'NATIVE_EXECUTION_PROVIDER_CONFIG_REQUIRED')
+  assert.equal(Boolean(state.typedInspectionProfileFailure), materialsFailure)
+  assert.equal(executor.registrationPayload().typedDeliberation?.nativeExecution, undefined)
+})
+
+test('unified library catalog closes actual engine imports without retired provisioning or host state', async t => {
+  const f = await fixture(t, { count: 1 });
+  for (const path of RETIRED_EXECUTION_PAYLOAD_PATHS) {
+    assert.equal(EXECUTION_PAYLOAD_FILES.some(entry => entry === path || entry.startsWith(`${path}/`)), false, path);
+  }
+  for (const path of ['native-browser-toolchain.mjs', 'toolchain/browser-session.mjs',
+    'toolchain/browser-probe.mjs', 'toolchain/browser-fonts.conf', 'toolchain/browser/README.md',
+    'toolchain/browser/package.json', 'toolchain/browser/package-lock.json']) {
+    assert.ok(EXECUTION_PAYLOAD_FILES.includes(path), path);
+  }
+  for (const name of ['isolated-engine-profile.mjs', 'native-execution-runtime.mjs']) assert.equal(EXECUTION_PAYLOAD_FILES.includes(name), true);
+  assert.equal(EXECUTION_PAYLOAD_FILES.includes('app-server-usage.mjs'), true);
+  assert.equal(EXECUTION_PAYLOAD_FILES.includes('native-usage-receipts.mjs'), true);
+  assert.equal(EXECUTION_PAYLOAD_FILES.includes('chat-usage-delivery.mjs'), true);
+  assert.equal(EXECUTION_PAYLOAD_FILES.includes('skill-usage-delivery.mjs'), true);
+  assert.equal(EXECUTION_PAYLOAD_FILES.includes('skill-manifest.mjs'), true);
+  assert.equal(EXECUTION_PAYLOAD_FILES.includes('conversation-tools.mjs'), true);
+  assert.equal(EXECUTION_PAYLOAD_FILES.includes('chat-context-delivery.mjs'), true);
+  assert.equal(EXECUTION_PAYLOAD_FILES.includes('juyiting-review-basis.mjs'), true);
+  assert.equal(EXECUTION_PAYLOAD_FILES.includes('schemas/skill-manifest-v1.schema.json'), true);
+  const target = resolve(f.root, 'codex-bridge');
+  const result = await collateExecutionPayload(engineSource, target);
+  assert.equal(result.payloadCount, EXECUTION_PAYLOAD_FILES.length); assert.equal(result.dependenciesValidated, false);
+  await assert.rejects(collateExecutionPayload(engineSource, target), cause => cause.code === 'EEXIST');
+  assert.deepEqual(await readFile(resolve(target, 'schemas/skill-manifest-v1.schema.json')),
+    await readFile(resolve(engineSource, 'schemas/skill-manifest-v1.schema.json')));
+  const manifestModule = resolve(target, 'skill-manifest.mjs');
+  const originalManifestModule = await readFile(manifestModule);
+  await writeFile(manifestModule, "import 'undeclared-validation-package/subpath.js';\n" + originalManifestModule);
+  await assert.rejects(validateExecutionPayload(target, { dependencies: false, toolchain: false }), code('RUNTIME_PAYLOAD_DEPENDENCY_UNDECLARED'));
+  await writeFile(manifestModule, originalManifestModule);
+  const installed = await readdir(target); assert.equal(installed.includes('.env'), false); assert.equal(installed.includes('node_modules'), false);
+  await writeFile(resolve(target, '.env'), 'foreign-secret');
+  await assert.rejects(validateExecutionPayload(target, { dependencies: false, toolchain: false }), code('RUNTIME_PAYLOAD_PRIVATE_STATE_FORBIDDEN'));
+});
+
+test('unified library rejects reintroduced legacy auth/provisioning assets, symlinks and executable package entries', async t => {
+  const f = await fixture(t, { count: 1 });
+  const target = resolve(f.root, 'retirement-artifact'); await collateExecutionPayload(engineSource, target);
+  for (const path of RETIRED_EXECUTION_PAYLOAD_PATHS) {
+    const injected = resolve(target, path); await mkdir(dirname(injected), { recursive: true });
+    await writeFile(injected, 'retired fixture, never executed');
+    await assert.rejects(validateExecutionPayload(target, { dependencies: false, toolchain: false }), code('RUNTIME_PAYLOAD_LEGACY_ENTRY_FORBIDDEN'));
+    await rm(injected);
+  }
+  await symlink(resolve(f.root, 'missing-broker'), resolve(target, 'managed-host.mjs'));
+  await assert.rejects(validateExecutionPayload(target, { dependencies: false, toolchain: false }), code('RUNTIME_PAYLOAD_LEGACY_ENTRY_FORBIDDEN'));
+  await rm(resolve(target, 'managed-host.mjs'));
+  const path = resolve(target, 'package.json'); const original = JSON.parse(await readFile(path, 'utf8'));
+  for (const entry of ['start', 'prestart', 'poststart', 'bin']) {
+    const injected = structuredClone(original);
+    if (entry === 'bin') injected.bin = { 'old-agent': './agent-client.mjs' };
+    else injected.scripts[entry] = 'node agent-client.mjs';
+    await writeFile(path, JSON.stringify(injected));
+    await assert.rejects(validateExecutionPayload(target, { dependencies: false, toolchain: false }), code('RUNTIME_PAYLOAD_LEGACY_ENTRY_FORBIDDEN'));
+  }
+  await writeFile(path, JSON.stringify(original));
+  assert.equal((await validateExecutionPayload(target, { dependencies: false, toolchain: false })).payloadCount, EXECUTION_PAYLOAD_FILES.length);
+});
+
+test('packaged engine literal import tampering or linked source fails closed', async t => {
+  const f = await fixture(t, { count: 1 }); const source = resolve(f.root, 'source');
+  await collateExecutionPayload(engineSource, source);
+  await writeFile(resolve(source, 'agent-client.mjs'), "import './not-packaged.mjs';\n");
+  await assert.rejects(validateExecutionPayload(source, { dependencies: false, toolchain: false }), code('RUNTIME_PAYLOAD_IMPORT_MISSING'));
+  const path = resolve(source, 'package.json'); await rename(path, `${path}.owned-backup`); await symlink(`${path}.owned-backup`, path);
+  await assert.rejects(collateExecutionPayload(source, resolve(f.root, 'target')), code('RUNTIME_PAYLOAD_SOURCE_UNSAFE'));
+});
+
+
+test('owned child cleanup escalates after signal-sent and awaits close, without leaking host secrets', async t => {
+  const f = await fixture(t, { count: 1 });
+  const { buildRuntimeExecutionEnvironment, stopRuntimeExecutionChild } = await import(resolve(engineSource, 'agent-client.mjs'));
+  const child = spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>{}); process.stdout.write('ready\\n'); setInterval(()=>{},1000)"], {
+    cwd: f.profiles[0].codexWorkdir, env: buildRuntimeExecutionEnvironment(f.profiles[0]), stdio: ['ignore', 'pipe', 'pipe']
+  });
+  f.cleanup(async () => { if (child.exitCode === null && child.signalCode === null) { const closed = new Promise(resolve => child.once('close', resolve)); child.kill('SIGKILL'); await closed; } });
+  await new Promise(resolve => child.stdout.once('data', resolve));
+  let closed = false; child.once('close', () => { closed = true; });
+  await stopRuntimeExecutionChild(f.profiles[0], child, { escalationMs: 10 });
+  assert.equal(child.killed, true); assert.equal(child.signalCode, 'SIGKILL'); assert.equal(closed, true);
+  await stopRuntimeExecutionChild(f.profiles[0], child);
+});
+
+test('multi-Agent validate CLI reads config without engine effects; run fails closed until wire is bound', async t => {
+  const f = await fixture(t);
+  const entry = resolve(repo, 'conf/cyf-agent-runtime-v1/agent-runtime.mjs');
+  const stdout = execFileSync(process.execPath, [entry, 'validate', '--config', f.path], { encoding: 'utf8' });
+  assert.deepEqual(JSON.parse(stdout), { valid: true, hostId: 'stable-host', agentCount: 3 });
+  assert.deepEqual(await readdir(f.raw.stateRoot), []);
+  const { main } = await import(entry);
+  await assert.rejects(main(['run', '--config', f.path], {}), code('RUNTIME_API_ORIGIN_REQUIRED'));
+  assert.deepEqual(await Promise.all(f.entries.map(entry => readdir(entry.stateRoot))), [[], [], []]);
+});
+
+test('installer refuses existing targets, unavailable Node and unprepared parents before dependencies', async t => {
+  const f = await fixture(t, { count: 1 });
+  const installer = resolve(repo, 'conf/cyf-agent-runtime-v1/install.sh');
+  const target = resolve(f.root, 'artifact'); await mkdir(target, { mode: 0o700 });
+  await writeFile(resolve(target, 'foreign-marker'), 'untouched');
+  assert.throws(() => execFileSync('bash', [installer, '--target', target], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), cause => /target exists/.test(cause.stderr));
+  assert.equal(await readFile(resolve(target, 'foreign-marker'), 'utf8'), 'untouched');
+  assert.throws(() => execFileSync('bash', [installer, '--target', resolve(f.root, 'unprepared/artifact')], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), cause => /parent must exist/.test(cause.stderr));
+  const wrongNode = resolve(f.root, 'missing-node');
+  assert.throws(() => execFileSync('bash', [installer, '--target', resolve(f.root, 'new-artifact'), '--node', wrongNode], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), cause => /Node\/npm\/Python toolchain unavailable/.test(cause.stderr));
+  assert.equal((await readdir(f.root)).some(name => name.startsWith('.cyf-agent-runtime.stage')), false);
+});
+
+test('dependency preparation failure never publishes or leaves its stage; does not invoke Python', async t => {
+  const f = await fixture(t, { count: 1 });
+  const installer = resolve(repo, 'conf/cyf-agent-runtime-v1/install.sh');
+  const versionReadback = resolve(f.root, 'packaged-node-version.txt');
+  const npm = resolve(f.root, 'fixture-npm.cjs');
+  await writeFile(npm, `const fs = require('node:fs'); const path = require('node:path');
+    fs.copyFileSync(path.resolve(process.cwd(), '../runtime/node-version.txt'), ${JSON.stringify(versionReadback)});
+    process.exit(31);\n`, { mode: 0o700 });
+  const python = resolve(f.root, 'fixture-python'); const marker = resolve(f.root, 'python-was-called');
+  await writeFile(python, `#!/bin/sh\ntouch '${marker}'\nexit 32\n`, { mode: 0o700 });
+  const target = resolve(f.root, 'artifact');
+  assert.throws(() => execFileSync('bash', [installer, '--target', target, '--node', process.execPath, '--npm', npm, '--python', python], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']
+  }), cause => cause.status === 31 && cause.stdout.includes(`Runtime Node version: ${process.versions.node}`));
+  assert.equal((await readFile(versionReadback, 'utf8')).trim(), process.versions.node);
+  await assert.rejects(lstat(target), cause => cause.code === 'ENOENT');
+  await assert.rejects(lstat(marker), cause => cause.code === 'ENOENT');
+  assert.equal((await readdir(f.root)).some(name => name.startsWith('.cyf-agent-runtime.stage')), false);
+});
+
+test('validator checks full artifact-local dependency/toolchain graph instead of accepting payload-only collation', async t => {
+  const f = await fixture(t, { count: 1 });
+  const artifact = resolve(f.root, 'artifact'); await mkdir(artifact);
+  await cp(resolve(repo, 'conf/cyf-agent-runtime-v1'), resolve(artifact, 'runtime'), { recursive: true });
+  await collateExecutionPayload(engineSource, resolve(artifact, 'codex-bridge'));
+  await mkdir(resolve(artifact, 'node/bin'), { recursive: true }); await cp(process.execPath, resolve(artifact, 'node/bin/node')); await chmod(resolve(artifact, 'node/bin/node'), 0o755);
+  const validator = resolve(artifact, 'runtime/validate.sh');
+  assert.throws(() => execFileSync('bash', [validator, '--root', artifact], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), cause => /node_modules/.test(cause.stderr));
+  await cp(resolve(engineSource, 'node_modules'), resolve(artifact, 'codex-bridge/node_modules'), { recursive: true, dereference: true });
+  assert.throws(() => execFileSync('bash', [validator, '--root', artifact], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), cause => /\.toolchain/.test(cause.stderr));
+  const ws = resolve(artifact, 'codex-bridge/node_modules/ws/package.json');
+  const packageJson = JSON.parse(await readFile(ws, 'utf8')); packageJson.version = '0.0.0'; await writeFile(ws, JSON.stringify(packageJson));
+  await assert.rejects(validateExecutionPayload(resolve(artifact, 'codex-bridge'), { toolchain: false }), code('RUNTIME_DEPENDENCY_VERSION_MISMATCH'));
+});
+
+// Exercise the validator's exact eval command with real collated source and an
+// explicit copy of this worktree's existing JS dependencies, as above. No installer,
+// npm/pip, Python/config/auth or service runs; this is NOT clean-target C1-C4 proof.
+async function validatorImportFixture(t) {
+  const root = await mkdtemp(resolve(tmpdir(), 'ur01-validator import-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const artifact = resolve(root, 'artifact'); await mkdir(artifact);
+  await mkdir(resolve(artifact, 'runtime'));
+  await cp(resolve(repo, 'conf/cyf-agent-runtime-v1/agent-runtime.mjs'), resolve(artifact, 'runtime/agent-runtime.mjs'));
+  await cp(resolve(repo, 'conf/cyf-agent-runtime-v1/lib'), resolve(artifact, 'runtime/lib'), { recursive: true });
+  const engine = resolve(artifact, 'codex-bridge');
+  await collateExecutionPayload(engineSource, engine);
+  await cp(resolve(engineSource, 'node_modules'), resolve(engine, 'node_modules'), { recursive: true, dereference: true });
+  await validateExecutionPayload(engine, { toolchain: false });
+  const source = await readFile(resolve(repo, 'conf/cyf-agent-runtime-v1/validate.sh'), 'utf8');
+  const start = source.indexOf('# The import must resolve from this artifact');
+  const end = source.indexOf('if [ -n "$CONFIG" ]; then', start);
+  assert.ok(start >= 0 && end > start, 'validator import command boundaries are present');
+  const command = source.slice(start, end);
+  const options = { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    env: { PATH: process.env.PATH || '', NODE_BIN: process.execPath, PACKAGE_ROOT: artifact } };
+  return { root, engine, options, run: () => execFileSync('bash', ['--noprofile', '--norc', '-c', command], options) };
+}
+
+test('validator artifact import loads the real engine without invoking its retired CLI', async t => {
+  const f = await validatorImportFixture(t);
+  const before = await readdir(f.root);
+  assert.equal(f.run(), '');
+  assert.deepEqual(await readdir(f.root), before);
+  for (const name of ['.env', 'data', '.toolchain', 'codex-session-map.json']) {
+    await assert.rejects(lstat(resolve(f.engine, name)), cause => cause.code === 'ENOENT');
+  }
+});
+
+test('validator artifact import regression reproduces eval ambiguity and keeps direct engine CLI retired', async t => {
+  const f = await validatorImportFixture(t);
+  const entry = resolve(f.engine, 'agent-client.mjs');
+  const originalEval = 'await import((await import("node:url")).pathToFileURL(process.argv[1]));';
+  const denied = cause => cause.status === 1 && /legacy API-key execution is retired/.test(cause.stderr);
+  assert.throws(() => execFileSync(process.execPath, ['--input-type=module', '-e', originalEval, entry], f.options), denied);
+  for (const args of [[], ['--validate']]) {
+    assert.throws(() => execFileSync(process.execPath, [entry, ...args], f.options), denied);
+  }
+});
+
+test('validator artifact import fails closed for a missing local module or execution host export', async t => {
+  const f = await validatorImportFixture(t);
+  const dependency = resolve(f.engine, 'workspace-manager.mjs');
+  const source = await readFile(dependency);
+  await rm(dependency);
+  assert.throws(f.run, cause => cause.status !== 0 && /ERR_MODULE_NOT_FOUND/.test(cause.stderr));
+  await writeFile(dependency, source);
+  await writeFile(resolve(f.engine, 'agent-client.mjs'), 'export const unrelated = true;\n');
+  assert.throws(f.run, cause => cause.status !== 0 && /Runtime execution host export is missing/.test(cause.stderr));
+});
+
+test('validator imports the collated Runtime control graph without requiring host configuration', async t => {
+  const f = await validatorImportFixture(t);
+  assert.equal(f.run(), '');
+  assert.ok(EXECUTION_PAYLOAD_FILES.includes('skill-inventory.mjs'));
+  await rm(resolve(f.engine, 'skill-inventory.mjs'));
+  assert.throws(f.run, cause => cause.status !== 0 && /ERR_MODULE_NOT_FOUND/.test(cause.stderr)
+    && /skill-inventory/.test(cause.stderr));
+});
+
+test('single-artifact units pin local Node and shared host config; shell entry has no activation/reload', async () => {
+  const units = await Promise.all([resolve(repo, 'systemd/cyf-agent-runtime-v1@.service'), resolve(repo, 'conf/cyf-agent-runtime-v1/systemd/cyf-agent-runtime-v1@.service')].map(path => readFile(path, 'utf8')));
+  assert.equal(units[0], units[1]);
+  assert.match(units[0], /^ExecStart=.*\/node\/bin\/node .*\/runtime\/agent-runtime.mjs run --config .*%i.host.json$/m);
+  assert.match(units[0], /^ExecStartPre=.*\/runtime\/validate.sh --root .* --config .*%i.host.json$/m);
+  assert.equal(units[0].includes('--state-dir'), false); assert.equal(units[0].includes('/usr/bin/env node'), false);
+  const shell = await readFile(resolve(repo, 'shell/cyf_agent_runtime_v1_install.sh'), 'utf8');
+  assert.equal(/\bsystemctl\b/.test(shell), false); assert.equal(/\b(?:stop|restart|enable)\b/.test(shell), false);
+});
+
+test('toolchain validation refuses a host-global interpreter alias instead of falsely claiming release closure', async t => {
+  const f = await fixture(t, { count: 1 }); const artifact = resolve(f.root, 'engine');
+  await collateExecutionPayload(engineSource, artifact);
+  await mkdir(resolve(artifact, '.toolchain/bin'), { recursive: true });
+  await symlink('/usr/bin/python3', resolve(artifact, '.toolchain/bin/python'));
+  await assert.rejects(validateExecutionPayload(artifact, { dependencies: false }), code('RUNTIME_TOOLCHAIN_PATH_UNSAFE'));
+});
+
+// M3 adapter acceptance: exact Wire r1 token-free registration and per-subject
+// lifecycle. Synthetic socket/HTTP only; no server/production claim.
+async function channelFixture(t, { ackRegistration = true, nativeWorkNotifications = null, workspaceFileWorkNotifications = null, archiveJobDiscovery = null, chatReady = false, types = ['TASK_INVITE'], healthy = true, validateBusiness = false, firstIdentity = {}, measureSkills = false, sessionFailureOnce = null, reconcileSkills = false } = {}) {
+  const { EventEmitter } = await import('node:events');
+  const { RuntimeV1Client } = await import('../lib/runtime-client.mjs');
+  const f = await fixture(t, { count: 2, firstIdentity }); const config = await f.config();
+  const requests = []; const sockets = []; const engines = new Map(); const logs = [];
+  const normalize = validateBusiness ? (await import('../../codex-bridge/agent-client.mjs')).normalizeInboundMessage : null;
+  const socketEvents = new EventEmitter();
+  class Socket extends EventEmitter {
+    constructor(url, options) {
+      super(); this.url = url; this.headers = options.headers; this.readyState = 0; this.sent = [];
+      // Concurrent session HTTP reads can complete in either order; fixture indices are subjects, not arrival order.
+      const index = config.agents.findIndex(agent => agent.manifest.canonicalAgentId === this.headers['X-Agent-Id']);
+      assert.ok(index >= 0);
+      if (!sockets[index]) sockets[index] = this; else sockets.push(this);
+      queueMicrotask(() => { if (this.readyState === 0) { this.readyState = 1; this.emit('open'); socketEvents.emit('opened', this); } });
+    }
+    send(bytes) {
+      const frame = fromAgentWire(bytes); this.sent.push(frame);
+      if (frame.messageType === 'agent.register' && ackRegistration) queueMicrotask(() => this.receive({ type: 'agent_registered',
+        messageId: frame.messageId, agentId: frame.agentId, runtimeInstanceId: frame.runtimeInstanceId,
+        installationId: frame.installationId, hostId: frame.hostId, sessionGeneration: frame.sessionGeneration,
+        status: 'online', durableStateHealthy: frame.durableStateHealthy, readyCommandTypes: frame.readyCommandTypes,
+        ...(nativeWorkNotifications === 1 ? { nativeWorkNotifications: 1 } : {}),
+        ...(workspaceFileWorkNotifications === 1 ? { workspaceFileWorkNotifications: 1 } : {}),
+        ...(archiveJobDiscovery !== null ? { archiveJobDiscovery } : {}),
+        ...(measureSkills ? { runtimeAuth: { scheme: 'native-runtime-v1', tenantId: frame.tenantId, clientId: frame.clientId,
+          ownerJiacn: 'fixture-owner', agentId: frame.agentId, installationId: frame.installationId, hostId: frame.hostId,
+          runtimeInstanceId: frame.runtimeInstanceId, sessionGeneration: frame.sessionGeneration, contextPackEnabled: true } } : {}) }));
+    }
+    receive(frame) { this.emit('message', Buffer.from(JSON.stringify(agentMessageFixture(frame)))); }
+    close(code = 1000) { if (this.readyState === 3) return; this.readyState = 3; queueMicrotask(() => this.emit('close', code)); }
+    terminate() { this.close(); }
+  }
+  const module = {
+    buildProtocolEnvelope: (messageType, payload) => ({ schemaVersion: 1, messageType, ...payload }),
+    createRuntimeExecutionHost: () => ({
+      createExecutor: ({ subjectKey, agent }) => {
+        const state = { profile: agent.profile, processor: { pause: () => { state.paused = true; } }, healthy,
+          accepted: [], normalized: [], closed: false, resumed: 0, types: [...types], paused: true, transport: null };
+        engines.set(subjectKey, state);
+        return {
+          initialize: async () => {}, bindTransport: transport => { state.transport = transport; }, attachSocket: socket => { state.socket = socket; },
+          bindSkillSession: binding => {
+            state.skillBinding = binding;
+            if (!measureSkills || !binding || state.catalogMeasured) return false;
+            queueMicrotask(() => { state.catalogMeasured = true; state.transport.refreshCapabilities(); });
+            return true;
+          },
+          bindWorkNotifications: version => { state.workNotificationVersion = version; },
+          nativeWorkAvailable: () => { state.workHints = (state.workHints || 0) + 1; },
+          bindWorkspaceFileWorkNotifications: version => { state.fileWorkNotificationVersion = version; },
+          workspaceFileWorkAvailable: () => { state.fileWorkHints = (state.fileWorkHints || 0) + 1; },
+          matchesSkillManagementAck: envelope => state.skillInstallManager?.matchesDurableAckEnvelope(envelope) === true,
+          ...(reconcileSkills ? {
+            reconcilePositionSkills: async () => { (state.reconciliation ||= []).push('positions'); if (state.positionGate) await state.positionGate; if (state.reconcileFailure) throw Object.assign(new Error('private'), {code:'POSITION_TEST_FAILURE'}); },
+            reconcileArchiveJobs: async () => { (state.reconciliation ||= []).push('archive'); }
+          } : {}),
+          matchesSkillInstallResult: envelope => state.skillInstallManager?.matchesDurableResultEnvelope(envelope) === true,
+          matchesSkillInstallReceipt: receipt => state.skillInstallManager?.matchesDurableResultReceipt(receipt) === true,
+          durableStateHealthy: () => { state.healthChecks = (state.healthChecks || 0) + 1; return state.healthy; }, readyCommandTypes: () => state.types, chatReady: () => chatReady,
+          registrationPayload: () => ({ runtimeCapabilities: { profiles: { EXECUTE: { available: false } } } }),
+          acceptFrame: async frame => { state.accepted.push(frame); if (normalize && !(frame.type === 'agent_message_saved' && !Object.hasOwn(frame, 'messageType'))) state.normalized.push(isManagementMessage(frame) ? parseManagementMessage(frame) : normalize(frame)); return state.handleFrame?.(frame); }, resume: async () => { state.resumed++; },
+          disconnected: () => { state.paused = true; }, suspendAdmission: () => { state.paused = true; },
+          close: async () => { state.closed = true; }, state: () => state
+        };
+      }, close: async () => {}
+    })
+  };
+  for (const agent of config.agents) await f.json(resolve(agent.stateRoot, 'runtime-authorization.json'), { installationId: agent.manifest.installationId, runtimeAuthorization: 'synthetic-' + agent.manifest.installationId });
+  const generation = new Map();
+  const adapters = await createExecutionAdapterFactory({ config, instanceId: 'boot-fixture', apiOrigin: 'https://api.example.test', socketFactory: Socket, logger: (event, details) => logs.push({ event, ...details }),
+    loadEngine: async () => module, clientFactory: settings => new RuntimeV1Client({ ...settings, fetchFn: async (url, options) => {
+      const body = JSON.parse(options.body).data; requests.push({ url, options, body });
+      if (url.endsWith('/session')) {
+        if (sessionFailureOnce) { const code = sessionFailureOnce; sessionFailureOnce = null; throw new TypeError('fetch failed', { cause: { code } }); }
+        const current = (generation.get(body.runtimeInstallationId) || 6) + 1; generation.set(body.runtimeInstallationId, current);
+        return httpFixture(options, { ...Object.fromEntries(['runtimeInstallationId','tenantId','clientId','canonicalAgentId','hostId','runtimeInstanceId'].map(key => [key, body[key]])), sessionGeneration: String(current),
+          scheme: 'AgentRuntime', sessionToken: 'rts1_' + 'a'.repeat(64), websocketPath: '/ws/agent/channel', status: 'CHANNEL_PENDING' });
+      }
+      return httpFixture(options, { kind: 'ADVANCED', status: body.status, deliveryVersion: String(BigInt(body.deliveryVersion ?? '0') + 1n) });
+    } }) });
+  f.cleanup(() => adapters.close());
+  const executors = config.agents.map(agent => adapters.createExecutor({ subjectKey: agent.subjectKey, agent }));
+  for (const executor of executors) await executor.initialize();
+  return { f, config, adapters, sockets, requests, executors, engines, logs, states: () => [...engines.values()], nextOpened: () => new Promise(resolveOpen => socketEvents.once('opened', resolveOpen)), opened: () => sockets.some(socket => socket.readyState === 1) ? Promise.resolve() : new Promise(resolveOpen => socketEvents.once('opened', resolveOpen)), tick: () => new Promise(resolveTick => setImmediate(resolveTick)) };
+}
+
+// API updateAgentStatus(copyTrace(agent.presence)) deliberately has no
+// messageType. Exercise the actual adapter/observer/client, not a copied router.
+const presenceReceipt = presence => ({ schemaVersion: 1, type: 'agent_status_updated',
+  messageId: presence.messageId, agentId: presence.agentId,
+  runtimeInstanceId: presence.runtimeInstanceId, status: presence.status });
+const registrationReceipt = registration => ({ type: 'agent_registered',
+  messageId: registration.messageId, agentId: registration.agentId, runtimeInstanceId: registration.runtimeInstanceId,
+  installationId: registration.installationId, hostId: registration.hostId, sessionGeneration: registration.sessionGeneration,
+  status: 'online', durableStateHealthy: registration.durableStateHealthy, readyCommandTypes: registration.readyCommandTypes });
+
+const nativeWorkHint = registration => ({ protocolVersion: 1, requestId: 'hint-request', messageId: 'hint-message',
+  messageType: 'runtime.work.available', data: { notificationVersion: 1, lane: 'NATIVE_CONVERSATION',
+    tenantId: registration.tenantId, clientId: registration.clientId, agentId: registration.agentId,
+    runtimeInstallationId: registration.installationId, hostId: registration.hostId,
+    runtimeInstanceId: registration.runtimeInstanceId, sessionGeneration: String(registration.sessionGeneration) } });
+
+test('native work hint only wakes the confirmed current session and never enters command ingress', async t => {
+  const c = await channelFixture(t, { nativeWorkNotifications: 1 }); await c.executors[0].activate();
+  const socket = c.sockets[0], state = c.states()[0];
+  const hint = nativeWorkHint(socket.sent.find(frame => frame.messageType === 'agent.register'));
+  assert.equal(state.workNotificationVersion, 1);
+  socket.receive({ ...hint, data: { ...hint.data, harmlessFutureField: true } });
+  for (const [field, value] of Object.entries({ tenantId: 'foreign', clientId: 'foreign', agentId: 'foreign',
+    runtimeInstallationId: 'foreign', hostId: 'foreign', runtimeInstanceId: 'old', sessionGeneration: '6',
+    notificationVersion: 2, lane: 'OTHER' })) socket.receive({ ...hint, data: { ...hint.data, [field]: value } });
+  const missing = { ...hint.data }; delete missing.hostId; socket.receive({ ...hint, data: missing });
+  await c.tick();
+  assert.equal(state.workHints, 1); assert.deepEqual(state.accepted, []);
+  assert.equal(c.executors[0].ready(), true);
+});
+
+test('native notification negotiation requires correlated registration and old ACK retains fallback', async t => {
+  const c = await channelFixture(t, { ackRegistration: false });
+  const activating = c.executors[0].activate(); await c.opened();
+  const socket = c.sockets[0], state = c.states()[0], registration = socket.sent[0];
+  socket.receive(nativeWorkHint(registration));
+  socket.receive({ ...registrationReceipt(registration), messageId: 'unrelated', nativeWorkNotifications: 1 });
+  await c.tick();
+  assert.equal(state.workHints, undefined); assert.equal(state.workNotificationVersion, undefined);
+  socket.receive(registrationReceipt(registration)); await activating;
+  assert.equal(state.workNotificationVersion, null); assert.deepEqual(state.accepted, []);
+});
+
+test('presence receipt control stays out of business, never re-registers or mutates readiness', async t => {
+  const c = await channelFixture(t, { validateBusiness: true });
+  await Promise.all(c.executors.map(executor => executor.activate())); await c.adapters.heartbeat(); await c.tick();
+  const socket = c.sockets[0]; const state = c.states()[0];
+  const before = c.executors[0].evidence(); const resumed = state.resumed;
+  const sent = socket.sent.length; const receipt = presenceReceipt(socket.sent.findLast(frame => frame.messageType === 'agent.presence'));
+  for (const status of ['online', 'busy', 'offline', 'error']) socket.receive({ ...receipt, status, arbitrary: 'synthetic-secret-never-log' });
+  socket.receive({ type: 'agent_status_updated', data: receipt }); // supported server data wrapper
+  socket.receive(receipt); // same/delayed receipt is harmless, no registry required
+  await c.tick();
+  assert.deepEqual(state.accepted, []); assert.equal(socket.sent.length, sent); assert.equal(state.resumed, resumed);
+  assert.deepEqual(c.executors[0].evidence(), before); assert.equal(c.executors[0].ready(), true);
+  assert.equal(c.logs.filter(row => row.event === 'runtime-control-receipt').length, 5);
+  assert.equal(c.logs.some(row => row.code === 'MESSAGE_TYPE_REQUIRED'), false);
+  assert.equal(JSON.stringify(c.logs).includes('synthetic-secret-never-log'), false);
+  assert.ok(c.logs.filter(row => row.event === 'runtime-control-receipt').every(row => Object.keys(row).join(',') === 'event,type'));
+});
+
+test('canonical scoped informational controls never enter business or change readiness', async t => {
+  const c = await channelFixture(t, { validateBusiness: true }); await c.executors[0].activate();
+  const socket = c.sockets[0], before = c.executors[0].evidence();
+  const registration = socket.sent.find(frame => frame.messageType === 'agent.register');
+  const types = ['agent.status', 'agent.capability.index', 'connection.pong', 'task.report.receipt', 'chat.dispatch.receipt'];
+  for (const messageType of types) socket.receive({ protocolVersion: 1, requestId: 'control-request', messageId: 'control-' + messageType,
+    messageType, data: { tenantId: registration.tenantId, clientId: registration.clientId, ownerJiacn: 'owner', agentId: 'another-agent', status: 'online' },
+    ...(messageType.endsWith('.receipt') || messageType === 'connection.pong' ? { correlationId: 'request', code: 'E0', msg: 'ok' } : {}) });
+  socket.receive({ protocolVersion: 1, requestId: 'foreign', messageId: 'foreign', messageType: 'agent.status', data: { tenantId: 'foreign' } });
+  await c.tick();
+  assert.deepEqual(c.states()[0].accepted, []); assert.deepEqual(c.executors[0].evidence(), before);
+  assert.equal(c.logs.filter(row => row.event === 'runtime-control-receipt').length, types.length);
+  assert.equal(c.logs.some(row => row.code === 'MESSAGE_TYPE_REQUIRED'), false);
+  assert.equal(c.logs.filter(row => row.code === 'RUNTIME_FRAME_GENERATION_MISMATCH').length, 1);
+});
+
+test('presence receipt control cannot grant registration; explicit business types cannot spoof ACK', async t => {
+  const c = await channelFixture(t, { ackRegistration: false });
+  let activated = false; const activating = c.executors[0].activate().then(() => { activated = true; }); await c.opened();
+  const socket = c.sockets[0]; const receipt = registrationReceipt(socket.sent[0]);
+  socket.receive(presenceReceipt({ ...socket.sent[0], status: 'online' }));
+  for (const type of ['chat.message', 'protocol.error', null]) socket.receive({ ...receipt, messageType: type });
+  socket.receive({ ...receipt, payload: { messageType: 'chat.message' } });
+  socket.receive({ type: 'agent_registered', data: { ...receipt, messageType: 'chat.message' } });
+  socket.receive({ ...receipt, sessionGeneration: 6 });
+  await c.tick(); assert.equal(activated, false); assert.equal(c.executors[0].ready(), false);
+  assert.equal(c.executors[0].evidence(), null); assert.equal(socket.readyState, 1);
+  socket.receive(receipt); await activating; assert.equal(c.executors[0].ready(), true);
+  assert.equal(socket.sent.filter(frame => frame.messageType === 'agent.register').length, 1);
+});
+
+test('presence receipt control rejects wrong subject/session and malformed trace without logging secrets', async t => {
+  const c = await channelFixture(t, { validateBusiness: true }); await c.executors[0].activate(); await c.adapters.heartbeat();
+  const socket = c.sockets[0]; const receipt = presenceReceipt(socket.sent.findLast(frame => frame.messageType === 'agent.presence'));
+  const before = c.executors[0].evidence();
+  const invalid = [
+    { ...receipt, sessionGeneration: 6 }, { type: receipt.type, data: { ...receipt, sessionGeneration: 6 } },
+    { ...receipt, payload: { sessionGeneration: 6 } }, { ...receipt, agentId: 'foreign' },
+    { ...receipt, runtimeInstanceId: 'foreign' }, { ...receipt, schemaVersion: '1' },
+    { ...receipt, messageId: '' }, { ...receipt, messageId: ' bad ' }, { ...receipt, messageId: 'x'.repeat(129) },
+    { ...receipt, status: 'ready' }, { ...receipt, agentId: undefined }
+  ];
+  for (const frame of invalid) socket.receive({ ...frame, error: 'synthetic-secret-never-log' });
+  await c.tick(); assert.deepEqual(c.states()[0].accepted, []); assert.deepEqual(c.executors[0].evidence(), before);
+  assert.equal(c.logs.filter(row => row.event === 'runtime-frame-rejected').length, invalid.length);
+  assert.ok(c.logs.every(row => ['RUNTIME_FRAME_GENERATION_MISMATCH', 'RUNTIME_CONTROL_RECEIPT_INVALID', 'INVALID_JSON'].includes(row.code)));
+  assert.equal(JSON.stringify(c.logs).includes('synthetic-secret-never-log'), false);
+});
+
+test('presence receipt control does not swallow explicit business declarations or normal ping', async t => {
+  const c = await channelFixture(t, { validateBusiness: true }); await c.executors[0].activate();
+  const socket = c.sockets[0]; const before = c.executors[0].evidence();
+  socket.receive({ type: 'connected' }); socket.receive({ type: 'ping' }); await c.tick();
+  const sent = socket.sent.length;
+  assert.equal(socket.sent.at(-1).type, 'pong'); assert.deepEqual(c.states()[0].accepted, []);
+  const frames = [];
+  for (const type of ['agent_status_updated', 'connected', 'ping', 'agent_registered', 'error', 'protocol_error']) {
+    for (const messageType of ['chat.message', null]) {
+      frames.push({ schemaVersion: 1, type, messageType });
+      frames.push({ schemaVersion: 1, type, data: { messageType } });
+      frames.push({ schemaVersion: 1, type, payload: { messageType } });
+      frames.push({ schemaVersion: 1, type, data: { payload: { messageType } } });
+    }
+  }
+  for (const frame of frames) socket.receive(frame);
+  await c.tick(); assert.deepEqual(c.states()[0].accepted, []); assert.equal(socket.sent.length, sent);
+  assert.equal(c.logs.filter(row => row.event === 'runtime-frame-rejected').length, frames.length);
+  assert.equal(c.logs.some(row => row.event === 'runtime-control-receipt'), false);
+  assert.deepEqual(c.executors[0].evidence(), before);
+});
+
+test('presence receipt control keeps genuine correlated registration errors and session fencing', async t => {
+  for (const kind of ['error', 'protocol_error', 'protocol.error']) await t.test(kind, async t => {
+    const c = await channelFixture(t, { ackRegistration: false });
+    const activating = assert.rejects(c.executors[0].activate(), code('RUNTIME_REGISTRATION_REJECTED')); await c.opened();
+    const socket = c.sockets[0]; const registration = socket.sent[0];
+    const frame = { messageId: registration.messageId, runtimeInstanceId: registration.runtimeInstanceId,
+      ...(kind === 'protocol.error' ? { schemaVersion: 1, messageType: kind }
+        : kind === 'typed-error' ? { schemaVersion: 1, type: 'error', messageType: 'protocol.error' } : { type: kind }),
+      error: 'synthetic-secret-never-log' };
+    socket.receive({ ...frame, messageId: 'wrong-request' });
+    socket.receive({ ...frame, sessionGeneration: 6 });
+    socket.receive({ type: 'error', data: { ...frame, sessionGeneration: 6 } });
+    await c.tick(); assert.equal(socket.readyState, 1); assert.equal(c.executors[0].ready(), false);
+    socket.receive(frame); await activating; await c.tick(); assert.equal(c.executors[0].evidence(), null);
+    assert.equal(socket.readyState, 3); assert.equal(c.states()[0].accepted.length, 0);
+    assert.equal(JSON.stringify(c.logs).includes('synthetic-secret-never-log'), false);
+  });
+});
+
+test('public wire rejects unframed aliases while authenticated canonical CHAT and command reach their original engine', async t => {
+  const chat = JSON.parse(await readFile(resolve(engineSource, 'contracts/api-hosted-wire-v1.json'), 'utf8'));
+  const c = await channelFixture(t, { validateBusiness: true, types: ['SKILL_INSTALL'], firstIdentity: { tenantId: chat.tenantId, clientId: chat.clientId, canonicalAgentId: chat.agentId } });
+  await c.executors[0].activate(); const socket=c.sockets[0], identity=c.config.agents[0].manifest;
+  for(const raw of [{type:'unknown'}, {type:'error',data:{error:'synthetic-secret-never-log'}}]) socket.emit('message',Buffer.from(JSON.stringify(raw)));
+  await c.tick(); assert.deepEqual(c.states()[0].accepted,[]);
+  const command = managementCommand(managementPackage().target, { tenantId: identity.tenantId, clientId: identity.clientId,
+    agentId: identity.canonicalAgentId, runtimeInstallationId: identity.installationId });
+  socket.receive(command);socket.receive(chat);await c.tick();
+  assert.deepEqual(c.states()[0].normalized.map(frame=>frame.messageType),['command.dispatch','chat.message']);
+  assert.equal(JSON.stringify(c.logs).includes('synthetic-secret-never-log'),false);assert.equal(c.executors[0].ready(),true);
+});
+
+test('two independent session channels activate only exact receipt; health revocation keeps terminal reporting', async t => {
+  const c = await channelFixture(t);
+  await Promise.all(c.executors.map(executor => executor.activate()));
+  assert.deepEqual(c.executors.map(executor => executor.ready()), [true, true]);
+  assert.equal(c.requests[0].options.headers.Authorization.startsWith('Bearer synthetic-'), true);
+  const first = c.sockets[0].sent[0]; assert.deepEqual(first.readyCommandTypes, ['TASK_INVITE']);
+  assert.equal(first.durableStateHealthy, true); assert.equal(Object.hasOwn(first, 'sessionToken'), false);
+  assert.equal(c.sockets[0].headers['X-API-Key'], undefined); assert.equal(c.sockets[0].url, 'wss://api.example.test/ws/agent/channel');
+  const state = c.states()[0]; state.healthy = false; await c.adapters.heartbeat();
+  assert.deepEqual(c.executors.map(executor => executor.ready()), [false, true]);
+  assert.equal(state.transport.reportReady(), true); assert.equal(state.paused, true);
+  const command = { ...Object.fromEntries(['installationId','tenantId','clientId','canonicalAgentId'].map(key => [key, c.config.agents[0].manifest[key]])), messageId: 'original-message', correlationId: 'original-correlation', commandId: 'original-command', taskId: 'task', workItemId: null, payloadReference: 'payload', expiresAt: '2000-01-01T00:00:00.000Z' };
+  const result = await state.transport.acknowledge(command, 'SUCCEEDED', '10');
+  assert.equal(result.deliveryVersion, '11'); assert.equal(c.requests.at(-1).body.sessionGeneration, '7');
+  const presence = c.sockets[0].sent.findLast(frame => frame.messageType === 'agent.presence'); assert.equal(presence.durableStateHealthy, false);
+  state.healthy = true; await c.adapters.heartbeat(); await c.tick(); assert.equal(c.executors[0].ready(), true);
+});
+
+test('zero real adapters authenticate channel but never advertise or become execution-ready', async t => {
+  const c = await channelFixture(t, { types: [], healthy: false });
+  await c.executors[0].activate(); assert.equal(c.executors[0].ready(), false);
+  assert.deepEqual(c.sockets[0].sent[0].readyCommandTypes, []); assert.equal(c.sockets[0].sent[0].durableStateHealthy, false);
+});
+
+test('stale generation or outer/nested proof mismatch cannot activate/enter engine; CHAT/result keep their own channel', async t => {
+  const c = await channelFixture(t, { ackRegistration: false });
+  const activating = c.executors[0].activate(); await c.opened();
+  const socket = c.sockets[0]; const registration = socket.sent[0];
+  const receipt = { type: 'agent_registered', messageId: registration.messageId, agentId: registration.agentId, runtimeInstanceId: registration.runtimeInstanceId,
+    installationId: registration.installationId, hostId: registration.hostId, sessionGeneration: registration.sessionGeneration, status: 'online', durableStateHealthy: true, readyCommandTypes: registration.readyCommandTypes };
+  socket.receive({ ...receipt, sessionGeneration: 6 }); await c.tick(); assert.equal(c.executors[0].ready(), false);
+  socket.receive({ ...receipt, token: 'old-auth' }); await c.tick(); assert.equal(c.executors[0].ready(), false);
+  socket.receive(receipt); await activating;
+  socket.receive({ messageType: 'chat.message', sessionGeneration: 6 });
+  socket.receive({ messageType: 'chat.message', tenantId: 'foreign', data: {} });
+  socket.receive({ messageType: 'command.ack' });
+  socket.receive({ type: 'agent_message_saved', turnId: 'chat-own-turn', messageId: '123', eventId: 'saved-event', duplicate: false });
+  socket.receive({ messageType: 'work.result.receipt', commandId: 'result-own-command' });
+  await c.tick(); assert.deepEqual(c.states()[0].accepted.map(frame => frame.messageType || frame.type), ['agent_message_saved','work.result.receipt']);
+  assert.equal(c.states()[0].transport.send({ messageType: 'command.ack' }), false);
+});
+
+test('CHAT-only registration rejects durable ACK disagreement even with empty command types', async t => {
+  const c = await channelFixture(t, { ackRegistration: false, chatReady: true, types: [] });
+  const activating = assert.rejects(c.executors[0].activate(), code('RUNTIME_REGISTRATION_READINESS_MISMATCH')); await c.opened();
+  const registration = c.sockets[0].sent[0];
+  c.sockets[0].receive({ type: 'agent_registered', messageId: registration.messageId, agentId: registration.agentId,
+    runtimeInstanceId: registration.runtimeInstanceId, installationId: registration.installationId,
+    hostId: registration.hostId, sessionGeneration: registration.sessionGeneration, status: 'online', durableStateHealthy: false, readyCommandTypes: [] });
+  await activating; assert.equal(c.executors[0].ready(), false); assert.equal(c.executors[0].evidence(), null);
+});
+
+test('closing pending registration releases activation and only owned executor, no shutdown deadlock', async t => {
+  const c = await channelFixture(t, { ackRegistration: false });
+  const activating = assert.rejects(c.executors[0].activate(), code('RUNTIME_CHANNEL_STOPPED'));
+  await c.tick(); await c.executors[0].close(); await activating;
+  assert.equal(c.states()[0].closed, true); assert.equal(c.states()[1].closed, false);
+});
+
+test('policy revocation isolates one subject while peer channel remains ready', async t => {
+  const c = await channelFixture(t); await Promise.all(c.executors.map(executor => executor.activate()));
+  c.sockets[0].close(1008); await c.tick(); assert.deepEqual(c.executors.map(executor => executor.ready()), [false,true]);
+});
+
+test('unified SIGTERM while registration activation waits closes transports before host lifecycle gate', async t => {
+  const { runUnifiedRuntime } = await import('../agent-runtime.mjs');
+  const f = await fixture(t, { count: 2 }); const config = await f.config(); const controller = new AbortController();
+  let entered; const began = new Promise(resolveBegan => { entered = resolveBegan; }); const states = [];
+  const createAdapters = async () => {
+    const adapter = { createExecutor: () => {
+      const state = { closed: false, releaseActivation: null }; states.push(state);
+      return { initialize: async () => {}, activate: () => { entered(); return new Promise(resolveActivation => { state.releaseActivation = resolveActivation; }); },
+        ready: () => false, pause: async () => {}, close: async () => { state.closed = true; state.releaseActivation?.(); } };
+    }, heartbeat: async () => {}, close: async () => { for (const state of states) { state.closed = true; state.releaseActivation?.(); } } };
+    return adapter;
+  };
+  const running = runUnifiedRuntime({ config, apiOrigin: 'https://api.example.test', instanceId: 'boot-signal', signal: controller.signal, createAdapters });
+  await began; controller.abort(); const snapshot = await running;
+  assert.deepEqual(snapshot.agents.map(agent => agent.phase), ['STOPPED','STOPPED']); assert.ok(states.every(state => state.closed));
+  assert.deepEqual(await readdir(config.stateRoot), []); assert.deepEqual(await Promise.all(config.agents.map(agent => readdir(agent.stateRoot))), [[],[]]);
+});
+
+test('unified runtime heartbeat stops after SIGTERM and does not create a second ACK authority', async t => {
+  const { runUnifiedRuntime } = await import('../agent-runtime.mjs');
+  const f = await fixture(t, { count: 1 }); const config = await f.config(); const controller = new AbortController(); let heartbeats = 0;
+  const fake = executors();
+  await runUnifiedRuntime({ config, apiOrigin: 'https://api.example.test', instanceId: 'boot-signal', signal: controller.signal,
+    createAdapters: async () => ({ createExecutor: fake.createExecutor, heartbeat: async () => { heartbeats++; controller.abort(); }, close: async () => {} }) });
+  assert.equal(heartbeats, 1); assert.deepEqual(await readdir(config.agents[0].stateRoot), []);
+});
+
+
+test('normal reconnect rotates only owned session; old socket, old generation and peer stop never reach cancel adapter', async t => {
+  const c = await channelFixture(t); await Promise.all(c.executors.map(executor => executor.activate()))
+  const old = c.sockets[0]; const nextOpened = c.nextOpened(); old.close()
+  await c.tick(); assert.deepEqual(c.executors.map(executor => executor.ready()), [false, true])
+  const stop = { messageType: 'chat.stop', requestId: 'request', turnId: 'turn', dispatchId: 'dispatch',
+    targetAgentId: c.config.agents[0].manifest.canonicalAgentId, sessionGeneration: 7 }
+  old.receive(stop); await c.tick(); assert.equal(c.states()[0].accepted.length, 0)
+  const current = await nextOpened; await c.tick()
+  assert.equal(current.headers['X-Agent-Session-Generation'], '8'); assert.deepEqual(c.executors.map(executor => executor.ready()), [true, true])
+  current.receive(stop) // old-generation cancellation must remain harmless
+  current.receive({ ...stop, sessionGeneration: 8, installationId: c.config.agents[1].manifest.installationId })
+  old.receive({ ...stop, sessionGeneration: 8 })
+  current.receive({ ...stop, sessionGeneration: 8 })
+  await c.tick(); assert.equal(c.states()[0].accepted.length, 1); assert.equal(c.states()[0].accepted[0].sessionGeneration, '8')
+  assert.equal(c.states()[1].accepted.length, 0)
+  const proofs = c.requests.filter(row => row.url.endsWith('/session')); assert.equal(proofs.length, 3)
+  assert.equal(c.sockets[1].headers['X-Agent-Session-Generation'], '7')
+})
+
+// r2: business product installation cannot collide with Runtime proof guards.
+test('canonical skill product installation is data; wrong raw scope/Runtime-product confusion never reaches engine', async t => {
+  const c = await channelFixture(t, { types: ['SKILL_INSTALL'] });
+  await Promise.all(c.executors.map(executor => executor.activate()));
+  const identity = c.config.agents[0].manifest;
+  const state = c.states().find(value => value.profile.agentId === identity.canonicalAgentId);
+  const otherState = c.states().find(value => value !== state);
+  const socket = state.socket;
+  const raw = managementCommand(managementPackage().target, { tenantId: identity.tenantId, clientId: identity.clientId,
+    agentId: identity.canonicalAgentId, runtimeInstallationId: identity.installationId });
+  socket.receive(raw); await c.tick(); assert.deepEqual(state.accepted, [raw]);
+  for (const patch of [{ tenantId: 'foreign' }, { clientId: 'foreign' }, { agentId: 'foreign' },
+    { runtimeInstallationId: 'product-installation-is-not-auth' }]) {
+    socket.receive(managementCommand(raw.data.target, { ...raw.data, ...patch }));
+  }
+  const legacy = { schemaVersion: 1, messageType: 'command.dispatch', commandType: 'SKILL_INSTALL', targetAgentId: identity.canonicalAgentId,
+    tenantId: identity.tenantId, clientId: identity.clientId, installationId: identity.installationId, messageId: 'legacy' };
+  socket.receive(legacy);
+  await c.tick(); assert.deepEqual(state.accepted, [raw]); assert.equal(otherState.accepted.length, 0);
+});
+
+// Run only the install/validate stdlib snippets against hand-written launcher
+// files. No installer, venv, npm, pip, dependency download or format library is
+// run here. These regressions do NOT prove actual C1-C4 or Python ABI closure.
+async function venvLauncherFixture(t, { longPath = false } = {}) {
+  const root = await mkdtemp(resolve(tmpdir(), "ur01-launcher 'quote space-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const parent = longPath ? resolve(root, 'nested-' + 'a'.repeat(110), 'nested-' + 'b'.repeat(110)) : root;
+  const stage = resolve(parent, '.cyf-agent-runtime.stage.fixture');
+  const target = resolve(parent, 'target "quote $value !');
+  const relativeBin = 'codex-bridge/.toolchain/bin';
+  const bin = resolve(stage, relativeBin); await mkdir(bin, { recursive: true });
+  const metadata = resolve(stage, 'codex-bridge/.toolchain/lib/python3.6/site-packages/fixture.dist-info');
+  await mkdir(metadata, { recursive: true });
+  await writeFile(resolve(stage, 'codex-bridge/.toolchain/pyvenv.cfg'), 'home = /explicit-test-base\n');
+  for (const name of ['python', 'platform-python3.6']) {
+    // Synthetic interpreter forwarder, explicitly not an installed --copies venv.
+    await writeFile(resolve(bin, name), '#!/bin/sh\nexec /usr/bin/python3 "$@"\n', { mode: 0o755 });
+    await chmod(resolve(bin, name), 0o755); // Exact fixture mode, independent of CI umask.
+  }
+  const body = 'import json, sys\nprint(json.dumps({"file": __file__, "args": sys.argv[1:]}))\n';
+  const scripts = ['pip', 'easy_install', 'vba_extract.py', 'distlib-pip'];
+  for (const name of scripts) {
+    const interpreter = resolve(bin, name === 'easy_install' ? 'platform-python3.6' : 'python');
+    const header = name === 'distlib-pip'
+      ? `#!/bin/sh\n'''exec' "${interpreter}" "$0" "$@"\n' '''\n`
+      : `#!${interpreter}\n`;
+    await writeFile(resolve(bin, name), header + body, { mode: 0o755 });
+    await chmod(resolve(bin, name), 0o755);
+  }
+  const venv = resolve(stage, 'codex-bridge/.toolchain');
+  await writeFile(resolve(bin, 'activate'), `VIRTUAL_ENV="${venv}"\nexport VIRTUAL_ENV\n`);
+  await writeFile(resolve(bin, 'activate.csh'), `setenv VIRTUAL_ENV "${venv}"\n`);
+  await writeFile(resolve(bin, 'activate.fish'), `set -gx VIRTUAL_ENV "${venv}"\n`);
+  await writeFile(resolve(metadata, 'RECORD'), scripts.map(name => `../../../bin/${name},sha256=old,1\n`).join('') + 'untouched.py,sha256=unchanged,7\n');
+  const script = async (path, marker) => {
+    const source = await readFile(resolve(repo, path), 'utf8');
+    const start = source.indexOf(`<<'${marker}'\n`); const end = source.indexOf(`\n${marker}\n`, start);
+    assert.ok(start >= 0 && end > start, 'exact production snippet remains available');
+    return source.slice(start + marker.length + 5, end);
+  };
+  const relocate = await script('conf/cyf-agent-runtime-v1/install.sh', 'PY_RUNTIME_RELOCATE');
+  const validate = await script('conf/cyf-agent-runtime-v1/validate.sh', 'PY_RUNTIME_LAUNCHER_VALIDATE');
+  const options = { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' } };
+  const python = (source, args) => execFileSync('/usr/bin/python3', ['-I', '-S', '-B', '-c', source, ...args], options);
+  return { root, stage, target, bin, body, scripts, relativeBin, metadata, options, relocate, validate,
+    prepare: () => python(relocate, [stage, target]), check: path => python(validate, [path]), python };
+}
+
+test('venv generated launchers preserve direct CLI, argv, modes and RECORD integrity across stage deletion', async t => {
+  const f = await venvLauncherFixture(t);
+  assert.throws(() => f.check(f.stage), cause => /VENV_STALE_STAGE_LAUNCHER_OR_ACTIVATION/.test(cause.stderr));
+  f.prepare(); f.check(f.stage);
+  const args = ['space argument', "apostrophe'", '$not-expanded'];
+  const run = path => JSON.parse(execFileSync(path, args, f.options));
+  for (const name of f.scripts) {
+    const path = resolve(f.bin, name);
+    assert.deepEqual(run(path), { file: path, args });
+    assert.equal((await lstat(path)).mode & 0o777, 0o755);
+    const text = await readFile(path, 'utf8');
+    assert.equal(text.includes(f.stage), false); assert.ok(text.endsWith(f.body));
+  }
+  const recordBefore = await readFile(resolve(f.metadata, 'RECORD'), 'utf8');
+  assert.match(recordBefore, /untouched\.py,sha256=unchanged,7/);
+  const verifyRecord = `import base64, csv, hashlib, os, sys
+venv = os.path.join(sys.argv[1], 'codex-bridge', '.toolchain')
+site = os.path.join(venv, 'lib', 'python3.6', 'site-packages')
+with open(os.path.join(site, 'fixture.dist-info', 'RECORD'), newline='') as stream:
+    for row in csv.reader(stream):
+        if row[0] == 'untouched.py': continue
+        with open(os.path.normpath(os.path.join(site, row[0])), 'rb') as file: data = file.read()
+        assert row[1] == 'sha256=' + base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode().rstrip('=')
+        assert int(row[2]) == len(data)
+`;
+  f.python(verifyRecord, [f.stage]);
+  await rename(f.stage, f.target);
+  await assert.rejects(lstat(f.stage), cause => cause.code === 'ENOENT');
+  f.check(f.target); f.python(verifyRecord, [f.target]);
+  for (const name of f.scripts) {
+    const path = resolve(f.target, f.relativeBin, name);
+    assert.deepEqual(run(path), { file: path, args });
+  }
+  const activation = resolve(f.target, f.relativeBin, 'activate');
+  const activated = execFileSync('bash', ['--noprofile', '--norc', '-c', '. "$1"; printf "%s" "$VIRTUAL_ENV"', 'activation-test', activation], f.options);
+  assert.equal(activated, resolve(f.target, 'codex-bridge/.toolchain'));
+  for (const name of ['activate', 'activate.csh', 'activate.fish']) {
+    assert.equal((await readFile(resolve(f.target, f.relativeBin, name), 'utf8')).includes(f.stage), false);
+  }
+  assert.equal(await readFile(resolve(f.target, 'codex-bridge/.toolchain/lib/python3.6/site-packages/fixture.dist-info/RECORD'), 'utf8'), recordBefore);
+});
+
+test('venv publication fails closed for unknown stage references, launcher bodies and stale links', async t => {
+  for (const kind of ['unknown', 'body', 'link', 'activation']) {
+    const f = await venvLauncherFixture(t);
+    if (kind === 'unknown') await writeFile(resolve(f.bin, 'unknown-cli'), `#!/bin/sh\necho '${f.stage}'\n`, { mode: 0o755 });
+    if (kind === 'body') await writeFile(resolve(f.bin, 'pip'), `#!${f.bin}/python\nprint(${JSON.stringify(f.stage)})\n`, { mode: 0o755 });
+    if (kind === 'link') await symlink(resolve(f.bin, 'python'), resolve(f.bin, 'stale-link'));
+    if (kind === 'activation') await writeFile(resolve(f.bin, 'activate'), `# unknown format ${f.stage}\n`);
+    assert.throws(() => f.prepare(), cause => /VENV_(?:TRAMPOLINE_NOT_RECOGNIZED|STAGE_REFERENCE_NOT_RECOGNIZED|LAUNCHER_BODY_CONTAINS_STAGE_REFERENCE|STAGE_SYMLINK_NOT_RELOCATABLE|ACTIVATION_NOT_RELOCATABLE)/.test(cause.stderr));
+    await assert.rejects(lstat(f.target), cause => cause.code === 'ENOENT');
+  }
+});
+
+test('venv validator rejects stale shell trampolines and activation even when imports could pass', async t => {
+  for (const kind of ['trampoline', 'activation', 'link', 'config']) {
+    const f = await venvLauncherFixture(t); f.prepare();
+    if (kind === 'trampoline') await writeFile(resolve(f.bin, 'pip'), `#!/bin/sh\n'''exec' "${f.bin}/python" "$0" "$@"\n' '''\n${f.body}`);
+    if (kind === 'activation') await writeFile(resolve(f.bin, 'activate'), `VIRTUAL_ENV="${f.stage}/codex-bridge/.toolchain"\n`);
+    if (kind === 'link') await symlink(resolve(f.bin, 'python'), resolve(f.bin, 'bad-link'));
+    if (kind === 'config') await writeFile(resolve(f.stage, 'codex-bridge/.toolchain/pyvenv.cfg'), `home = ${f.stage}\n`);
+    assert.throws(() => f.check(f.stage), cause => /VENV_STALE_STAGE_(?:LAUNCHER_OR_ACTIVATION|SYMLINK)/.test(cause.stderr));
+  }
+});
+
+// Python 3.11 command is an audit string, not a shell command. These are
+// hand-written cfg files plus ORIGINAL stdlib snippets: never a real venv,
+// package install, import/ABI, C1-C4 or old failed cfg-byte readback.
+const cfgPosixQuote = value => "'" + value.replaceAll("'", "'\"'\"'") + "'";
+const cfgBaseFields = 'home = /explicit-test-base\ninclude-system-site-packages = false\nversion = 3.11.13\nexecutable = /explicit-test-base/python3.11\nprompt = unchanged synthetic audit\n';
+
+test('Python 3.11 cfg command audit maps only its exact venv operand preserving every base field, quotes, modes and stage-to-target bytes', async t => {
+  for (const quoted of [false, true]) for (const withoutPip of [false, true]) {
+    const f = await venvLauncherFixture(t, { longPath: true });
+    const cfg = resolve(f.stage, 'codex-bridge/.toolchain/pyvenv.cfg');
+    const beforeVenv = resolve(f.stage, 'codex-bridge/.toolchain');
+    const finalVenv = resolve(f.target, 'codex-bridge/.toolchain');
+    assert.ok(beforeVenv.length > 256, 'exercise a genuine long synthetic path, not a fake version probe');
+    const prefix = '/explicit-test-base/python3.11 -m venv --copies' + (withoutPip ? ' --without-pip' : '') + ' ';
+    const quote = quoted ? cfgPosixQuote : value => value;
+    const base = withoutPip ? cfgBaseFields.replaceAll('\n', '\r\n') : cfgBaseFields;
+    const newline = withoutPip ? '' : '\n'; // also preserve an absent final newline
+    const before = base + 'command = ' + prefix + quote(beforeVenv) + newline;
+    const expected = base + 'command = ' + prefix + quote(finalVenv) + newline;
+    await writeFile(cfg, before); await chmod(cfg, 0o640);
+    assert.throws(() => f.check(f.stage), cause => /VENV_STALE_STAGE_LAUNCHER_OR_ACTIVATION/.test(cause.stderr));
+    f.prepare(); f.check(f.stage);
+    assert.equal(await readFile(cfg, 'utf8'), expected);
+    assert.equal((await lstat(cfg)).mode & 0o777, 0o640);
+    assert.equal((await readFile(cfg, 'utf8')).includes('.cyf-agent-runtime.stage.'), false);
+    const record = await readFile(resolve(f.metadata, 'RECORD'), 'utf8');
+    await rename(f.stage, f.target);
+    await assert.rejects(lstat(f.stage), cause => cause.code === 'ENOENT');
+    f.check(f.target);
+    const finalCfg = resolve(f.target, 'codex-bridge/.toolchain/pyvenv.cfg');
+    assert.equal(await readFile(finalCfg, 'utf8'), expected);
+    assert.equal((await lstat(finalCfg)).mode & 0o777, 0o640);
+    assert.equal(await readFile(resolve(f.target, 'codex-bridge/.toolchain/lib/python3.6/site-packages/fixture.dist-info/RECORD'), 'utf8'), record);
+    const pip = resolve(f.target, f.relativeBin, 'pip');
+    assert.deepEqual(JSON.parse(execFileSync(pip, ['synthetic cfg path', '$not-expanded'], f.options)),
+      { file: pip, args: ['synthetic cfg path', '$not-expanded'] });
+  }
+});
+
+test('Python 3.11 cfg relocation rejects unknown command, stale home/base/body/foreign stage and duplicate fields without deleting audit metadata', async t => {
+  for (const kind of ['extra-option', 'wrong-module', 'wrong-operand', 'extra-tail', 'foreign-stage',
+    'duplicate-command', 'stale-home', 'stale-base', 'unknown-field', 'missing-command', 'cfg-symlink']) {
+    const f = await venvLauncherFixture(t);
+    const venv = resolve(f.stage, 'codex-bridge/.toolchain');
+    const cfg = resolve(venv, 'pyvenv.cfg');
+    const command = `command = /explicit-test-base/python3.11 -m venv --copies ${venv}\n`;
+    let text = cfgBaseFields + command;
+    if (kind === 'extra-option') text = cfgBaseFields + command.replace('--copies ', '--copies --system-site-packages ');
+    if (kind === 'wrong-module') text = cfgBaseFields + command.replace('-m venv', '-m unrelated');
+    if (kind === 'wrong-operand') text = cfgBaseFields + command.replace(`${venv}\n`, `${venv}-not-the-venv\n`);
+    if (kind === 'extra-tail') text = cfgBaseFields + command.trimEnd() + ' extra-operand\n';
+    if (kind === 'foreign-stage') text = cfgBaseFields + command.replace(venv, '/tmp/.cyf-agent-runtime.stage.foreign/codex-bridge/.toolchain');
+    if (kind === 'duplicate-command') text += command;
+    if (kind === 'stale-home') text = text.replace('/explicit-test-base\n', `${f.stage}\n`);
+    if (kind === 'stale-base') text = cfgBaseFields + command.replace('/explicit-test-base/python3.11', resolve(f.stage, 'untrusted-base/python3.11'));
+    if (kind === 'unknown-field') text += `unknown-audit = ${f.stage}\n`;
+    if (kind === 'missing-command') text = cfgBaseFields + `unknown-audit = ${f.stage}\n`;
+    await writeFile(cfg, text);
+    let external;
+    if (kind === 'cfg-symlink') {
+      external = resolve(f.root, 'external-synthetic-cfg'); await writeFile(external, text);
+      await rm(cfg); await symlink(external, cfg);
+    }
+    assert.throws(() => f.prepare(), cause => /VENV_CONFIG_(?:UNSAFE|COMMAND_NOT_RECOGNIZED|BASE_CONTAINS_STAGE|STAGE_REFERENCE_NOT_RECOGNIZED)/.test(cause.stderr));
+    assert.equal(await readFile(cfg, 'utf8'), text, 'do not delete/reconstruct/partially rewrite unrecognized cfg');
+    if (external) assert.equal(await readFile(external, 'utf8'), text, 'never follow cfg symlink for writes');
+    assert.ok((await readFile(resolve(f.bin, 'pip'), 'utf8')).startsWith(`#!${f.bin}/python\n`), 'bad cfg fails before launcher mutation');
+    await assert.rejects(lstat(f.target), cause => cause.code === 'ENOENT');
+  }
+});
+
+test('Python 3.11 cfg command remains subject to the ORIGINAL strict stale validator after successful preparation', async t => {
+  const f = await venvLauncherFixture(t); const cfg = resolve(f.stage, 'codex-bridge/.toolchain/pyvenv.cfg');
+  const venv = resolve(f.stage, 'codex-bridge/.toolchain');
+  await writeFile(cfg, cfgBaseFields + `command = /explicit-test-base/python3.11 -m venv --copies ${venv}\n`);
+  f.prepare(); f.check(f.stage);
+  await writeFile(cfg, cfgBaseFields + `command = /explicit-test-base/python3.11 -m venv --copies ${venv}\n`);
+  assert.throws(() => f.check(f.stage), cause => /VENV_STALE_STAGE_LAUNCHER_OR_ACTIVATION/.test(cause.stderr));
+  await writeFile(cfg, cfgBaseFields + `unknown-audit = /tmp/.cyf-agent-runtime.stage.foreign\n`);
+  assert.throws(() => f.check(f.stage), cause => /VENV_STALE_STAGE_LAUNCHER_OR_ACTIVATION/.test(cause.stderr));
+});
+
+test('PPTX semantic reopen reconstructs original producer wrapping and rejects lost/reordered/extra text', async () => {
+  const { REOPEN } = await import('./fixtures/pptx-semantic-reopen.mjs');
+  // Only original stdlib wrapping and the exact assertion predicate are run;
+  // no fake presentation, dependency import or actual C4 pass is manufactured.
+  const check = `import ast, runpy, sys
+helper = runpy.run_path(sys.argv[1], run_name='ur01_stdlib_only')
+tree = ast.parse(sys.argv[2])
+function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'pptx_text_matches')
+namespace = {}
+exec(compile(ast.Module(body=[function]), '<actual-harness-pptx-predicate>', 'exec'), namespace)
+match = namespace['pptx_text_matches']
+instruction = 'UR01 synthetic clean-install acceptance material'
+lines = helper['wrapped'](instruction, 40)[:10]
+text = '\\n'.join(lines)
+assert len(instruction) == 48 and len(lines) == 2
+assert instruction not in text, 'must reproduce original false negative'
+assert match(text, instruction)
+assert not match(text[:-1], instruction), 'lost character must fail'
+assert not match(' '.join(instruction.split()[:-1]), instruction), 'lost word must fail'
+assert not match(' '.join(reversed(instruction.split())), instruction), 'reordered words must fail'
+assert not match(text + ' extra', instruction), 'extra content must fail'
+assert not match('Agent 交付演示', instruction), 'title alone must fail'
+print('PPTX stdlib predicate regression: 8 assertions PASS; real reopen NOT_RUN')
+`;
+  const output = execFileSync('/usr/bin/python3', ['-I', '-S', '-B', '-c', check, resolve(engineSource, 'toolchain/delivery_tool.py'), REOPEN], { encoding: 'utf8' });
+  assert.match(output, /8 assertions PASS; real reopen NOT_RUN/);
+});
+
+
+// S01: execute the exact CLI main/argument-parser source with the real config
+// reader and workspace loader. Only the Runtime execution boundary and process
+// listeners are inert captures, as in the existing final-tail source units.
+// This is NOT a running Runtime, WS/session, workspace build or installation.
+async function workspaceCliUnit(t) {
+  const f = await fixture(t, { count: 1 });
+  const source = await readFile(resolve(repo, 'conf/cyf-agent-runtime-v1/agent-runtime.mjs'), 'utf8');
+  const argsStart = source.indexOf('const failure =');
+  const argsEnd = source.indexOf('const wait =', argsStart);
+  const mainStart = source.indexOf('export async function main(');
+  const mainEnd = source.indexOf('\nconst isMain =', mainStart);
+  assert.ok(argsStart >= 0 && argsEnd > argsStart && mainStart > argsEnd && mainEnd > mainStart);
+  const { pathToFileURL } = await import('node:url');
+  const { createLogger, readRuntimeProviderEnvironments } = await import('../lib/security.mjs');
+  const { readKnowledgeMaintenanceConfig, createKnowledgeMaintenance } = await import('../lib/knowledge-maintenance.mjs');
+  const loaderUrl = pathToFileURL(resolve(engineSource, 'workspace-manager.mjs')).href;
+  let mainSource = source.slice(mainStart, mainEnd).replace('export async function main(', 'async function main(');
+  const loaderImport = "import('../codex-bridge/workspace-manager.mjs')";
+  assert.equal(mainSource.split(loaderImport).length, 2, 'one original workspace loader import');
+  // Only resolve the original loader URL in the source slice, never replace its
+  // call/validation or the CLI selection/precedence/control flow under test.
+  mainSource = mainSource.replace(loaderImport, `import(${JSON.stringify(loaderUrl)})`);
+  const calls = []; const listeners = new Map();
+  const processCapture = {
+    once(event, fn) { assert.ok(['SIGTERM', 'SIGINT'].includes(event)); assert.equal(listeners.has(event), false); listeners.set(event, fn); },
+    removeListener(event, fn) { assert.equal(listeners.get(event), fn); listeners.delete(event); }
+  };
+  const never = () => assert.fail('S01 source unit must not enroll/create a session');
+  const main = new Function('resolve', 'readRuntimeHostConfig', 'createLogger', 'runUnifiedRuntime',
+    'RuntimeV1Client', 'readEnrollmentSecret', 'process', 'readRuntimeProviderEnvironments', 'readKnowledgeMaintenanceConfig', 'createKnowledgeMaintenance', 'randomUUID', `${source.slice(argsStart, argsEnd)}\n${mainSource}\nreturn main;`)(
+    resolve, readRuntimeHostConfig, createLogger, async settings => { calls.push(settings); }, never, never, processCapture, readRuntimeProviderEnvironments, readKnowledgeMaintenanceConfig, createKnowledgeMaintenance, () => 'fixture-runtime-boot');
+  const invoke = async ({ argv = [], env = {} } = {}) => {
+    try {
+      return await main(['run', '--config', f.path, ...argv], { CYF_RUNTIME_V1_API_BASE_URL: 'https://no-network.invalid', ...env });
+    } finally {
+      assert.equal(listeners.size, 0, 'all original CLI signal listeners released');
+      assert.deepEqual(await readdir(f.raw.stateRoot), [], 'no host writer/adoption');
+      assert.deepEqual(await readdir(f.entries[0].stateRoot), [], 'no queue/session/checkpoint IO');
+    }
+  };
+  const policyFile = async (id, change = {}) => {
+    const policy = { policyId: id, root: resolve(f.root, `${id}-workspaces`), repository: resolve(f.root, `${id}-repository`),
+      baseRef: 'develop', trustedRemoteUrl: 'https://repository.invalid/synthetic.git', trustedRemoteRef: 'refs/heads/develop', ...change };
+    const file = resolve(f.root, `${id}.json`); await f.json(file, [policy]);
+    return { policy, file };
+  };
+  return { ...f, invoke, calls, policyFile };
+}
+
+test('S01 workspace CLI: explicit file reproduces old string empty Map and passes real loaded policy to Runtime boundary', async t => {
+  const f = await workspaceCliUnit(t); const { file, policy } = await f.policyFile('s01-cli');
+  const { loadWorkspacePolicies } = await import(resolve(engineSource, 'workspace-manager.mjs'));
+  assert.deepEqual([...loadWorkspacePolicies(file)], [], 'historical string argument misses the current env-shaped signature');
+  assert.equal(await f.invoke({ argv: ['--workspace-policies', file] }), 0);
+  assert.equal(f.calls.length, 1); assert.deepEqual([...f.calls[0].workspacePolicies], [[policy.policyId, policy]]);
+  assert.equal(f.calls[0].config.agents[0].manifest.canonicalAgentId, f.manifests[0].canonicalAgentId);
+  await assert.rejects(lstat(policy.root), code('ENOENT')); await assert.rejects(lstat(policy.repository), code('ENOENT'));
+});
+
+test('S01 workspace CLI: CYF file input reaches original loader without inheriting legacy inline/file keys', async t => {
+  const f = await workspaceCliUnit(t); const { file, policy } = await f.policyFile('s01-cyf');
+  assert.equal(await f.invoke({ env: { CYF_RUNTIME_WORKSPACE_POLICIES_FILE: file,
+    CODEX_WORKSPACE_POLICIES_FILE: 'must-not-open-legacy-file', CODEX_WORKSPACE_POLICIES: 'must-not-parse-legacy-inline' } }), 0);
+  assert.equal(f.calls.length, 1); assert.deepEqual([...f.calls[0].workspacePolicies], [[policy.policyId, policy]]);
+});
+
+test('S01 workspace CLI: CLI file has priority over CYF file rather than merging either scope', async t => {
+  const f = await workspaceCliUnit(t); const cli = await f.policyFile('s01-priority-cli'); const cyf = await f.policyFile('s01-priority-cyf');
+  assert.equal(await f.invoke({ argv: ['--workspace-policies', cli.file], env: { CYF_RUNTIME_WORKSPACE_POLICIES_FILE: cyf.file } }), 0);
+  assert.equal(f.calls.length, 1); assert.deepEqual([...f.calls[0].workspacePolicies], [[cli.policy.policyId, cli.policy]]);
+  assert.equal(f.calls[0].workspacePolicies.has(cyf.policy.policyId), false);
+});
+
+test('S01 workspace CLI: invalid selected CLI file never falls back to a valid CYF file', async t => {
+  const f = await workspaceCliUnit(t); const cyf = await f.policyFile('s01-valid-fallback');
+  await assert.rejects(f.invoke({ argv: ['--workspace-policies', 'relative-policy.json'], env: { CYF_RUNTIME_WORKSPACE_POLICIES_FILE: cyf.file } }), code('WORKSPACE_POLICY_INVALID'));
+  assert.equal(f.calls.length, 0);
+});
+
+test('S01 workspace CLI: absent or empty CYF file defaults to an empty Map and ignores old-only policy inputs', async t => {
+  const f = await workspaceCliUnit(t); const legacy = await f.policyFile('s01-legacy');
+  for (const env of [{}, { CYF_RUNTIME_WORKSPACE_POLICIES_FILE: '' }, {
+    CODEX_WORKSPACE_POLICIES_FILE: legacy.file, CODEX_WORKSPACE_POLICIES: JSON.stringify([legacy.policy])
+  }]) {
+    assert.equal(await f.invoke({ env }), 0); assert.deepEqual([...f.calls.at(-1).workspacePolicies], []);
+  }
+  assert.equal(f.calls.length, 3);
+});
+
+for (const kind of ['relative', 'missing', 'file-symlink', 'ancestor-symlink', 'invalid-json', 'invalid-shape', 'relative-resource', 'overlapping-resources', 'remote-credentials']) {
+  test(`S01 workspace CLI: original loader rejects ${kind} before any Runtime execution`, async t => {
+    const f = await workspaceCliUnit(t); const valid = await f.policyFile('s01-invalid'); let file = valid.file;
+    let expected = 'WORKSPACE_POLICY_INVALID';
+    if (kind === 'relative') file = 'relative-policy.json';
+    if (kind === 'missing') { file = resolve(f.root, 'absent.json'); expected = 'WORKSPACE_PATH_MISSING'; }
+    if (kind === 'file-symlink') { file = resolve(f.root, 'linked.json'); await symlink(valid.file, file); expected = 'WORKSPACE_SYMLINK_ESCAPE'; }
+    if (kind === 'ancestor-symlink') { const link = resolve(f.root, 'linked-parent'); await symlink(f.root, link); file = resolve(link, 's01-invalid.json'); expected = 'WORKSPACE_SYMLINK_ESCAPE'; }
+    if (kind === 'invalid-json') await writeFile(file, 'not-json\n');
+    if (kind === 'invalid-shape') await f.json(file, [null]);
+    if (kind === 'relative-resource') await f.json(file, [{ ...valid.policy, repository: 'relative-repository' }]);
+    if (kind === 'overlapping-resources') await f.json(file, [{ ...valid.policy, root: resolve(valid.policy.repository, 'nested-workspace') }]);
+    if (kind === 'remote-credentials') await f.json(file, [{ ...valid.policy, trustedRemoteUrl: 'https://synthetic:NOT-A-SECRET@repository.invalid/repo' }]);
+    // Cover both public selection inputs while preserving CLI priority when set.
+    for (const input of [{ argv: ['--workspace-policies', file] }, { env: { CYF_RUNTIME_WORKSPACE_POLICIES_FILE: file } }]) {
+      await assert.rejects(f.invoke(input), code(expected)); assert.equal(f.calls.length, 0);
+      const { main } = await import('../agent-runtime.mjs');
+      // Also execute the actual exported CLI. The pre-existing invalid interval
+      // prevents executor/network effects even if the old empty-Map bug returns.
+      await assert.rejects(main(['run', '--config', f.path, ...(input.argv || [])], {
+        CYF_RUNTIME_V1_API_BASE_URL: 'https://no-network.invalid',
+        CYF_RUNTIME_V1_HEARTBEAT_INTERVAL_MS: '0', ...(input.env || {})
+      }), code(expected));
+      assert.deepEqual(await readdir(f.raw.stateRoot), []);
+      assert.deepEqual(await readdir(f.entries[0].stateRoot), []);
+    }
+  });
+}
+
+// I10: the initial authenticated ACK is the owner source; a follow-up catalog ACK
+// must settle activation so host phase never freezes on transient re-registration.
+test('skill measurement activation waits for its follow-up registration and never loops on heartbeat', async t => {
+  const c = await channelFixture(t, { measureSkills: true });
+  await c.executors[0].activate();
+  assert.equal(c.executors[0].ready(), true);
+  assert.equal(c.states()[0].skillBinding.scope.ownerJiacn, 'fixture-owner');
+  const registrations = () => c.sockets[0].sent.filter(frame => frame.messageType === 'agent.register').length;
+  assert.equal(registrations(), 2);
+  await c.adapters.heartbeat(); await c.tick(); assert.equal(registrations(), 2);
+  assert.equal(JSON.stringify(c.states()[0].skillBinding).includes('sessionToken'), false);
+});
+
+test('unmatched ACK and presence cannot supply a skill subject to the executor', async t => {
+  const c = await channelFixture(t, { ackRegistration: false });
+  const activating = c.executors[0].activate(); await c.opened();
+  const socket = c.sockets[0], registration = socket.sent[0];
+  const auth = { scheme: 'native-runtime-v1', tenantId: registration.tenantId, clientId: registration.clientId,
+    ownerJiacn: 'fixture-owner', agentId: registration.agentId, installationId: registration.installationId,
+    hostId: registration.hostId, runtimeInstanceId: registration.runtimeInstanceId, sessionGeneration: registration.sessionGeneration };
+  socket.receive({ ...registrationReceipt(registration), messageId: 'foreign', runtimeAuth: auth });
+  await c.tick(); assert.equal(c.states()[0].skillBinding, undefined);
+  socket.receive({ ...registrationReceipt(registration), runtimeAuth: auth }); await activating;
+  const bound = c.states()[0].skillBinding; assert.equal(bound.scope.ownerJiacn, 'fixture-owner');
+  socket.receive({ ...presenceReceipt(registration), runtimeAuth: { ...auth, ownerJiacn: 'foreign' } });
+  await c.tick(); assert.equal(c.states()[0].skillBinding, bound);
+});
+
+
+test('SM-C1 exact durable result crosses current authenticated channel without rewriting original boot; receipt retires after commit', async t => {
+  const c = await channelFixture(t, { validateBusiness: true, types: ['SKILL_INSTALL'], measureSkills: true });
+  await c.executors[0].activate();
+  const { SkillInstallManager } = await import('../../codex-bridge/skill-install-manager.mjs');
+  const state = c.states()[0], identity = c.config.agents[0].manifest;
+  const manager = new SkillInstallManager({ profile: state.profile, stateRoot: resolve(c.f.root, 'skill-result-test'),
+    wsUrl: 'wss://api.example.test/ws', enabled: true, runtimeInstanceId: 'original-executing-boot',
+    getRuntimeHeaders: () => ({}), sendResultFn: () => false });
+  manager.initialize(); state.skillInstallManager = manager;
+  manager.bindSession({ ...state.skillBinding, fence: { ...state.skillBinding.fence, runtimeInstanceId: 'original-executing-boot' } });
+  const command = managementCommand(managementPackage().target, { ...state.skillBinding.scope, runtimeInstallationId: identity.installationId });
+  const envelope = (await manager.handle(command)).resultEnvelope; // Proven failure before download, still a durable fact.
+  const socket = c.sockets[0], before = socket.sent.length, original = JSON.stringify(envelope);
+  const ack = Object.values(manager._load().messages)[0].ack;
+  assert.equal(state.transport.send({ ...ack, messageId: 'not-durably-received' }), false);
+  assert.equal(socket.sent.length, before); assert.equal(state.transport.send(ack), true);
+  assert.deepEqual(socket.sent.at(-1), ack);
+  const afterAck = socket.sent.length;
+  assert.equal(state.transport.send({ ...envelope, data: { ...envelope.data, executionRuntimeInstanceId: 'forged' } }), false);
+  assert.equal(socket.sent.length, afterAck); assert.equal(state.transport.send(envelope), true);
+  assert.equal(JSON.stringify(socket.sent.at(-1)), original);
+  assert.equal(socket.sent.at(-1).data.executionRuntimeInstanceId, 'original-executing-boot');
+  const receipt = replyMessage(envelope, 'work.result.receipt', 'committed_receipt', 'E0', 'committed', {
+    schemaVersion: 2, skillChangeId: envelope.data.skillChangeId, commandId: envelope.data.commandId, attempt: envelope.data.attempt, receiptStatus: 'ACCEPTED' });
+  for (const bad of [{ ...receipt, correlationId: 'foreign' }, { ...receipt, data: { ...receipt.data, attempt: 2 } }]) socket.receive(bad);
+  await c.tick(); assert.deepEqual(state.accepted, []); assert.equal(manager.pendingResults().length, 1);
+  socket.receive(receipt); await c.tick(); assert.deepEqual(state.accepted, [receipt]);
+  manager.acknowledgeResultReceipt(receipt); manager.acknowledgeResultReceipt(receipt);
+  assert.equal(manager.pendingResults().length, 0); assert.equal(state.transport.send(envelope), false);
+});
+
+
+test('channel health distinguishes registered ready from acknowledged presence and disconnection', async t => {
+  const c = await channelFixture(t); await c.executors[0].activate(); await c.tick();
+  assert.equal(c.executors[0].health().registered, true);
+  assert.equal(c.executors[0].health().lastPresenceAckAt, null);
+  await c.adapters.heartbeat();
+  assert.ok(c.executors[0].health().lastPresenceSentAt > 0);
+  const text = JSON.stringify(c.adapters.health());
+  assert.doesNotMatch(text, /sessionToken|Authorization|runtimeAuthorization/);
+  c.sockets[0].close(1008); await c.tick();
+  assert.equal(c.executors[0].health().connected, false);
+  assert.equal(c.executors[0].health().ready, false);
+  assert.equal(c.executors[0].health().channelState, 'isolated');
+});
+
+
+test('a real client header timeout retries into authenticated registration, not permanent isolation', async t => {
+  const c = await channelFixture(t, { sessionFailureOnce: 'UND_ERR_HEADERS_TIMEOUT' });
+  await c.executors[0].activate(); await c.tick();
+  assert.equal(c.executors[0].ready(), true);
+  assert.ok(c.logs.some(x => x.event === 'runtime-channel-retry' && x.codes.includes('UND_ERR_HEADERS_TIMEOUT')));
+  assert.ok(!c.logs.some(x => x.event === 'runtime-agent-isolated'));
+  assert.equal(c.requests.filter(x => x.url.endsWith('/session')).length, 2);
+  await c.adapters.heartbeat();
+  const receipt = presenceReceipt(c.sockets[0].sent.find(x => x.messageType === 'agent.presence'));
+  c.sockets[0].receive(receipt); await c.tick();
+  assert.ok(c.executors[0].health().lastPresenceAckAt > 0);
+});
+
+
+test('host health snapshot is private, current-process and observational only', async t => {
+  const { runUnifiedRuntime } = await import('../agent-runtime.mjs');
+  const f = await fixture(t, { count: 1 }); const config = await f.config(); const controller = new AbortController();
+  const fake = executors();
+  await runUnifiedRuntime({ config, apiOrigin: 'https://api.example.test', signal: controller.signal,
+    waitFn: async () => { controller.abort(); }, createAdapters: async () => ({
+      createExecutor: fake.createExecutor, heartbeat: async () => {}, close: async () => {},
+      health: () => [{ connected: false, registered: false, ready: false, lastPresenceAckAt: null }]
+    }) });
+  const file = resolve(config.stateRoot, 'runtime-health.json');
+  const data = JSON.parse(await readFile(file, 'utf8'));
+  assert.equal(data.pid, process.pid); assert.equal(data.agents[0].ready, false);
+  assert.equal((await lstat(file)).mode & 0o777, 0o600);
+  assert.equal(data.heartbeatIntervalMs, 30000);
+});
+
+
+test('one health snapshot performs one durable check and never reuses it across calls', async t => {
+  const c = await channelFixture(t); await c.executors[0].activate(); await c.tick();
+  const state = c.states()[0]; const before = state.healthChecks;
+  assert.equal(c.executors[0].health().ready, true);
+  assert.equal(state.healthChecks - before, 1);
+  state.healthy = false;
+  const health = c.executors[0].health(); assert.equal(health.ready, false);
+  assert.notEqual(health.channelState, 'ready'); assert.equal(state.healthChecks - before, 2);
+});
+
+// No fake executor/installer here: actual Runtime client -> full wire -> mature
+// execution host -> journal/extractor -> authenticated capability re-registration.
+// The HTTP server and WS peer are isolated API boundary doubles, not API acceptance.
+for (const legacyFlag of [undefined, false, true]) test(`SM-C1 real host first-install closes authenticated lifecycle without opt-in (${legacyFlag})`, async t => {
+  const { EventEmitter } = await import('node:events');
+  const { RuntimeV1Client } = await import('../lib/runtime-client.mjs');
+  const f = await fixture(t, { count: 1 });
+  if (legacyFlag !== undefined) await f.profile(0, { skillInstallEnabled: legacyFlag });
+  const config = await f.config(), agent = config.agents[0], identity = agent.manifest, pkg = managementPackage();
+  await f.json(resolve(agent.stateRoot, 'runtime-authorization.json'), { installationId: identity.installationId, runtimeAuthorization: 'synthetic-only' });
+  const sockets = [], sent = [], logs = []; let downloads = 0, generation = 0;
+  class Socket extends EventEmitter {
+    constructor(_url, options) { super(); this.headers = options.headers; this.readyState = 0; sockets.push(this);
+      queueMicrotask(() => { this.readyState = 1; this.emit('open'); }); }
+    send(bytes) {
+      const raw = JSON.parse(bytes), frame = fromAgentWire(bytes); sent.push({ raw, bytes, socket: this });
+      if (frame.messageType === 'agent.register') {
+        assert.ok(frame.readyCommandTypes.every(type => !['SKILL_INSTALL', 'SKILL_SET_ENABLED', 'SKILL_RECONCILE'].includes(type)), 'task readiness excludes taskless SM-C1 even on management-only hosts');
+        queueMicrotask(() => this.receive(agentMessageFixture({ ...registrationReceipt(frame), runtimeAuth: {
+        scheme: 'native-runtime-v1', tenantId: frame.tenantId, clientId: frame.clientId, ownerJiacn: 'fixture-owner', agentId: frame.agentId,
+        installationId: frame.installationId, hostId: frame.hostId, runtimeInstanceId: frame.runtimeInstanceId, sessionGeneration: frame.sessionGeneration } })));
+      }
+    }
+    receive(raw) { this.emit('message', Buffer.from(JSON.stringify(raw))); }
+    close(code = 1000) { if (this.readyState === 3) return; this.readyState = 3; queueMicrotask(() => this.emit('close', code)); }
+    terminate() { this.close(); }
+  }
+  const adapters = await createExecutionAdapterFactory({ config, instanceId: 'boot-real-host', apiOrigin: 'https://api.example.test', socketFactory: Socket,
+    logger: (event, data) => logs.push({ event, ...data }), clientFactory: settings => new RuntimeV1Client({ ...settings, fetchFn: async (url, options) => {
+      if (new URL(url).pathname.endsWith('/package')) {
+        downloads++; assert.equal(new Headers(options.headers).get('X-Agent-Session-Generation'), String(generation));
+        return new Response(pkg.bytes, { headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(pkg.bytes.length) } });
+      }
+      const body = JSON.parse(options.body).data;
+      assert.ok(String(url).endsWith('/session'), String(url)); generation++;
+      return httpFixture(options, { ...body, sessionGeneration: String(generation), scheme: 'AgentRuntime',
+        sessionToken: 'rts1_' + 'a'.repeat(64), websocketPath: '/ws/agent/channel', status: 'CHANNEL_PENDING' });
+    } }) });
+  f.cleanup(() => adapters.close());
+  const executor = adapters.createExecutor({ agent, subjectKey: agent.subjectKey }); await executor.initialize(); await executor.activate();
+  const state = executor.state(), settle = async predicate => {
+    // Bounded diagnostic timeout only; no application execution deadline/resource gate.
+    const end = Date.now() + 20000;
+    while (!predicate()) { if (Date.now() > end) assert.fail(JSON.stringify(logs)); await new Promise(done => setTimeout(done, 5)); }
+  };
+  assert.equal(executor.ready(), true);
+  const command = managementCommand(pkg.target, { tenantId: identity.tenantId, clientId: identity.clientId, ownerJiacn: 'fixture-owner',
+    agentId: identity.canonicalAgentId, runtimeInstallationId: identity.installationId });
+  const first = sockets[0]; first.receive(command);
+  await settle(() => sent.some(row => row.raw.messageType === 'work.result' && row.raw.data.commandId === command.data.commandId));
+  const resultFor = c => sent.find(row => row.raw.messageType === 'work.result' && row.raw.data.commandId === c.data.commandId);
+  assert.equal(resultFor(command).raw.data.evidence.outcome, 'PREPARED');
+  assert.equal(state.skillInstallManager.listInstalledSkills().length, 0);
+  const activation = managementActivate(command); first.receive(activation);
+  await settle(() => resultFor(activation) && executor.ready());
+  assert.equal(resultFor(activation).raw.data.evidence.outcome, 'APPLIED');
+  assert.equal(Object.hasOwn(resultFor(activation).raw, 'code'), false);
+  assert.deepEqual(state.ledger.listEntries(), []); // No taskId/orderId/TTL/HTTP task ACK lane.
+  const catalog = sent.filter(row => row.raw.messageType === 'agent.register').at(-1).raw.data.skillExecution;
+  assert.equal(catalog.schemaVersion, 2); assert.equal(catalog.skills[0].skillInstallationId, pkg.target.skillInstallationId);
+  assert.equal(catalog.skills[0].manifestSha256, null); assert.equal(catalog.skills[0].readiness, 'NOT_EXECUTABLE');
+  await executor.heartbeat();
+  assert.equal(Object.hasOwn(sent.findLast(row => row.raw.messageType === 'agent.presence').raw.data, 'skillExecution'), false);
+  // Reconnect uses new channel proof, but never rewrites original immutable result/ACK bytes.
+  const original = resultFor(activation).bytes; first.close();
+  await settle(() => sockets.length === 2 && executor.ready());
+  await settle(() => sent.some(row => row.socket === sockets[1] && row.bytes === original));
+  const redelivery = { ...activation, messageId: 'authorized_reconnect_delivery', data: { ...activation.data, deliveryEpoch: '2' } };
+  sockets[1].receive(redelivery);
+  await settle(() => sent.some(row => row.raw.messageType === 'command.ack' && row.raw.correlationId === redelivery.messageId));
+  assert.equal(downloads, 1);
+  const result = resultFor(activation).raw;
+  const receipt = replyMessage(result, 'work.result.receipt', 'api_committed', 'E0', 'committed', {
+    schemaVersion: 2, skillChangeId: result.data.skillChangeId, commandId: result.data.commandId, attempt: result.data.attempt, receiptStatus: 'ACCEPTED' });
+  sockets[1].receive(receipt);
+  await settle(() => !state.skillInstallManager.pendingResults().some(row => row.envelope.messageId === result.messageId));
+  assert.equal(downloads, 1); assert.ok(logs.every(row => !JSON.stringify(row).includes('rts1_')));
+});
+
+test('position reconciliation waits for native registration and never invokes retired archive jobs', async t => {
+  const c=await channelFixture(t,{reconcileSkills:true});
+  await c.adapters.heartbeat();await c.tick();assert.ok(c.states().every(s=>!s.reconciliation));
+  await Promise.all(c.executors.map(e=>e.activate()));await c.adapters.heartbeat();await c.tick();
+  assert.ok(c.states().every(s=>JSON.stringify(s.reconciliation)===JSON.stringify(['positions'])));
+  c.states()[0].reconciliation=[];c.states()[1].reconciliation=[];c.states()[0].reconcileFailure=true;
+  await c.adapters.heartbeat();await c.tick();
+  assert.deepEqual(c.states()[0].reconciliation,['positions']);assert.deepEqual(c.states()[1].reconciliation,['positions']);
+  assert.equal(c.logs.filter(l=>l.event==='position-skill-reconciliation-deferred').length,1);
+  assert.ok(!JSON.stringify(c.logs).includes('private'));
+  await c.executors[0].close();c.states()[0].reconciliation=[];
+  await c.adapters.heartbeat();await c.tick();assert.deepEqual(c.states()[0].reconciliation,[]);
+});
+
+
+test('wire rejection facts correlate exact bytes and subject without logging payload or arbitrary errors', () => {
+  const raw = Buffer.from('{"token":"synthetic-secret-never-log"}');
+  const known = rejectedWireFacts(raw, { code: 'SKILL_RESULT_CONFLICT', message: raw.toString() }, 'subject-test');
+  assert.deepEqual(known, { code: 'INVALID_JSON', decoderCode: 'SKILL_RESULT_CONFLICT', subjectKey: 'subject-test',
+    byteLength: raw.length, wireSha256: createHash('sha256').update(raw).digest('hex') });
+  const unknown = rejectedWireFacts(raw, { code: 'synthetic-secret-never-log', stack: raw.toString() }, 'subject-test');
+  assert.equal(unknown.decoderCode, 'WIRE_DECODE_FAILED');
+  assert.equal(JSON.stringify([known, unknown]).includes('synthetic-secret-never-log'), false);
+  assert.notEqual(rejectedWireFacts(Buffer.concat([raw, Buffer.from(' ')]), null, 'subject-test').wireSha256, known.wireSha256);
+});
+
+test('skill command admitted on authenticated session is not lost during capability re-registration', async t => {
+  const c = await channelFixture(t, { ackRegistration: false, types: ['SKILL_INSTALL'] });
+  const activating = c.executors[0].activate(); await c.opened();
+  const socket = c.sockets[0]; socket.receive(registrationReceipt(socket.sent[0])); await activating;
+  const identity = c.config.agents[0].manifest;
+  const state = c.states().find(value => value.profile.agentId === identity.canonicalAgentId);
+  const raw = managementCommand(managementPackage().target, { tenantId: identity.tenantId, clientId: identity.clientId,
+    agentId: identity.canonicalAgentId, runtimeInstallationId: identity.installationId });
+  socket.receive(raw);
+  // Capability refresh keeps the already confirmed connection authorized.
+  state.transport.refreshCapabilities(); await c.tick();
+  socket.receive(raw); await c.tick(); // A same-message retry during refresh still reaches durable deduplication.
+  assert.equal(c.executors[0].ready(), true); // Existing healthy session survives catalog-only ACK latency.
+  socket.receive(registrationReceipt(socket.sent.findLast(frame => frame.messageType === 'agent.register'))); await c.tick();
+  assert.deepEqual(state.accepted, [raw, raw]);
+  assert.equal(c.logs.filter(row => row.event === 'runtime-management-handled').length, 2);
+});
+
+test('management refresh compatibility never admits an unconfirmed or disconnected session', async t => {
+  const c = await channelFixture(t, { ackRegistration: false, types: ['SKILL_INSTALL'] });
+  const activating = c.executors[0].activate(); await c.opened();
+  const socket = c.sockets[0]; const identity = c.config.agents[0].manifest;
+  const state = c.states().find(value => value.profile.agentId === identity.canonicalAgentId);
+  const raw = managementCommand(managementPackage().target, { tenantId: identity.tenantId, clientId: identity.clientId,
+    agentId: identity.canonicalAgentId, runtimeInstallationId: identity.installationId });
+  socket.receive(raw); await c.tick(); assert.deepEqual(state.accepted, []);
+  socket.receive(registrationReceipt(socket.sent[0])); await activating;
+  socket.receive(raw); socket.close(); await c.tick(); assert.deepEqual(state.accepted, []);
+  assert.equal(c.logs.filter(row => row.event === 'runtime-management-handled').length, 0);
+});
+
+
+test('catalog re-registration heartbeat cannot revoke the pending server binding', async t => {
+  const c = await channelFixture(t, { ackRegistration: false });
+  const activating = c.executors[0].activate(); await c.opened();
+  const socket = c.sockets[0], state = c.states()[0];
+  socket.receive(registrationReceipt(socket.sent[0])); await activating;
+  assert.equal(c.executors[0].ready(), true);
+  state.transport.refreshCapabilities();
+  const registration = socket.sent.at(-1), before = socket.sent.length;
+  assert.equal(registration.messageType, 'agent.register');
+  assert.equal(c.executors[0].ready(), true); // This is not a new session.
+  await c.executors[0].heartbeat();
+  assert.equal(socket.sent.length, before + 1, 'confirmed healthy session continues its heartbeat during refresh');
+  assert.equal(socket.sent.at(-1).status, 'online');
+  socket.receive(registrationReceipt(registration)); await c.tick();
+  await c.executors[0].heartbeat();
+  assert.equal(socket.sent.at(-1).status, 'online');
+  assert.equal(c.executors[0].ready(), true);
+  state.transport.refreshCapabilities(); state.healthy = false;
+  await c.executors[0].heartbeat();
+  assert.equal(socket.sent.at(-1).status, 'offline');
+  assert.equal(socket.sent.at(-1).durableStateHealthy, false);
+  assert.equal(state.paused, true); // Real health loss must still revoke admission.
+  assert.equal(c.executors[0].ready(), false);
+  state.healthy = true; state.transport.refreshCapabilities();
+  assert.equal(c.executors[0].ready(), false, 'real health recovery needs a new readiness ACK');
+  socket.receive(registrationReceipt(socket.sent.findLast(frame => frame.messageType === 'agent.register'))); await c.tick();
+  assert.equal(c.executors[0].ready(), true);
+});
+
+const receiptSchedulingFixture = async t => {
+  // Actual wire decoder/adapter and manager; no unrelated task normalizer/image engine.
+  const c = await channelFixture(t, { measureSkills: true });
+  await c.executors[0].activate();
+  const { SkillInstallManager } = await import('../../codex-bridge/skill-install-manager.mjs');
+  const state = c.states()[0], binding = state.skillBinding;
+  const manager = new SkillInstallManager({ profile: state.profile, stateRoot: resolve(c.f.root, 'receipt-scheduling'),
+    wsUrl: 'wss://api.example.test/ws', runtimeInstanceId: binding.fence.runtimeInstanceId,
+    getRuntimeHeaders: () => ({}), sendResultFn: () => false, fetchFn: async () => { throw new Error('synthetic offline fixture'); } });
+  manager.initialize(); manager.bindSession(binding); state.skillInstallManager = manager;
+  const command = managementCommand(managementPackage().target, { ...binding.scope, runtimeInstallationId: binding.fence.installationId });
+  const makeReceipt = result => replyMessage(result, 'work.result.receipt', 'receipt-scheduling', 'E0', 'committed', {
+    schemaVersion: 2, skillChangeId: result.data.skillChangeId, commandId: result.data.commandId, attempt: result.data.attempt, receiptStatus: 'ACCEPTED' });
+  return { ...c, state, manager, command, makeReceipt, socket: c.sockets[0] };
+};
+const deferredReceiptTest = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
+
+test('skill receipt bypasses catalog wait but not the durable manager; later commands stay ordered', { timeout: 15000 }, async t => {
+  const c = await receiptSchedulingFixture(t), catalog = deferredReceiptTest(), durable = deferredReceiptTest();
+  let commands = 0, receiptHandled = false;
+  c.state.handleFrame = async frame => {
+    if (frame.messageType === 'command.dispatch') {
+      commands++; const result = await c.manager.handle(frame);
+      durable.resolve(result.resultEnvelope);
+      await catalog.promise; // Same location as the real executor: after durable work.result, before catalog completion.
+      return result;
+    }
+    const result = await c.manager.handle(frame); receiptHandled = true; return result;
+  };
+  try {
+    c.socket.receive(c.command); const result = await durable.promise;
+    assert.equal(c.manager.pendingResults().length, 1);
+    const receipt = c.makeReceipt(result);
+    c.socket.receive({ ...receipt, correlationId: 'not-this-result' });
+    c.socket.receive(receipt); c.socket.receive(c.command);
+    await c.tick(); await c.tick();
+    assert.equal(receiptHandled, true, 'durable receipt must not wait for the unrelated catalog gate');
+    assert.equal(c.manager.pendingResults().length, 0);
+    assert.equal(commands, 1, 'ordinary command ingress must remain serial');
+    assert.equal(c.state.accepted.filter(f => f.messageType === 'work.result.receipt').length, 1);
+    catalog.resolve(); await c.tick(); await c.tick();
+    assert.equal(commands, 2); assert.equal(c.manager.pendingResults().length, 0);
+  } finally { catalog.resolve(); }
+});
+
+test('skill receipt scheduled before disconnect is rejected if the session ends before admission', { timeout: 15000 }, async t => {
+  const c = await receiptSchedulingFixture(t);
+  const result = (await c.manager.handle(c.command)).resultEnvelope;
+  c.state.handleFrame = frame => c.manager.handle(frame);
+  c.socket.receive(c.makeReceipt(result)); c.socket.close(1008);
+  await c.tick(); await c.tick();
+  assert.equal(c.state.accepted.length, 0);
+  assert.equal(c.manager.pendingResults().length, 1);
+});
+
+test('skill receipt in flight is drained before executor close', { timeout: 15000 }, async t => {
+  const c = await receiptSchedulingFixture(t), admitted = deferredReceiptTest(), release = deferredReceiptTest();
+  const result = (await c.manager.handle(c.command)).resultEnvelope;
+  c.state.handleFrame = async frame => { admitted.resolve(); await release.promise; return c.manager.handle(frame); };
+  let closed = false;
+  try {
+    c.socket.receive(c.makeReceipt(result)); await admitted.promise;
+    const closing = c.executors[0].close().then(() => { closed = true; });
+    await c.tick(); assert.equal(closed, false); assert.notEqual(c.state.closed, true);
+    release.resolve(); await closing;
+    assert.equal(c.manager.pendingResults().length, 0); assert.equal(c.state.closed, true);
+  } finally { release.resolve(); }
+});
+
+test('skill receipt bypass never bypasses the manager transaction tail', { timeout: 15000 }, async t => {
+  const c = await receiptSchedulingFixture(t), transaction = deferredReceiptTest();
+  const result = (await c.manager.handle(c.command)).resultEnvelope;
+  // Hold the exact serialization primitive used for an in-flight durable write.
+  c.manager.tail = transaction.promise;
+  c.state.handleFrame = frame => c.manager.handle(frame);
+  try {
+    c.socket.receive(c.makeReceipt(result)); await c.tick(); await c.tick();
+    assert.equal(c.state.accepted.length, 1);
+    assert.equal(c.manager.pendingResults().length, 1, 'receipt cannot mutate a journal owned by a preceding transaction');
+    transaction.resolve(); await c.tick(); await c.tick();
+    assert.equal(c.manager.pendingResults().length, 0);
+  } finally { transaction.resolve(); }
+});
+
+ test('API shared native work hint fixture decodes the exact session proof without command semantics', async () => {
+  const wire=JSON.parse(await readFile(new URL('./fixtures/native-work-hint-v1.json',import.meta.url),'utf8'));
+  const frame=fromAgentWire(JSON.stringify(wire));
+  assert.equal(frame.messageType,'runtime.work.available');assert.equal(frame.notificationVersion,1);
+  assert.equal(frame.lane,'NATIVE_CONVERSATION');assert.equal(frame.sessionGeneration,'1');
+  assert.equal(frame.installationId,'rti_'+'1'.repeat(32));assert.equal(frame.runtimeInstanceId,'runtime-current');
+  assert.equal(Object.hasOwn(frame,'commandId'),false);
+});
+
+
+test('workspace hints negotiate independently and never enter command ingress', async t => {
+  const c = await channelFixture(t, { workspaceFileWorkNotifications: 1 }); await c.executors[0].activate();
+  const socket = c.sockets[0], state = c.states()[0], registration = socket.sent[0];
+  assert.equal(state.workNotificationVersion, null); assert.equal(state.fileWorkNotificationVersion, 1);
+  const hint = nativeWorkHint(registration); hint.data.lane = 'WORKSPACE_FILE';
+  socket.receive(hint); socket.receive(nativeWorkHint(registration));
+  socket.receive({ ...hint, data: { ...hint.data, sessionGeneration: '999' } });
+  socket.receive({ ...hint, data: { ...hint.data, notificationVersion: 2 } });
+  await c.tick();
+  assert.equal(state.fileWorkHints, 1); assert.equal(state.workHints, undefined); assert.deepEqual(state.accepted, []);
+});
+
+test('native-only ACK does not enable file discovery notifications', async t => {
+  const c = await channelFixture(t, { nativeWorkNotifications: 1 }); await c.executors[0].activate();
+  const socket = c.sockets[0], state = c.states()[0];
+  const hint = nativeWorkHint(socket.sent[0]); hint.data.lane = 'WORKSPACE_FILE';
+  socket.receive(hint); await c.tick();
+  assert.equal(state.fileWorkNotificationVersion, null); assert.equal(state.fileWorkHints, undefined);
+});
+
+test('API shared file work fixture preserves the existing wire envelope and proof', async () => {
+  const wire = JSON.parse(await readFile(new URL('./fixtures/workspace-file-work-hint-v1.json', import.meta.url), 'utf8'));
+  const frame = fromAgentWire(JSON.stringify(wire));
+  assert.equal(frame.messageType, 'runtime.work.available'); assert.equal(frame.lane, 'WORKSPACE_FILE');
+  assert.equal(frame.sessionGeneration, '1'); assert.equal(frame.installationId, 'rti_' + '1'.repeat(32));
+  assert.equal(Object.hasOwn(frame, 'commandId'), false);
+});
+
+
+test('legacy archive discovery flags never revive retired jobs on re-registration', async t => {
+  const c=await channelFixture(t,{ackRegistration:false,reconcileSkills:true});
+  const activation=c.executors[0].activate();await c.opened();
+  const socket=c.sockets[0], state=c.states()[0];
+  socket.receive({...registrationReceipt(socket.sent[0]),archiveJobDiscovery:0});await activation;
+  await c.adapters.heartbeat();await c.tick();assert.deepEqual(state.reconciliation,['positions']);
+  state.reconciliation=[];state.transport.refreshCapabilities();await c.tick();
+  // An unrelated ACK cannot change the negotiated service state.
+  const registration=socket.sent.filter(f=>f.messageType==='agent.register').at(-1);
+  socket.receive({...registrationReceipt(registration),messageId:'unrelated',archiveJobDiscovery:1});await c.tick();
+  await c.adapters.heartbeat();await c.tick();assert.deepEqual(state.reconciliation,['positions']);
+  state.reconciliation=[];
+  socket.receive({...registrationReceipt(registration),archiveJobDiscovery:1});await c.tick();
+  await c.adapters.heartbeat();await c.tick();assert.deepEqual(state.reconciliation,['positions']);
+});
+
+test('invalid archive service declaration cannot silently disable or enable discovery', async t => {
+  const c=await channelFixture(t,{ackRegistration:false,reconcileSkills:true});
+  const activation=c.executors[0].activate();const rejected=assert.rejects(activation,{code:'RUNTIME_REGISTRATION_SERVICE_INVALID'});await c.opened();
+  c.sockets[0].receive({...registrationReceipt(c.sockets[0].sent[0]),archiveJobDiscovery:'0'});await rejected;
+  await c.adapters.heartbeat();await c.tick();assert.ok(!c.states()[0].reconciliation);
+});
+
+test('shared archive registration fixture carries explicit server capability without altering envelope', async () => {
+ const wire=JSON.parse(await readFile(new URL('./fixtures/archive-discovery-registration-v1.json',import.meta.url),'utf8'));
+ const decoded=fromAgentWire(JSON.stringify(wire));
+ assert.equal(decoded.type,'agent_registered');assert.equal(decoded.messageId,'register-file-1');
+ assert.equal(decoded.archiveJobDiscovery,0);assert.deepEqual(decoded.readyCommandTypes,[]);
+});
+
+test('position discovery completion and subsequent heartbeat never revive retired archive discovery', async t => {
+ const c=await channelFixture(t,{ackRegistration:false,reconcileSkills:true});
+ const activation=c.executors[0].activate();await c.opened();const socket=c.sockets[0],state=c.states()[0];
+ socket.receive({...registrationReceipt(socket.sent[0]),archiveJobDiscovery:1});await activation;
+ let release;state.positionGate=new Promise(done=>{release=done});await c.adapters.heartbeat();await c.tick();
+ state.transport.refreshCapabilities();await c.tick();const registration=socket.sent.filter(f=>f.messageType==='agent.register').at(-1);
+ socket.receive({...registrationReceipt(registration),archiveJobDiscovery:1});await c.tick();release();await c.tick();
+ assert.deepEqual(state.reconciliation,['positions']);state.positionGate=null;
+ await c.adapters.heartbeat();await c.tick();assert.deepEqual(state.reconciliation,['positions','positions']);
+});
+
+test('handover quiesces only its subject, persists stopped fact and retains writer and public files', async t => {
+  const f = await fixture(t); const config = await f.config(); const mock = executors();
+  const host = new RuntimeHost({ config, createExecutor: mock.createExecutor }); f.cleanup(() => host.stop());
+  await host.start(); await Promise.all(config.agents.map(agent => host.activate(agent.subjectKey, {})));
+  const agent = config.agents[0]; const key = agent.subjectKey;
+  const request = { installationId: agent.manifest.installationId, operationId: 'handover-1' };
+  await writeFile(resolve(agent.profile.codexHome, 'public-fixture'), 'keep');
+  const result = await host.quiesceAgent(key, request);
+  assert.deepEqual(result, { subjectKey: key, ...request, phase: 'QUIESCED' });
+  assert.deepEqual(host.snapshot().agents.map(item => item.ready), [false, true, true]);
+  assert.equal(host.agentEvidence(key), null);
+  assert.equal(mock.states.get(key).closed, 1);
+  assert.equal(await readFile(resolve(agent.profile.codexHome, 'public-fixture'), 'utf8'), 'keep');
+  const before = await readFile(resolve(agent.stateRoot, 'handover.json'), 'utf8');
+  assert.equal(JSON.parse(before).phase, 'QUIESCED');
+  assert.deepEqual(await host.quiesceAgent(key, request), result);
+  assert.equal(await readFile(resolve(agent.stateRoot, 'handover.json'), 'utf8'), before);
+  assert.equal(mock.states.get(key).closed, 1);
+  await assert.rejects(acquireRuntimeOwnership(agent.stateRoot, { hostId: 'other', instanceId: 'other' }), code('RUNTIME_WRITER_BUSY'));
+  await assert.rejects(host.activate(key, {}), code('RUNTIME_AGENT_NOT_INITIALIZED'));
+  await assert.rejects(host.ensureAgent(agent), code('RUNTIME_HANDOVER_PENDING'));
+  await assert.rejects(host.reprovisionAgent(agent), code('RUNTIME_HANDOVER_PENDING'));
+  await assert.rejects(host.quiesceAgent(key, { ...request, operationId: 'different' }), code('RUNTIME_HANDOVER_CONFLICT'));
+});
+
+test('handover rejects a different installation before pausing or writing any intent', async t => {
+  const f = await fixture(t, { count: 1 }); const config = await f.config(); const mock = executors();
+  const host = new RuntimeHost({ config, createExecutor: mock.createExecutor }); f.cleanup(() => host.stop());
+  await host.start(); const agent = config.agents[0]; await host.activate(agent.subjectKey, {});
+  await assert.rejects(host.quiesceAgent(agent.subjectKey, { installationId: 'wrong', operationId: 'old' }), code('RUNTIME_HANDOVER_IDENTITY_CONFLICT'));
+  assert.equal(host.snapshot().agents[0].ready, true); assert.equal(mock.states.get(agent.subjectKey).paused, 0);
+  assert.deepEqual(await readdir(agent.stateRoot), ['.runtime-writer.lock']);
+});
+
+test('handover persists requested before close and retries without releasing ownership on failure', async t => {
+  const f = await fixture(t, { count: 1 }); const config = await f.config(); const agent = config.agents[0];
+  let allow = false; let closes = 0;
+  const host = new RuntimeHost({ config, createExecutor: async () => ({ initialize: async () => {}, activate: async () => {},
+    ready: () => false, pause: async () => {}, close: async () => {
+      closes++; assert.equal(JSON.parse(await readFile(resolve(agent.stateRoot, 'handover.json'), 'utf8')).phase, 'REQUESTED');
+      if (!allow) throw new Error('owned executor still running');
+    } }) });
+  await host.start(); const request = { installationId: agent.manifest.installationId, operationId: 'finish' };
+  await assert.rejects(host.quiesceAgent(agent.subjectKey, request), /owned executor still running/);
+  assert.equal(host.snapshot().agents[0].phase, 'QUIESCING');
+  assert.equal(JSON.parse(await readFile(resolve(agent.stateRoot, 'handover.json'), 'utf8')).phase, 'REQUESTED');
+  await assert.rejects(host.reprovisionAgent(agent), code('RUNTIME_HANDOVER_PENDING'));
+  await assert.rejects(acquireRuntimeOwnership(agent.stateRoot, { hostId: 'other', instanceId: 'other' }), code('RUNTIME_WRITER_BUSY'));
+  allow = true; await host.quiesceAgent(agent.subjectKey, request); assert.equal(closes, 2);
+  await host.stop();
+});
+
+for (const phase of ['REQUESTED', 'QUIESCED']) test(`handover ${phase} survives clean restart without creating an executor`, async t => {
+  const f = await fixture(t, { count: 1 }); const config = await f.config(); const agent = config.agents[0];
+  const record = { formatVersion: 1, subjectKey: agent.subjectKey, installationId: agent.manifest.installationId,
+    manifestSha256: agent.manifest.manifestSha256, operationId: 'original', phase };
+  // Seed only a stopped test root; production crash recovery must still honor its existing writer lock.
+  await f.json(resolve(agent.stateRoot, 'handover.json'), record);
+  for (let boot = 0; boot < 2; boot++) {
+    const mock = executors(); const host = new RuntimeHost({ config, createExecutor: mock.createExecutor });
+    await host.start(); assert.equal(mock.states.size, 0);
+    assert.equal(host.snapshot().agents[0].phase, phase === 'QUIESCED' ? 'QUIESCED' : 'QUIESCING');
+    await assert.rejects(host.reprovisionAgent(agent), code('RUNTIME_HANDOVER_PENDING'));
+    await assert.rejects(host.activate(agent.subjectKey, {}), code('RUNTIME_AGENT_NOT_INITIALIZED'));
+    await host.stop(); assert.deepEqual(JSON.parse(await readFile(resolve(agent.stateRoot, 'handover.json'), 'utf8')), record);
+  }
+});
+
+test('handover corrupt or foreign local fact never starts execution or overwrites evidence', async t => {
+  const f = await fixture(t, { count: 1 }); const config = await f.config(); const agent = config.agents[0];
+  for (const record of [null, { formatVersion: 1, subjectKey: 'foreign', installationId: agent.manifest.installationId,
+    manifestSha256: agent.manifest.manifestSha256, operationId: 'old', phase: 'QUIESCED' }]) {
+    const path = resolve(agent.stateRoot, 'handover.json'); await f.json(path, record); const before = await readFile(path, 'utf8');
+    const mock = executors(); const host = new RuntimeHost({ config, createExecutor: mock.createExecutor });
+    await host.start(); assert.equal(mock.states.size, 0); assert.equal(host.snapshot().agents[0].phase, 'ISOLATED');
+    await assert.rejects(host.ensureAgent(agent), code('RUNTIME_AGENT_INITIALIZATION_FAILED'));
+    await assert.rejects(host.reprovisionAgent(agent), code('RUNTIME_AGENT_INITIALIZATION_FAILED'));
+    assert.equal(await readFile(path, 'utf8'), before); await host.stop();
+  }
+});
+
+test('handover interrupts only its pending activation and cannot be bypassed by a queued restart', async t => {
+  const f = await fixture(t, { count: 1 }); const config = await f.config(); const agent = config.agents[0];
+  let entered; const activating = new Promise(resolve => { entered = resolve; }); let cancel;
+  const host = new RuntimeHost({ config, createExecutor: async () => ({ initialize: async () => {}, ready: () => false,
+    activate: async () => { entered(); await new Promise(resolve => { cancel = resolve; }); },
+    cancelActivation: () => cancel?.(), pause: async () => {}, close: async () => {} }) });
+  f.cleanup(() => host.stop()); await host.start();
+  const activation = host.activate(agent.subjectKey, {}); await activating;
+  const quiescing = host.quiesceAgent(agent.subjectKey, { installationId: agent.manifest.installationId, operationId: 'finish' });
+  const queuedRestart = assert.rejects(host.reprovisionAgent(agent), code('RUNTIME_HANDOVER_PENDING'));
+  await activation; assert.equal((await quiescing).phase, 'QUIESCED'); await queuedRestart;
+  assert.equal(host.snapshot().agents[0].ready, false);
+});
+
+test('real execution adapter retains attachment on failed close and allows explicit retry', async t => {
+  const f = await fixture(t, { count: 1 }); const config = await f.config(); const agent = config.agents[0];
+  let refuse = true, stops = 0;
+  const engine = { createExecutor: () => ({ close: async () => { stops++; if (refuse) throw Error('not stopped'); } }), close: async () => {} };
+  const factory = await createExecutionAdapterFactory({ config, instanceId: 'retry-adapter', apiOrigin: 'https://fixture.invalid',
+    socketFactory: class {}, loadEngine: async () => ({ createRuntimeExecutionHost: () => engine }),
+    clientFactory: () => ({ invalidateSession() {} }) });
+  const executor = factory.createExecutor({ agent, instanceId: 'retry-adapter', subjectKey: agent.subjectKey });
+  const first = executor.close(); assert.equal(executor.close(), first);
+  await assert.rejects(first, /not stopped/);
+  assert.throws(() => factory.createExecutor({ agent, subjectKey: agent.subjectKey }), code('RUNTIME_EXECUTOR_SUBJECT_INVALID'));
+  refuse = false; await executor.close(); await executor.close(); assert.equal(stops, 2);
+  await factory.close();
+});
+
+test('cost handover requires stopped ownership, persists original owner and never releases or restarts executor', async t => {
+  const f = await fixture(t, { count: 1 }), config = await f.config(), agent = config.agents[0];
+  const engine = executors(); let confirmed = false, sends = 0;
+  const delivery = async options => { sends++; assert.equal(options.agent, agent); assert.equal(options.ownerJiacn, 'original'); return { confirmed }; };
+  const host = new RuntimeHost({ config, createExecutor: engine.createExecutor, flushEvidence: delivery });
+  f.cleanup(() => host.stop()); await host.start();
+  const request = { installationId: agent.manifest.installationId, operationId: 'finish', ownerJiacn: 'original' };
+  await assert.rejects(host.flushAgentEvidence(agent.subjectKey, request), code('RUNTIME_HANDOVER_STATE_INVALID'));
+  assert.equal(sends, 0);
+  await host.quiesceAgent(agent.subjectKey, request);
+  assert.deepEqual(await host.flushAgentEvidence(agent.subjectKey, request), { confirmed: false });
+  assert.equal(sends, 1);
+  await assert.rejects(host.flushAgentEvidence(agent.subjectKey, { ...request, ownerJiacn: 'next-owner' }), code('RUNTIME_HANDOVER_IDENTITY_CONFLICT'));
+  await assert.rejects(host.flushAgentEvidence(agent.subjectKey, { ...request, operationId: 'other' }), code('RUNTIME_HANDOVER_IDENTITY_CONFLICT'));
+  assert.equal(sends, 1);
+  confirmed = true;
+  const replies = await Promise.all([host.flushAgentEvidence(agent.subjectKey, request), host.flushAgentEvidence(agent.subjectKey, request)]);
+  assert.deepEqual(replies, [{ confirmed: true }, { confirmed: true }]); assert.equal(sends, 2);
+  const durable = JSON.parse(await readFile(resolve(agent.stateRoot, 'handover.json')));
+  assert.equal(durable.evidenceAccepted, true); assert.equal(durable.evidenceOwnerJiacn, 'original'); assert.equal(durable.phase, 'QUIESCED');
+  assert.equal(engine.states.get(agent.subjectKey).initialized, 1);
+  assert.ok(host.agents.get(agent.subjectKey).release);
+  await host.stop();
+  const restarted = new RuntimeHost({ config, createExecutor: engine.createExecutor, flushEvidence: delivery });
+  f.cleanup(() => restarted.stop()); await restarted.start();
+  assert.deepEqual(await restarted.flushAgentEvidence(agent.subjectKey, request), { confirmed: true }); assert.equal(sends, 2);
+  assert.equal(restarted.agents.get(agent.subjectKey).executor, null);
+});
+
+test('cost-only original session drains CHAT without inbox recovery, enrollment, registration or model execution', async t => {
+  const { flushStoppedEvidence } = await import('../lib/evidence-handover.mjs');
+  const { PersistentChatInbox } = await import('../../codex-bridge/chat-runtime.mjs');
+  const f = await fixture(t, { count: 1 }), config = await f.config(), agent = config.agents[0];
+  const inbox = new PersistentChatInbox({ rootDir: resolve(agent.stateRoot, 'inbox'), profile: agent.profile }); inbox.initialize();
+  const item = { key: 'a'.repeat(64), record: { message: { dispatchId: 'old-dispatch' } } };
+  inbox.recordUsage(item, 'STARTED', 'requested'); inbox.recordUsage(item, 'TERMINAL', null, { last: { inputTokens: 10 } });
+  // A normal inbox initialization would move this private business record; cost-only must not touch it.
+  const business = resolve(inbox.processing, `${'c'.repeat(64)}.json`);
+  await writeFile(business, JSON.stringify({ state: 'PROCESSING', private: 'untouched' }), { mode: 0o600 });
+  let sessions = 0, invalidations = 0, sends = 0;
+  const options = { agent, ownerJiacn: 'original', apiOrigin: 'https://api.example.test', hostId: config.hostId, instanceId: 'cost-instance',
+    clientFactory: settings => {
+      assert.equal(settings.manifest, agent.manifest); assert.equal(settings.stateDir, agent.stateRoot);
+      return { session: async () => { sessions++; }, invalidateSession: () => { invalidations++; }, nativeFetch: async (url, request) => {
+        assert.equal(url.pathname, '/internal/agent/chat/dispatches/old-dispatch/usage'); assert.equal(request.method, 'POST'); sends++;
+        const payload = JSON.parse(request.body);
+        const data = { dispatchId: 'old-dispatch', attemptId: 'b'.repeat(64), revision: payload.phase === 'STARTED' ? '1' : '2', status: 'PENDING_USAGE', costYuan: null };
+        const response = new Response(JSON.stringify({ protocolVersion: 1, requestId: 'cost-fixture', code: 'E0', msg: '', data }), { headers: { 'content-type': 'application/json', 'x-request-id': 'cost-fixture' } });
+        Object.defineProperty(response, 'url', { value: url.href }); return response;
+      } };
+    } };
+  assert.equal((await flushStoppedEvidence(options)).confirmed, true);
+  assert.equal(sessions, 1); assert.equal(invalidations, 1); assert.equal(sends, 2);
+  assert.deepEqual(JSON.parse(await readFile(business)), { state: 'PROCESSING', private: 'untouched' });
+  await assert.rejects(flushStoppedEvidence({ ...options, clientFactory: () => ({ session: async () => { throw new Error('original authorization revoked'); }, invalidateSession: () => { invalidations++; } }) }), /authorization revoked/);
+  assert.equal(invalidations, 2); assert.equal(sends, 2);
+});
+
+test('stopped evidence locates the real management journal and keeps unacknowledged results pending across restart', async t => {
+  const { flushStoppedEvidence } = await import('../lib/evidence-handover.mjs');
+  const { SkillInstallManager, defaultSkillInstallStateRoot } = await import('../../codex-bridge/skill-install-manager.mjs');
+  const { headers } = await import('../../codex-bridge/test/fixtures/skill-management-fixture.mjs');
+  const f = await fixture(t, { count: 1 }), config = await f.config(), agent = config.agents[0];
+  const identity = agent.manifest, instanceId = 'original-boot', apiOrigin = 'https://api.example.test';
+  const binding = { scope: { tenantId: identity.tenantId, clientId: identity.clientId, ownerJiacn: 'original', agentId: identity.canonicalAgentId },
+    fence: { installationId: identity.installationId, hostId: config.hostId, runtimeInstanceId: instanceId, sessionGeneration: '1' } };
+  const pkg = managementPackage(); let downloads = 0;
+  const settings = { profile: agent.profile, runtimeInstanceId: instanceId, wsUrl: 'wss://api.example.test/ws/agent/channel',
+    stateRoot: defaultSkillInstallStateRoot(resolve(agent.stateRoot, 'inbox'), agent.profile, 'wss://api.example.test/ws/agent/channel'),
+    getRuntimeHeaders: () => headers(binding), fetchFn: async () => {
+      downloads++; return new Response(pkg.bytes, { headers: { 'content-length': String(pkg.bytes.length), 'content-type': 'application/octet-stream' } });
+    } };
+  const manager = new SkillInstallManager(settings); manager.initialize(); manager.bindSession(binding);
+  manager.verifyCandidate = async () => ({ readiness: 'READY' });
+  const command = managementCommand(pkg.target, { ...binding.scope, runtimeInstallationId: identity.installationId });
+  await manager.handle(command); await manager.handle(managementActivate(command)); manager.bindSession(null);
+  const originals = manager.pendingResults().map(row => row.envelope), sent = [];
+  assert.equal(originals.length, 2);
+  let lose = true, invalidations = 0;
+  const options = { agent, ownerJiacn: 'original', apiOrigin, hostId: config.hostId, instanceId: 'drain-boot', clientFactory: () => ({
+    session: async () => {}, invalidateSession: () => { invalidations++; }, nativeFetch: async (url, request) => {
+      assert.equal(url.pathname, '/internal/agent/skill-management/results'); assert.equal(request.method, 'POST');
+      const original = JSON.parse(request.body); sent.push(original);
+      if (lose) throw Error('receipt lost');
+      const receipt = replyMessage(original, 'work.result.receipt', `receipt_${original.messageId}`, 'E0', 'committed', {
+        schemaVersion: 2, skillChangeId: original.data.skillChangeId, commandId: original.data.commandId,
+        attempt: original.data.attempt, receiptStatus: 'ACCEPTED' });
+      const response = new Response(JSON.stringify({ protocolVersion: 1, requestId: 'drain-http', code: 'E0', msg: '', data: receipt }),
+        { headers: { 'content-type': 'application/json', 'x-request-id': 'drain-http' } });
+      Object.defineProperty(response, 'url', { value: url.href }); return response;
+    }
+  }) };
+  const first = await flushStoppedEvidence(options);
+  assert.equal(first.confirmed, false); assert.equal(first.management.pending, 2); assert.deepEqual(sent, originals);
+  lose = false;
+  const second = await flushStoppedEvidence(options);
+  assert.equal(second.confirmed, true); assert.equal(second.management.pending, 0); assert.deepEqual(sent.slice(2), originals);
+  assert.equal(downloads, 1); assert.equal(invalidations, 2);
+  const reopened = new SkillInstallManager(settings); reopened.initialize();
+  assert.equal(reopened.pendingResults().length, 0); assert.equal(reopened.listInstalledSkills().length, 1);
+  assert.equal((await flushStoppedEvidence(options)).confirmed, true); assert.equal(sent.length, 4);
+  await assert.rejects(flushStoppedEvidence({ ...options, ownerJiacn: 'next-owner' }));
+  assert.equal(sent.length, 4); assert.equal(invalidations, 4);
+});
+
+
+test('private cleanup gate requires original stopped evidence and persists success across restart without readmission', async t => {
+  const f = await fixture(t, { count: 1 }), config = await f.config(), agent = config.agents[0];
+  const engine = executors(); let evidence = false, cleanups = 0, outcome = 'pending';
+  const cleanup = async options => {
+    cleanups++; assert.equal(options.agent, agent); assert.equal(options.ownerJiacn, 'original'); assert.equal(options.operationId, 'finish');
+    if (outcome === 'failure') throw new Error('private removal interrupted');
+    return { confirmed: outcome === 'complete' };
+  };
+  const host = new RuntimeHost({ config, createExecutor: engine.createExecutor,
+    flushEvidence: async () => ({ confirmed: evidence }), cleanPrivateData: cleanup });
+  f.cleanup(() => host.stop()); await host.start();
+  const request = { installationId: agent.manifest.installationId, operationId: 'finish', ownerJiacn: 'original', leaseId: 'lease' };
+  await assert.rejects(host.cleanAgentPrivateData(agent.subjectKey, request), code('RUNTIME_HANDOVER_STATE_INVALID'));
+  await host.quiesceAgent(agent.subjectKey, request);
+  await host.flushAgentEvidence(agent.subjectKey, request);
+  await assert.rejects(host.cleanAgentPrivateData(agent.subjectKey, request), code('RUNTIME_HANDOVER_EVIDENCE_REQUIRED'));
+  assert.equal(cleanups, 0);
+  evidence = true; await host.flushAgentEvidence(agent.subjectKey, request);
+  for (const change of [{ ownerJiacn: 'next' }, { operationId: 'other' }, { installationId: 'other' }])
+    await assert.rejects(host.cleanAgentPrivateData(agent.subjectKey, { ...request, ...change }), code('RUNTIME_HANDOVER_IDENTITY_CONFLICT'));
+  assert.equal(cleanups, 0);
+  assert.deepEqual(await host.cleanAgentPrivateData(agent.subjectKey, request), { confirmed: false });
+  await assert.rejects(host.cleanAgentPrivateData(agent.subjectKey, { ...request, leaseId: 'other' }), code('RUNTIME_HANDOVER_IDENTITY_CONFLICT'));
+  outcome = 'failure'; await assert.rejects(host.cleanAgentPrivateData(agent.subjectKey, request), /interrupted/);
+  assert.equal(JSON.parse(await readFile(resolve(agent.stateRoot, 'handover.json'))).cleanupComplete, undefined);
+  outcome = 'complete';
+  assert.deepEqual(await Promise.all([host.cleanAgentPrivateData(agent.subjectKey, request), host.cleanAgentPrivateData(agent.subjectKey, request)]),
+    [{ confirmed: true }, { confirmed: true }]);
+  assert.equal(cleanups, 3);
+  assert.equal(JSON.parse(await readFile(resolve(agent.stateRoot, 'handover.json'))).cleanupComplete, true);
+  assert.ok(host.agents.get(agent.subjectKey).release);
+  await assert.rejects(host.ensureAgent(agent), code('RUNTIME_HANDOVER_PENDING'));
+  await host.stop();
+  const restarted = new RuntimeHost({ config, createExecutor: engine.createExecutor });
+  f.cleanup(() => restarted.stop()); await restarted.start();
+  assert.equal(restarted.agents.get(agent.subjectKey).executor, null);
+  assert.deepEqual(await restarted.cleanAgentPrivateData(agent.subjectKey, request), { confirmed: true });
+  assert.equal(engine.states.get(agent.subjectKey).initialized, 1);
+  await assert.rejects(restarted.ensureAgent(agent), code('RUNTIME_HANDOVER_PENDING'));
+});
+
+test('private cleanup gate does not invent a receipt when storage adapter is absent or durable evidence is inconsistent', async t => {
+  const f = await fixture(t, { count: 1 }), config = await f.config(), agent = config.agents[0];
+  const host = new RuntimeHost({ config, createExecutor: executors().createExecutor, flushEvidence: async () => ({ confirmed: true }) });
+  f.cleanup(() => host.stop()); await host.start();
+  const request = { installationId: agent.manifest.installationId, operationId: 'finish', ownerJiacn: 'original', leaseId: 'lease' };
+  await host.quiesceAgent(agent.subjectKey, request); await host.flushAgentEvidence(agent.subjectKey, request);
+  await assert.rejects(host.cleanAgentPrivateData(agent.subjectKey, request), code('RUNTIME_PRIVATE_CLEANUP_UNAVAILABLE'));
+  const path = resolve(agent.stateRoot, 'handover.json'), record = JSON.parse(await readFile(path));
+  assert.equal(record.cleanupComplete, undefined);
+  record.cleanupComplete = true; delete record.evidenceAccepted;
+  await f.json(path, record);
+  await assert.rejects(host.cleanAgentPrivateData(agent.subjectKey, request), code('RUNTIME_HANDOVER_STATE_INVALID'));
+});
+
+test('private cleanup host gate uses real storage aggregate and persists extraction failure without restarting old execution', async t => {
+  const { cleanStoppedPrivateData } = await import('../lib/private-data-cleanup.mjs');
+  const f = await fixture(t, { count: 1 }), config = await f.config(), agent = config.agents[0];
+  const engine = executors(); let extractions = 0;
+  for (const root of [agent.stateRoot, agent.profile.codexHome, agent.profile.codexWorkdir])
+    await writeFile(resolve(root, 'private'), 'old user');
+  const host = new RuntimeHost({ config, createExecutor: engine.createExecutor, flushEvidence: async () => ({ confirmed: true }),
+    cleanPrivateData: options => cleanStoppedPrivateData({ ...options, apiOrigin: 'https://api.example.test', instanceId: 'cleanup',
+      publicFiles: { 'config.toml': 'model="test"' }, flushPlatformCosts: async () => ({ confirmed: true }), extractKnowledge: async () => {
+        extractions++; assert.equal(await readFile(resolve(agent.profile.codexHome, 'private'), 'utf8'), 'old user');
+        throw new Error('synthetic private error text');
+      } }) });
+  f.cleanup(() => host.stop()); await host.start();
+  const request = { installationId: agent.manifest.installationId, operationId: 'finish', ownerJiacn: 'original', leaseId: 'lease' };
+  await host.quiesceAgent(agent.subjectKey, request); await host.flushAgentEvidence(agent.subjectKey, request);
+  assert.deepEqual(await host.cleanAgentPrivateData(agent.subjectKey, request), { confirmed: true });
+  const record = JSON.parse(await readFile(resolve(agent.stateRoot, 'handover.json')));
+  assert.equal(record.cleanupComplete, true); assert.equal(record.knowledgeStatus, 'FAILED');
+  assert.equal(JSON.stringify(record).includes('synthetic private'), false);
+  assert.deepEqual(await readdir(agent.profile.codexWorkdir), []);
+  assert.deepEqual(await readdir(agent.profile.codexHome), ['config.toml']);
+  assert.ok(host.agents.get(agent.subjectKey).release); assert.equal(extractions, 1);
+  await host.stop();
+  const restarted = new RuntimeHost({ config, createExecutor: engine.createExecutor });
+  f.cleanup(() => restarted.stop()); await restarted.start();
+  assert.deepEqual(await restarted.cleanAgentPrivateData(agent.subjectKey, request), { confirmed: true });
+  assert.equal(extractions, 1); assert.equal(restarted.agents.get(agent.subjectKey).executor, null);
+});
+
+test('static public baseline is scoped to the immutable subject, read only at startup and not taken from HOME', async t => {
+  const f = await fixture(t, { count: 1 }), baseline = resolve(f.root, 'operator-public.json');
+  const files = { 'config.toml': 'model="public-test"', 'auth.json': '{"synthetic":"public-operator"}' };
+  const identity = Object.fromEntries(['tenantId', 'clientId', 'canonicalAgentId'].map(key => [key, f.manifests[0][key]]));
+  await f.json(baseline, { ...identity, files }); f.entries[0].publicFilesPath = baseline;
+  await writeFile(resolve(f.profiles[0].codexHome, 'auth.json'), 'old private credential');
+  const config = await f.config();
+  assert.deepEqual(config.agents[0].publicFiles, files); assert.equal(config.agents[0].publicFilesPath, baseline);
+  assert.throws(() => { config.agents[0].publicFiles['config.toml'] = 'modified'; }, TypeError);
+  assert.equal(await readFile(resolve(f.profiles[0].codexHome, 'auth.json'), 'utf8'), 'old private credential');
+  for (const field of ['tenantId', 'clientId', 'canonicalAgentId']) {
+    await f.json(baseline, { ...identity, [field]: 'different', files });
+    await assert.rejects(f.config(), code('RUNTIME_PUBLIC_BASELINE_INVALID'));
+  }
+  for (const invalidFiles of [{}, { 'config.toml': '' }, { ...files, 'sessions/private': 'not public config' }]) {
+    await f.json(baseline, { ...identity, files: invalidFiles });
+    await assert.rejects(f.config(), code('RUNTIME_PUBLIC_BASELINE_INVALID'));
+  }
+});
+
+test('static public baseline cannot live in any Agent private root or be an unsafe operator file', async t => {
+  const f = await fixture(t, { count: 2 });
+  const value = { ...Object.fromEntries(['tenantId', 'clientId', 'canonicalAgentId'].map(key => [key, f.manifests[0][key]])),
+    files: { 'config.toml': 'model="public-test"' } };
+  for (const root of [f.profiles[0].codexHome, f.entries[0].stateRoot, f.profiles[1].codexHome, f.raw.stateRoot]) {
+    const baseline = resolve(root, 'operator-public.json'); await f.json(baseline, value); f.entries[0].publicFilesPath = baseline;
+    await assert.rejects(f.config(), code('RUNTIME_PUBLIC_BASELINE_PRIVATE_ROOT'));
+  }
+  const baseline = resolve(f.root, 'unsafe-public.json'); await f.json(baseline, value); await chmod(baseline, 0o644);
+  f.entries[0].publicFilesPath = baseline;
+  await assert.rejects(f.config(), code('RUNTIME_PUBLIC_BASELINE_INVALID'));
+  const link = resolve(f.root, 'public-link'); await symlink(baseline, link); f.entries[0].publicFilesPath = link;
+  await assert.rejects(f.config(), code('RUNTIME_PATH_SYMLINK'));
+});
+
+test('knowledge checkpoint survives lost final cleanup receipt and restart without a second extraction', async t => {
+  const { cleanStoppedPrivateData } = await import('../lib/private-data-cleanup.mjs');
+  const f = await fixture(t, { count: 1 }), config = await f.config(), agent = config.agents[0];
+  const engine = executors(); let calls = 0, lose = true;
+  const cleanup = async options => {
+    const result = await cleanStoppedPrivateData({ ...options, apiOrigin: 'https://example.test', instanceId: 'test',
+      publicFiles: { 'config.toml': 'model="test"' }, flushPlatformCosts: async () => ({ confirmed: true }), extractKnowledge: async () => { calls++; return { confirmed: true }; } });
+    if (lose) throw new Error('lost final cleanup receipt');
+    return result;
+  };
+  const host = new RuntimeHost({ config, createExecutor: engine.createExecutor, cleanPrivateData: cleanup,
+    flushEvidence: async () => ({ confirmed: true }) });
+  f.cleanup(() => host.stop()); await host.start();
+  const request = { installationId: agent.manifest.installationId, operationId: 'finish', ownerJiacn: 'original', leaseId: 'lease' };
+  await host.quiesceAgent(agent.subjectKey, request); await host.flushAgentEvidence(agent.subjectKey, request);
+  await assert.rejects(host.cleanAgentPrivateData(agent.subjectKey, request), /lost final/);
+  const record = JSON.parse(await readFile(resolve(agent.stateRoot, 'handover.json')));
+  assert.equal(record.knowledgeStatus, 'EXTRACTED'); assert.equal(record.cleanupComplete, undefined); assert.equal(calls, 1);
+  await host.stop(); lose = false;
+  const restarted = new RuntimeHost({ config, createExecutor: engine.createExecutor, cleanPrivateData: cleanup });
+  f.cleanup(() => restarted.stop()); await restarted.start();
+  assert.deepEqual(await restarted.cleanAgentPrivateData(agent.subjectKey, request), { confirmed: true }); assert.equal(calls, 1);
+});
+
+test('current delivery dependencies retain their explicit pinned versions', async () => {
+  const requirements = await readFile(resolve(engineSource, 'toolchain/requirements.txt'), 'utf8');
+  assert.deepEqual(requirements.split(/\r?\n/).filter(line => line && !line.startsWith('#')), [
+    'python-docx==0.8.11', 'python-pptx==0.6.23', 'openpyxl==3.1.3',
+    'Pillow==10.4.0', 'PyPDF2==1.28.6', 'reportlab==3.6.13', 'pypdf==6.21.4'
+  ]);
+  assert.match(requirements, /Python 3\.11\.13.*not yet accepted/);
+  // Source/pin assertions only; no install, wheel import, format or ABI PASS.
+});
+
