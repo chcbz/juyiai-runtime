@@ -81,8 +81,11 @@ test('invalid or changed authorization file cannot silently replace identity/tok
 });
 
 test('permanent denial quarantines only its grant and periodic refresh never restarts it', async t => {
+  let observeNext = false, continued;
+  const nextPeerRequest = new Promise(done => { continued = done; });
   const f = await fixture(t, async body => {
     const denied = body.data.authorizationId === grant.authorizationId;
+    if (!denied && observeNext) continued();
     return new Response(JSON.stringify({ protocolVersion: 1, requestId: body.requestId,
       code: denied ? 'E403' : 'E0', msg: denied ? 'denied' : 'ok',
       data: denied ? null : { authorizationId: peer.authorizationId, hostId: peer.hostId, acknowledgedMessageId: null, command: null } }),
@@ -91,8 +94,11 @@ test('permanent denial quarantines only its grant and periodic refresh never res
   await f.write([grant, peer]); await f.manager.refresh();
   await until(() => f.events.length === 1);
   const calls = id => f.calls.filter(call => call.data.authorizationId === id).length;
-  const before = calls(peer.authorizationId);
-  await f.manager.refresh(); await until(() => calls(peer.authorizationId) > before);
+  observeNext = true;
+  await f.manager.refresh();
+  await Promise.race([nextPeerRequest, f.manager.workers.get(peer.authorizationId).task.then(() => {
+    assert.fail('healthy peer transport unexpectedly stopped');
+  })]);
   assert.equal(calls(grant.authorizationId), 1);
   assert.equal(f.host().agents.size, 3); assert.equal(f.host().stopping, false);
   assert.equal(JSON.stringify(f.events).includes(grant.token), false);
