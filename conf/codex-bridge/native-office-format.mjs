@@ -4,7 +4,8 @@ import yauzl from 'yauzl'
 import { openSync, closeSync, constants } from 'node:fs'
 const parts = new Map([
   ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'word/document.xml'],
-  ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'xl/workbook.xml']
+  ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'xl/workbook.xml'],
+  ['application/vnd.openxmlformats-officedocument.presentationml.presentation', 'ppt/presentation.xml']
 ])
 export const isNativeOfficeMime = mime => parts.has(mime)
 export function validateNativeOfficeSnapshot(path, mime) {

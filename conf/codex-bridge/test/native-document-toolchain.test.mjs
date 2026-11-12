@@ -16,7 +16,7 @@ test('missing document interpreter is not a supported Office toolchain', () => {
 
 // Explicit low-cost process/filesystem probe, no model/service/paid API. CI must
 // supply its fixed toolchain; a skipped probe is not a production acceptance.
-test('pinned Python actually reads/edits/reopens DOCX/XLSX inside native mounts; no host or input writes', { skip: !process.env.CYF_NATIVE_DOCUMENT_PROBE_PYTHON }, async t => {
+test('pinned Python actually reads/edits/reopens DOCX/XLSX/PPTX inside native mounts; no host or input writes', { skip: !process.env.CYF_NATIVE_DOCUMENT_PROBE_PYTHON }, async t => {
   const root = mkdtempSync(resolve(tmpdir(), 'native-document-probe-')); chmodSync(root, 0o700); t.after(() => rmSync(root, { recursive: true, force: true }))
   const probePath = resolve(mkdir(resolve(root, 'probe-tools')), 'document_probe.py'); copyFileSync(fileURLToPath(new URL('../toolchain/document_probe.py', import.meta.url)), probePath); chmodSync(probePath, 0o600)
   const base = measureMinimalNativeExecutionToolchain()
@@ -28,6 +28,7 @@ test('pinned Python actually reads/edits/reopens DOCX/XLSX inside native mounts;
   t.diagnostic(`document discovery/hash/ldd: ${(performance.now() - measurementStart).toFixed(1)} ms; files: ${toolchain.files.length}`)
   assert.ok(toolchain.files.some(file => file.sandboxPath === '/usr/bin/python3'))
   assert.ok(toolchain.files.some(file => file.sandboxPath.endsWith('/openpyxl/__init__.py')))
+  assert.ok(toolchain.files.some(file => file.sandboxPath.endsWith('/pptx/__init__.py')))
   assert.ok(toolchain.files.every(file => !/(?:^|\/)(?:_tkinter[./]|tkinter\/)/.test(file.sandboxPath)))
   assert.ok(toolchain.files.every(file => !file.sandboxPath.startsWith('/home/') && !file.sandboxPath.includes('/pip/')))
   const execution = mkdir(resolve(root, 'execution'))

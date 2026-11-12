@@ -232,7 +232,7 @@ test('native read answer accepts AVIF while PNG-only skill execution remains rej
   const execute = action(); execute.action.sourceRefIds = ['source-avif'];
   assert.throws(() => validateActionOutcome(execute, f), /ACTION_SELECTION_INVALID/);
   assert.match(ACTION_OUTCOME_INSTRUCTIONS, /inputMimeTypes list restricts that skill execution, not native reading/);
-  assert.match(ACTION_OUTCOME_INSTRUCTIONS, /if a carrier is absent or genuinely unreadable/);
+  assert.match(ACTION_OUTCOME_INSTRUCTIONS, /If neither a readable carrier nor an accepting advertised action is available/);
 });
 
 const nativeFacts = () => ({ schemaVersion: 6, availableSources: [], inspectedSourceRefIds: [], availableActions: [{
@@ -288,3 +288,10 @@ test('planning permits explicitly provided read-only file tools but not business
   assert.match(ACTION_OUTCOME_INSTRUCTIONS, /Do not execute requested business actions/)
   assert.doesNotMatch(ACTION_OUTCOME_INSTRUCTIONS, /Do not call tools or scripts in this planning turn/)
 })
+
+// A planning carrier and the separate authorized execution are different boundaries.
+test('planning instructions route authorized unread sources through an advertised accepting action', () => {
+  assert.match(ACTION_OUTCOME_INSTRUCTIONS, /absent planning-turn carrier does not mean an advertised availableSource is unavailable/);
+  assert.match(ACTION_OUTCOME_INSTRUCTIONS, /ACTION_REQUEST selecting that exact actionId and sourceRefIds/);
+  assert.match(ACTION_OUTCOME_INSTRUCTIONS, /Do not claim to have read those bytes before execution/);
+});

@@ -6,7 +6,7 @@ import { resolve } from 'node:path'
 import { zip } from './fixtures/skill-management-fixture.mjs'
 import { validateNativeOutputSnapshot } from '../native-output-format.mjs'
 import { DOCUMENT_MIMES } from '../native-document-toolchain.mjs'
-const [docx, xlsx] = DOCUMENT_MIMES
+const [docx, xlsx, pptx] = DOCUMENT_MIMES
 const parts = part => [{ name: '[Content_Types].xml', data: '<Types/>' }, { name: '_rels/.rels', data: '<Relationships/>' }, { name: part, data: '<fixture/>' }]
 const fixture = t => {
   const root = mkdtempSync(resolve(tmpdir(), 'native-office-format-')); t.after(() => rmSync(root, { recursive: true, force: true }))
@@ -17,6 +17,11 @@ test('Office identification uses OOXML parts, not a filename or any ZIP signatur
   f.put(zip(parts('word/document.xml'))); assert.equal(await validateNativeOutputSnapshot(f.path, docx), docx)
   await assert.rejects(() => validateNativeOutputSnapshot(f.path, xlsx), /FORMAT_INVALID/)
   f.put(zip(parts('xl/workbook.xml'))); assert.equal(await validateNativeOutputSnapshot(f.path, xlsx), xlsx)
+  assert.equal(pptx, 'application/vnd.openxmlformats-officedocument.presentationml.presentation')
+  await assert.rejects(() => validateNativeOutputSnapshot(f.path, pptx), /FORMAT_INVALID/)
+  f.put(zip(parts('ppt/presentation.xml'))); assert.equal(await validateNativeOutputSnapshot(f.path, pptx), pptx)
+  await assert.rejects(() => validateNativeOutputSnapshot(f.path, docx), /FORMAT_INVALID/)
+  await assert.rejects(() => validateNativeOutputSnapshot(f.path, xlsx), /FORMAT_INVALID/)
   // Identification alone does not declare these deliberately minimal XML stubs
   // semantically reopenable. Actual reopens belong to document-tool regressions.
   for (const bytes of [Buffer.from('PK fake'), zip([{ name: 'ordinary.txt', data: 'not Office' }]), zip(parts('xl/workbook.xml')).subarray(0, 40)]) {

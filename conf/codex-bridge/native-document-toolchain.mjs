@@ -9,7 +9,7 @@ import { basename, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { readNativeToolchainImage, validateNativeExecutionToolchain, validateNativeExecutionToolchainAsync } from './native-execution-profile.mjs'
 
-export const DOCUMENT_MIMES = Object.freeze(['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'])
+export const DOCUMENT_MIMES = Object.freeze(['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'])
 export const DOCUMENT_PROBE = '/usr/lib/cyf-documents/document_probe.py'
 export const PDF_PROBE = '/usr/lib/cyf-browser/pdf-probe.mjs'
 const root = fileURLToPath(new URL('.', import.meta.url))
@@ -49,7 +49,7 @@ export function measureNativeDocumentToolchain({ base, pythonBin = resolve(root,
     }
   }
   const measured = spawnSync(pythonBin, ['-I', '-B', '-c', `import json, os, sys, sysconfig, pkg_resources, importlib.metadata
-wanted = {'python-docx', 'openpyxl', 'pypdf'}
+wanted = {'python-docx', 'python-pptx', 'openpyxl', 'pypdf'}
 requirements = []
 for line in open(sys.argv[1]):
  line = line.strip()

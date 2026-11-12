@@ -6,9 +6,13 @@ business document generators. Inputs are read-only. Write deliverables to
 `/outputs`, reopen and check their actual content before artifact_stage and
 result_propose.
 
-`/usr/bin/python3 -I -B` provides `docx`, `openpyxl` and `pypdf`:
+`/usr/bin/python3 -I -B` provides `docx`, `pptx`, `openpyxl` and `pypdf`:
 - Read/edit DOCX with `docx.Document`; XLSX with `openpyxl.load_workbook`.
   Formulas can be preserved but are not recalculated by openpyxl.
+- Create/read/edit PPTX with `pptx.Presentation`; add slides, text boxes and
+  speaker notes as required by the current task. Save to `/outputs`, reopen the
+  presentation, verify slide count and every requested title/body. A valid ZIP or
+  filename is not proof of content or layout. Do not substitute PDF for requested PPTX.
 - Read text PDFs with `pypdf.PdfReader`, inspect `pages` and `extract_text()`;
   use `PdfWriter` for page operations. Preserve original inputs. Encrypted or
   malformed documents may fail; report the actual limitation. Scanned pages
