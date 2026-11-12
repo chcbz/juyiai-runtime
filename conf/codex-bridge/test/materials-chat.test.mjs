@@ -49,7 +49,7 @@ function context(t, message = messageFixture(), outcome = { revision: null, sche
     assert.match(policy.developerInstructions, /Context Envelope, the conversation history already present in this same native thread/);
     assert.match(policy.developerInstructions, /authorized material carriers attached to this turn/);
     assert.match(policy.developerInstructions, /inputMimeTypes list restricts that skill execution, not native reading/);
-    assert.match(policy.developerInstructions, /if a carrier is absent or genuinely unreadable/);
+    assert.match(policy.developerInstructions, /If neither a readable carrier nor an accepting advertised action is available/);
     assert.equal(prior, null); assert.equal(policy.cwd, '/inputs'); assert.deepEqual(policy.config, { network: false, project_doc_max_bytes: 0 }); return { threadId: 'materials-thread' }
   }, runTurn: async options => {
     starts++; events.push('turn'); assert.equal(options.input.length, 33)
