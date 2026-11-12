@@ -20,7 +20,7 @@ NODE_VERSION="$("$NODE_BIN" -p 'process.versions.node')"
 printf 'Runtime Node version: %s\n' "$NODE_VERSION"
 for file in agent-runtime.mjs install.sh validate.sh package.json runtime.env.example manifest.example.json \
     lib/manifest.mjs lib/runtime-client.mjs lib/api-envelope.mjs lib/message-envelope.mjs lib/security.mjs lib/runtime-host.mjs lib/execution-adapter.mjs \
-    lib/hosting-config.mjs lib/hosting-wire.mjs lib/hosting-control.mjs lib/hosting-server.mjs \
+    lib/hosting-config.mjs lib/hosting-wire.mjs lib/hosting-control.mjs lib/hosting-server.mjs lib/hosting-outbound.mjs lib/hosting-outbound-host.mjs \
     lib/evidence-handover.mjs lib/private-data-cleanup.mjs lib/private-home-cleanup.mjs lib/private-state-cleanup.mjs lib/private-material-cleanup.mjs \
     lib/knowledge-maintenance.mjs lib/knowledge-sessions.mjs lib/knowledge-extraction.mjs lib/knowledge-responses.mjs lib/public-knowledge-store.mjs \
     hosting-control.example.json HOSTING-CONTROL.md systemd/cyf-agent-runtime-v1-hosting.tmpfiles.conf.example \
