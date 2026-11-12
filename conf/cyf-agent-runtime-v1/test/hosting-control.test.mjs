@@ -720,3 +720,51 @@ test('inventory observation or rejection journal failure never becomes a refunda
   await assert.rejects(f.control().handle(quotedPreparation(wire.prepareRequest, 'fixture-host', 'a'.repeat(64))), code('HOSTING_JOURNAL_WRITE_UNCONFIRMED'));
   assert.equal(Object.keys(f.control().state.operations).length, 0); assert.equal(f.enrollmentCount(), 0);
 });
+
+const targetRequest = Object.fromEntries(['protocol', 'tenantId', 'clientId', 'ownerJiacn', 'canonicalAgentId'].map(key => [key, prepare[key]]));
+targetRequest.method = 'target';
+test('SETUP target owns isolated directories and frozen template, but no installation or activation', async t => {
+  let observed;
+  const f = await hostingFixture(t, { observeInventory: async ({ profile }) => {
+    observed = profile;
+    assert.equal((await lstat(profile.codexHome)).mode & 0o777, 0o700);
+    assert.match(await readFile(resolve(profile.codexHome, 'config.toml'), 'utf8'), /model_provider/);
+    return fixtureInventory({ profile });
+  } });
+  const control = f.control();
+  const response = await control.handle(targetRequest);
+  assert.equal(response.outcome, 'TARGET_READY');
+  assert.deepEqual(await control.handle(targetRequest), response);
+  assert.deepEqual(Object.keys(control.state.subjects), []);
+  assert.deepEqual(Object.keys(control.state.operations), []);
+  assert.equal(f.enrollmentCount(), 0);
+  assert.equal(f.host().agents.size, 3);
+  const inventory = await control.handle({ ...targetRequest, method: 'inventory' });
+  assert.equal(inventory.inventorySource, 'TARGET');
+  assert.ok(observed.codexHome.startsWith(control.config.managedRoot));
+  const frozen = (await control.targetRecord(runtimeSubjectKey(targetRequest))).template;
+  await f.stop(); await f.start();
+  assert.equal((await f.control().handle(targetRequest)).outcome, 'TARGET_READY');
+  const prepared = await f.control().handle(prepare);
+  assert.deepEqual(Object.values(f.control().state.subjects)[0].template, frozen);
+  await f.control().handle(candidateRequest(prepare, prepared, 'ensure')); await f.settle();
+  assert.equal((await f.control().handle(candidateRequest(prepare, prepared, 'observe'))).outcome, 'SERVICE_READY');
+  assert.equal(f.enrollmentCount(), 1);
+});
+test('SETUP target refuses an orphan root and never labels it as observed', async t => {
+  const f = await hostingFixture(t); const control = f.control();
+  await mkdir(resolve(control.config.managedRoot, runtimeSubjectKey(targetRequest)), { mode: 0o700 });
+  await assert.rejects(control.handle(targetRequest), code('HOSTING_SUBJECT_CONFLICT'));
+  assert.equal(await control.targetRecord(runtimeSubjectKey(targetRequest)), null);
+  assert.equal(f.enrollmentCount(), 0);
+});
+test('SETUP target rejects changed owner and does not overwrite local config', async t => {
+  const other = { tenantId: targetRequest.tenantId, clientId: targetRequest.clientId, ownerJiacn: 'other-owner' };
+  const f = await hostingFixture(t, { scopes: [{ tenantId: targetRequest.tenantId, clientId: targetRequest.clientId, ownerJiacn: targetRequest.ownerJiacn }, other] }); const control = f.control();
+  await control.handle(targetRequest);
+  await assert.rejects(control.handle({ ...targetRequest, ownerJiacn: other.ownerJiacn }), code('HOSTING_SUBJECT_CONFLICT'));
+  const agent = control.targetAgent(await control.targetRecord(runtimeSubjectKey(targetRequest)));
+  await writeFile(resolve(agent.profile.codexHome, 'config.toml'), 'do-not-overwrite', { mode: 0o600 });
+  await assert.rejects(control.handle(targetRequest), code('HOSTING_STATE_UNCONFIRMED'));
+  assert.equal(await readFile(resolve(agent.profile.codexHome, 'config.toml'), 'utf8'), 'do-not-overwrite');
+});

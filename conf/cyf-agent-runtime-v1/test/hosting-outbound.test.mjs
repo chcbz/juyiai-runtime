@@ -224,3 +224,35 @@ test('setup registration fixture publishes only the local bearer hash, not execu
   assert.equal(fixture.registrationResponse.data.authorization.canonicalAgentId, fixture.registrationResponse.data.agentId);
   assert.equal(fixture.targetInventorySource, 'TARGET');
 });
+
+test('SETUP discovers a separate exact CONTROL worker without changing the operator file or exposing tokens', async t => {
+  const controlAuthorization = { ...sharedWire.authorization, authorizationId: 'hca_control', purpose: 'CONTROL' };
+  const authorization = { ...grant, controlToken: `rth1_${'b'.repeat(64)}` };
+  let controlSeen;
+  const seen = new Promise(done => { controlSeen = done; });
+  const ctx = await fixture(t, (body, count, options) => {
+    if (body.data.authorizationId === controlAuthorization.authorizationId) {
+      assert.equal(options.headers.Authorization, `RuntimeHosting ${authorization.controlToken}`);
+      controlSeen();
+      return response(body.requestId, { ...reply(), authorizationId: controlAuthorization.authorizationId });
+    }
+    assert.equal(options.headers.Authorization, `RuntimeHosting ${grant.token}`);
+    return response(body.requestId, { ...reply(), controlAuthorization });
+  }, authorization);
+  await ctx.worker.exchange(); await seen;
+  assert.equal(ctx.worker.controlEntry.worker.control, ctx.worker.control);
+  assert.equal(ctx.f.enrollmentCount(), 0);
+  const child = ctx.worker.controlEntry.worker;
+  assert.equal((await readFile(child.path, 'utf8')).includes(authorization.controlToken), false);
+  await ctx.worker.exchange(); assert.equal(ctx.worker.controlEntry.worker, child);
+  await ctx.worker.close(); assert.equal(child.release, null);
+});
+test('SETUP cannot accept CONTROL metadata for another owner or promote its own credential', async t => {
+  const authorization = { ...grant, controlToken: `rth1_${'b'.repeat(64)}` };
+  const ctx = await fixture(t, body => response(body.requestId, { ...reply(), controlAuthorization: {
+    ...sharedWire.authorization, authorizationId: 'hca_control', purpose: 'CONTROL', ownerJiacn: 'other-owner'
+  } }), authorization);
+  await assert.rejects(ctx.worker.exchange(), hasCode('HOSTING_OUTBOUND_CONTROL_REJECTED'));
+  assert.equal(ctx.worker.controlEntry, null);
+  assert.throws(() => new HostingOutbound({ ...ctx.options, authorization: { ...authorization, controlToken: grant.token } }), hasCode('HOSTING_OUTBOUND_AUTHORIZATION_INVALID'));
+});

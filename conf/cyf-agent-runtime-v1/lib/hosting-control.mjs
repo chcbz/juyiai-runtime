@@ -211,11 +211,64 @@ export class HostingControl {
       manifestSha256: subject.manifest.manifestSha256.slice(7), enrollmentSecretSha256: subject.enrollmentSecretSha256,
       enrollmentExpiresAt: subject.enrollmentExpiresAt, provisionGeneration: operation.provisionGeneration, hostId: this.host.config.hostId };
   }
+  targetPath(subjectKey) { return resolve(this.config.managedRoot, `target-${subjectKey}.json`); }
+  async targetRecord(subjectKey) {
+    const target = await readPrivateJson(this.targetPath(subjectKey), null);
+    if (target === null) return null;
+    if (Object.keys(target).sort().join(',') !== 'formatVersion,subject,template' || target.formatVersion !== 1
+        || Object.keys(target.subject || {}).sort().join(',') !== 'canonicalAgentId,clientId,ownerJiacn,tenantId'
+        || runtimeSubjectKey(target.subject) !== subjectKey || !this.scopeAllowed(target.subject) || !target.template)
+      throw hostingError('HOSTING_TARGET_INVALID');
+    validateHostingAssociation({ protocol: HOSTING_PROTOCOL, method: 'target', ...target.subject });
+    validateHostingConfig({ ...this.config, template: target.template });
+    return target;
+  }
+  targetAgent(target) { return this.subjectAgent({ manifest: target.subject, template: target.template }); }
+  async materializeConfig(agent, template) {
+    const path = resolve(agent.profile.codexHome, 'config.toml');
+    try { await privateFile(path, template.codexConfig); }
+    catch (cause) {
+      if (cause.code !== 'EEXIST') throw cause;
+      const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      try {
+        const stat = await file.stat();
+        if (!stat.isFile() || stat.uid !== process.getuid() || stat.mode & 0o077 || await file.readFile('utf8') !== template.codexConfig)
+          throw hostingError('HOSTING_STATE_UNCONFIRMED');
+      } finally { await file.close(); }
+    }
+  }
+  async prepareTarget(request, subjectKey) {
+    const existing = this.state.subjects[subjectKey];
+    if (existing) {
+      await this.cleanedReadmission(existing);
+      return { ...request, hostId: this.host.config.hostId, outcome: 'TARGET_READY' };
+    }
+    if (this.host.agents.has(subjectKey)) throw hostingError('HOSTING_SUBJECT_CONFLICT');
+    const subject = Object.fromEntries(['tenantId', 'clientId', 'ownerJiacn', 'canonicalAgentId'].map(key => [key, request[key]]));
+    let target = await this.targetRecord(subjectKey);
+    if (target && !same(target.subject, subject)) throw hostingError('HOSTING_SUBJECT_CONFLICT');
+    if (!target) {
+      if (!this.config.template || this.config.template.profile.workspacePolicyId && !this.workspacePolicies.has(this.config.template.profile.workspacePolicyId))
+        throw hostingError('HOSTING_TEMPLATE_PROFILE_INVALID');
+      try { await lstat(resolve(this.config.managedRoot, subjectKey)); throw hostingError('HOSTING_SUBJECT_CONFLICT'); }
+      catch (cause) { if (cause.code !== 'ENOENT') throw cause; }
+      target = { formatVersion: 1, subject, template: structuredClone(this.config.template) };
+      // Persist ownership/template before creating directories. A restart resumes this exact
+      // target; an unrelated existing directory is never adopted as an empty inventory.
+      await writePrivateJson(this.targetPath(subjectKey), target, { exclusive: true });
+    }
+    const agent = this.targetAgent(target);
+    for (const path of [resolve(this.config.managedRoot, subjectKey), agent.stateRoot, agent.profile.codexHome, agent.profile.codexWorkdir])
+      await ensurePrivateDirectory(path);
+    await this.materializeConfig(agent, target.template);
+    return { ...request, hostId: this.host.config.hostId, outcome: 'TARGET_READY' };
+  }
   async installedInventory(subjectKey) {
     if (this.config.template?.profile.workspacePolicyId && !this.workspacePolicies.has(this.config.template?.profile.workspacePolicyId))
       throw hostingError('HOSTING_TEMPLATE_PROFILE_INVALID');
     const subject = this.state.subjects[subjectKey];
-    const agent = subject ? this.subjectAgent(subject) : this.host.agents.get(subjectKey)?.agent;
+    const target = subject ? null : await this.targetRecord(subjectKey);
+    const agent = subject ? this.subjectAgent(subject) : this.host.agents.get(subjectKey)?.agent ?? (target ? this.targetAgent(target) : null);
     if (!agent) {
       // An orphan root is not proof of an empty public inventory; never adopt it for a zero quote.
       try {
@@ -235,6 +288,7 @@ export class HostingControl {
     if (!this.scopeAllowed(request)) throw hostingError('HOSTING_SCOPE_REJECTED');
     if (request.method === 'capabilities') return { protocol: HOSTING_PROTOCOL, method: request.method, tenantId: request.tenantId,
       clientId: request.clientId, ownerJiacn: request.ownerJiacn, available: this.config.template !== null && (!this.config.template?.profile.workspacePolicyId || this.workspacePolicies.has(this.config.template?.profile.workspacePolicyId)), hostId: this.host.config.hostId };
+    if (request.method === 'target') return this.withSubject(runtimeSubjectKey(request), () => this.prepareTarget(request, runtimeSubjectKey(request)));
     if (request.method === 'inventory') {
       const subjectKey = runtimeSubjectKey(request);
       return this.withSubject(subjectKey, async () => {
@@ -295,6 +349,8 @@ export class HostingControl {
             throw hostingError('HOSTING_OPERATION_CONFLICT');
           return this.prepared(request, prior, prior.candidate);
         }
+        const target = await this.targetRecord(subjectKey);
+        if (target && !this.state.subjects[subjectKey] && target.subject.ownerJiacn !== request.ownerJiacn) throw hostingError('HOSTING_SUBJECT_CONFLICT');
         let readmission = null;
         const existing = this.state.subjects[subjectKey];
         if (request.operationKind === 'INITIAL') {
@@ -317,7 +373,7 @@ export class HostingControl {
         let subject = state.subjects[subjectKey];
         if (request.operationKind === 'INITIAL') {
           if (!readmission && (subject || this.host.agents.has(subjectKey))) throw hostingError('HOSTING_SUBJECT_CONFLICT');
-          const template = readmission ? subject.template : this.config.template;
+          const template = readmission ? subject.template : target?.template ?? this.config.template;
           if (!readmission && template === null) throw hostingError('HOSTING_TEMPLATE_PROFILE_INVALID');
           const staticProfileId = readmission ? subject.staticProfileId : undefined;
           const unsigned = { runtimeProtocolVersion: 'v1', manifestVersion: '1', installationId: `rti_${randomBytes(16).toString('hex')}`,
@@ -451,8 +507,14 @@ export class HostingControl {
       await requireOwnedPrivateRoot(root);
       const path = resolve(root, 'subject.json'), current = await readPrivateJson(path, null);
       if (!same(current, { manifest: subject.manifest })) {
-        if (!previousManifest || !same(current, { manifest: previousManifest })) throw hostingError('HOSTING_STATE_UNCONFIRMED');
-        await writePrivateJson(path, { manifest: subject.manifest });
+        const target = current === null ? await this.targetRecord(agent.subjectKey) : null;
+        if (target && same(target.subject, Object.fromEntries(['tenantId', 'clientId', 'ownerJiacn', 'canonicalAgentId'].map(key => [key, subject.initialAssociation[key]])))
+            && same(target.template, subject.template)) {
+          await writePrivateJson(path, { manifest: subject.manifest }, { exclusive: true });
+        } else {
+          if (!previousManifest || !same(current, { manifest: previousManifest })) throw hostingError('HOSTING_STATE_UNCONFIRMED');
+          await writePrivateJson(path, { manifest: subject.manifest });
+        }
       }
     }
     for (const path of [agent.stateRoot, agent.profile.codexHome, agent.profile.codexWorkdir]) await ensurePrivateDirectory(path);
@@ -467,16 +529,7 @@ export class HostingControl {
     // New independent HOME: no auth.json or other user's file is read/copied.
     // A missing config after a partial materialization can be safely filled from
     // the exact durable template; an existing one must remain byte-identical.
-    const path = resolve(agent.profile.codexHome, 'config.toml');
-    try { await privateFile(path, subject.template.codexConfig); }
-    catch (cause) {
-      if (cause.code !== 'EEXIST') throw cause;
-      const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-      try {
-        const stat = await file.stat();
-        if (!stat.isFile() || stat.uid !== process.getuid() || stat.mode & 0o077 || await file.readFile('utf8') !== subject.template.codexConfig) throw hostingError('HOSTING_STATE_UNCONFIRMED');
-      } finally { await file.close(); }
-    }
+    await this.materializeConfig(agent, subject.template);
     return agent;
   }
   startOperation(key) {

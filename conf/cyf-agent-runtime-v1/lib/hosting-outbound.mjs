@@ -1,13 +1,13 @@
 // Outbound transport for the existing HostingControl lifecycle. No listener,
 // business execution authority, payment decisions or second lifecycle journal.
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { encodeHttpRequest, decodeHttpResponse } from './api-envelope.mjs';
 import { validateMessage } from './message-envelope.mjs';
 import { validateHostingRequest, hostingReply } from './hosting-wire.mjs';
 import { exactHostingId, hostingError } from './hosting-config.mjs';
 import { normalizeRuntimeOrigin, classifyRuntimeError } from './runtime-client.mjs';
-import { readPrivateJson, writePrivateJson } from './security.mjs';
+import { ensurePrivateDirectory, readPrivateJson, writePrivateJson } from './security.mjs';
 import { acquireRuntimeOwnership } from './runtime-host.mjs';
 import { stableJson } from './manifest.mjs';
 
@@ -31,6 +31,7 @@ export class HostingOutbound {
   constructor({ control, authorization, stateRoot, apiOrigin, fetchFn = fetch, logger = () => {} }) {
     if (!control || !object(authorization) || !exactHostingId(authorization.authorizationId)
         || !tokenPattern.test(authorization.token) || !['SETUP', 'CONTROL'].includes(authorization.purpose)
+        || authorization.controlToken !== undefined && (authorization.purpose !== 'SETUP' || !tokenPattern.test(authorization.controlToken) || authorization.controlToken === authorization.token)
         || subjectFields.some(field => !exactHostingId(authorization[field]))
         || authorization.hostId !== control.host.config.hostId || !control.scopeAllowed(authorization))
       fail('HOSTING_OUTBOUND_AUTHORIZATION_INVALID');
@@ -40,7 +41,7 @@ export class HostingOutbound {
     this.control = control; this.authorization = Object.freeze({ ...authorization });
     this.identity = Object.freeze(Object.fromEntries(['authorizationId', 'hostId', 'purpose', ...subjectFields].map(key => [key, authorization[key]])));
     this.stateRoot = stateRoot; this.path = resolve(stateRoot, 'hosting-exchange.json');
-    this.fetchFn = fetchFn; this.logger = logger; this.release = null; this.state = null; this.active = false;
+    this.controlEntry = null; this.fetchFn = fetchFn; this.logger = logger; this.release = null; this.state = null; this.active = false;
   }
 
   async initialize() {
@@ -62,7 +63,7 @@ export class HostingOutbound {
     const request = validateHostingRequest(command);
     if (subjectFields.filter(field => field !== 'canonicalAgentId' || request.method !== 'capabilities')
       .some(field => request[field] !== this.identity[field])) fail('HOSTING_OUTBOUND_SUBJECT_REJECTED');
-    if (this.identity.purpose === 'SETUP' && !['capabilities', 'inventory'].includes(request.method))
+    if (this.identity.purpose === 'SETUP' && !['capabilities', 'target', 'inventory'].includes(request.method))
       fail('HOSTING_OUTBOUND_SETUP_ONLY');
     return request;
   }
@@ -115,6 +116,7 @@ export class HostingOutbound {
         responseRequestId: response.headers.get('x-request-id') ?? undefined }).value;
       if (!object(reply) || reply.authorizationId !== this.identity.authorizationId || reply.hostId !== this.identity.hostId
           || !Object.hasOwn(reply, 'acknowledgedMessageId') || !Object.hasOwn(reply, 'command')) fail('HOSTING_OUTBOUND_REPLY_INVALID');
+      await this.acceptControl(reply.controlAuthorization);
       const pending = this.state.result;
       if (reply.acknowledgedMessageId !== null && reply.acknowledgedMessageId !== pending?.messageId)
         fail('HOSTING_OUTBOUND_ACK_INVALID');
@@ -138,9 +140,38 @@ export class HostingOutbound {
     } finally { this.active = false; }
   }
 
+  async acceptControl(metadata) {
+    if (metadata == null) return;
+    if (this.identity.purpose !== 'SETUP' || !this.authorization.controlToken || !object(metadata)
+        || metadata.purpose !== 'CONTROL' || metadata.authorizationId === this.identity.authorizationId
+        || ['hostId', ...subjectFields].some(key => metadata[key] !== this.identity[key]))
+      fail('HOSTING_OUTBOUND_CONTROL_REJECTED');
+    const authorization = { ...metadata, token: this.authorization.controlToken };
+    if (this.controlEntry) {
+      if (!same(this.controlEntry.authorization, authorization)) fail('HOSTING_OUTBOUND_CONTROL_CONFLICT');
+      return;
+    }
+    const stateRoot = resolve(this.stateRoot, 'control', createHash('sha256').update(metadata.authorizationId).digest('hex'));
+    const worker = new HostingOutbound({ control: this.control, authorization, stateRoot, apiOrigin: this.origin, fetchFn: this.fetchFn, logger: this.logger });
+    await ensurePrivateDirectory(stateRoot);
+    await worker.initialize();
+    const aborter = new AbortController();
+    const entry = { authorization, worker, aborter, task: null };
+    this.controlEntry = entry;
+    entry.task = worker.run({ signal: aborter.signal }).catch(error => {
+      this.logger('hosting-outbound-control-isolated', { category: classifyRuntimeError(error).kind });
+    });
+  }
+  async closeControl() {
+    const entry = this.controlEntry;
+    if (!entry) return;
+    entry.aborter.abort(); await entry.task; await entry.worker.close();
+    this.controlEntry = null;
+  }
+
   async run({ signal, pollIntervalMs = 1000, waitFn = wait }) {
     if (!signal || !Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 1) fail('HOSTING_OUTBOUND_RUN_INVALID');
-    while (!signal.aborted) {
+    try { while (!signal.aborted) {
       try { await this.exchange(signal); }
       catch (cause) {
         if (signal.aborted) return;
@@ -150,11 +181,12 @@ export class HostingOutbound {
         this.logger('hosting-outbound-retry', { category });
       }
       if (!signal.aborted) await waitFn(pollIntervalMs, signal);
-    }
+    } } finally { await this.closeControl(); }
   }
 
   async close() {
     if (this.active) fail('HOSTING_OUTBOUND_BUSY'); // Abort/join the caller's run before releasing its writer.
+    await this.closeControl();
     await this.release?.(); this.release = null; this.state = null;
   }
 }
