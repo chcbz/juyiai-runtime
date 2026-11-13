@@ -96,3 +96,56 @@ test('knowledge maintenance confines the installation bearer to its fixed accoun
   await assert.rejects(api.nativeFetch('https://api.test/internal/agent/hosting-leases/lease-1/knowledge-usage', { method: 'POST' }),
     { code: 'RUNTIME_NATIVE_SCOPE_INVALID' })
 })
+
+const materialUrl = family => `https://api.test/internal/agent/chat/requests/request-1/turns/turn-1/${family}/inputs/ref-1/content`
+const nativeClient = fetchFn => {
+  const api = client(fetchFn)
+  api.currentSession = { installationId: 'i', canonicalAgentId: 'a', hostId: 'h', runtimeInstanceId: 'r', sessionGeneration: '1', sessionToken: `rts1_${'a'.repeat(64)}` }
+  api.sessionAbort = new AbortController()
+  return api
+}
+for (const family of ['materials', 'inspection']) {
+  test(`${family} content preserves successful JSON file bytes, not an HTTP envelope`, async () => {
+    // Deliberately not a valid R (nor strictly parseable JSON): file contents
+    // cannot decide the transport contract; the materializer checks its hash.
+    const bytes = '{ "requestId": "file-data", "value": 9007199254740993, "value": 2 }\n'
+    let original
+    const api = nativeClient(async (_url, config) => {
+      assert.match(config.headers.get('Authorization'), /^AgentRuntime /)
+      original = new Response(bytes, { headers: { 'Content-Type': 'application/json', 'X-Request-Id': config.headers.get('X-Request-Id') } })
+      return original
+    })
+    const result = await api.nativeFetch(materialUrl(family), { headers: { Accept: 'application/json' } })
+    assert.equal(result, original)
+    assert.equal(result.bodyUsed, false)
+    assert.equal(await result.text(), bytes)
+  })
+}
+test('material download errors still validate R correlation and preserve HTTP failure', async () => {
+  let mismatch = false
+  const api = nativeClient(async (_url, config) => {
+    const requestId = mismatch ? 'wrong-request' : config.headers.get('X-Request-Id')
+    return new Response(JSON.stringify({ protocolVersion: 1, requestId, code: 'FORBIDDEN', msg: 'denied', data: null }), {
+      status: 403, headers: { 'Content-Type': 'application/json', 'X-Request-Id': requestId }
+    })
+  })
+  assert.equal((await api.nativeFetch(materialUrl('materials'))).status, 403)
+  mismatch = true
+  await assert.rejects(api.nativeFetch(materialUrl('materials')), { code: 'PROTOCOL_INVALID_RESPONSE' })
+})
+test('ordinary JSON APIs and content-like non-GET routes cannot bypass envelope validation', async () => {
+  const api = nativeClient(async () => new Response('{"title":"","url":"https://api.test","httpStatus":200}', { headers: { 'Content-Type': 'application/json' } }))
+  for (const [url, options] of [
+    ['https://api.test/internal/agent/tasks/context', { headers: { Accept: 'application/octet-stream' } }],
+    [materialUrl('inspection'), { method: 'POST' }],
+    [materialUrl('inspection') + '/extra', {}],
+    [materialUrl('inspection') + '?raw=true', {}]
+  ]) await assert.rejects(api.nativeFetch(url, options), { code: 'PROTOCOL_INVALID_RESPONSE' })
+})
+test('raw material content still rejects a response from a superseded runtime session', async () => {
+  const api = nativeClient(async () => {
+    api.currentSession = { ...api.currentSession, sessionGeneration: '2' }
+    return new Response('{}', { headers: { 'Content-Type': 'application/json' } })
+  })
+  await assert.rejects(api.nativeFetch(materialUrl('materials')), { code: 'RUNTIME_NATIVE_SESSION_CHANGED' })
+})
