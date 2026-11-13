@@ -2,7 +2,6 @@
   "authorization": {
     "authorizationId": "hca_fixture",
     "hostId": "fixture-host",
-    "purpose": "SETUP",
     "tenantId": "0",
     "clientId": "fixture-client",
     "ownerJiacn": "fixture-owner",

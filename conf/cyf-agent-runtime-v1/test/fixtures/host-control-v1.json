@@ -1,0 +1,204 @@
+{
+  "description": "Minimal design fixture; not implemented or accepted. Synthetic Runtime-only test token must not enter browser registration or production.",
+  "runtimeHarnessOnly": {
+    "token": "rth1_0000000000000000000000000000000000000000000000000000000000000000",
+    "tokenSha256": "d03d936aa6234dc42c5028f24a6acfddb1e028b347744501e03e2a28b45fff60"
+  },
+  "register": {
+    "method": "POST",
+    "path": "/agent/hosting-hosts",
+    "request": {
+      "protocolVersion": 1,
+      "requestId": "register-1",
+      "data": {
+        "hostId": "fixture-host",
+        "tokenSha256": "d03d936aa6234dc42c5028f24a6acfddb1e028b347744501e03e2a28b45fff60"
+      }
+    },
+    "httpStatus": 200,
+    "response": {
+      "protocolVersion": 1,
+      "requestId": "register-1",
+      "code": "E0",
+      "msg": "ok",
+      "data": {
+        "hostId": "fixture-host",
+        "mode": "local",
+        "tenantId": "0",
+        "clientId": "fixture-client",
+        "ownerJiacn": "fixture-owner",
+        "tokenSha256": "d03d936aa6234dc42c5028f24a6acfddb1e028b347744501e03e2a28b45fff60"
+      }
+    },
+    "headers": {
+      "Idempotency-Key": "00000000-0000-4000-8000-000000000001"
+    }
+  },
+  "directory": {
+    "method": "GET",
+    "path": "/agent/runtime/v1/hosting/authorizations",
+    "httpStatus": 200,
+    "response": {
+      "protocolVersion": 1,
+      "requestId": "directory-1",
+      "code": "E0",
+      "msg": "ok",
+      "data": {
+        "host": {
+          "hostId": "fixture-host",
+          "mode": "local",
+          "tenantId": "0",
+          "clientId": "fixture-client",
+          "ownerJiacn": "fixture-owner",
+          "tokenSha256": "d03d936aa6234dc42c5028f24a6acfddb1e028b347744501e03e2a28b45fff60"
+        },
+        "items": [
+          {
+            "authorizationId": "hca_fixture",
+            "hostId": "fixture-host",
+            "tenantId": "0",
+            "clientId": "fixture-client",
+            "ownerJiacn": "fixture-owner",
+            "canonicalAgentId": "agt_fixture"
+          }
+        ],
+        "nextCursor": null,
+        "hasMore": false
+      }
+    },
+    "headers": {
+      "Authorization": "RuntimeHosting rth1_0000000000000000000000000000000000000000000000000000000000000000",
+      "X-Request-Id": "directory-1"
+    },
+    "querySchema": {
+      "cursor": {
+        "type": "string",
+        "optional": true,
+        "maxUtf8Bytes": 100
+      },
+      "pageSize": {
+        "type": "integer",
+        "optional": true,
+        "minimum": 1,
+        "maximum": 100,
+        "default": 100
+      }
+    },
+    "querySchemaIsDocumentation": true
+  },
+  "poll": {
+    "method": "POST",
+    "path": "/agent/runtime/v1/hosting/exchanges",
+    "request": {
+      "protocolVersion": 1,
+      "requestId": "poll-1",
+      "data": {
+        "authorizationId": "hca_fixture",
+        "hostId": "fixture-host",
+        "runtimeInstanceId": "fixture-process-1",
+        "result": null
+      }
+    },
+    "httpStatus": 200,
+    "response": {
+      "protocolVersion": 1,
+      "requestId": "poll-1",
+      "code": "E0",
+      "msg": "ok",
+      "data": {
+        "authorizationId": "hca_fixture",
+        "hostId": "fixture-host",
+        "acknowledgedMessageId": null,
+        "command": {
+          "protocolVersion": 1,
+          "requestId": "inventory-request",
+          "messageType": "hosting.inventory",
+          "messageId": "inventory-command-1",
+          "data": {
+            "tenantId": "0",
+            "clientId": "fixture-client",
+            "ownerJiacn": "fixture-owner",
+            "canonicalAgentId": "agt_fixture"
+          }
+        }
+      }
+    },
+    "headers": {
+      "Authorization": "RuntimeHosting rth1_0000000000000000000000000000000000000000000000000000000000000000",
+      "X-Request-Id": "poll-1"
+    }
+  },
+  "result": {
+    "method": "POST",
+    "path": "/agent/runtime/v1/hosting/exchanges",
+    "request": {
+      "protocolVersion": 1,
+      "requestId": "poll-2",
+      "data": {
+        "authorizationId": "hca_fixture",
+        "hostId": "fixture-host",
+        "runtimeInstanceId": "fixture-process-1",
+        "result": {
+          "protocolVersion": 1,
+          "requestId": "inventory-request",
+          "messageType": "hosting.inventory.result",
+          "messageId": "inventory-result-1",
+          "data": {
+            "tenantId": "0",
+            "clientId": "fixture-client",
+            "ownerJiacn": "fixture-owner",
+            "canonicalAgentId": "agt_fixture",
+            "hostId": "fixture-host",
+            "inventoryVersion": "1",
+            "inventorySha256": "65f11a9f3c2ae3c87d468475bdc54d0aa9b67627d327abccfd0d8941d6701ed3",
+            "installedSkillCount": "2",
+            "skills": [
+              {
+                "skillKey": "installed",
+                "source": "MANAGED",
+                "revision": "46e2043ea234979a0534ae415fb3bf9c3b313da7f053a1233463c3128942ea98",
+                "enabled": false,
+                "installation": {
+                  "skillInstallationId": "skill-fixture-installed",
+                  "productVersionId": "product-fixture-v1",
+                  "skillVersion": "1.0.0",
+                  "kind": "INSTRUCTION",
+                  "packageSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "manifestSha256": null
+                }
+              },
+              {
+                "skillKey": "菜谱",
+                "source": "NATIVE",
+                "revision": "6eca69dd76cead7cce389e1386ff6ac138441127dcb3abda20b440be2547116d",
+                "enabled": true,
+                "installation": null
+              }
+            ],
+            "inventorySource": "TARGET"
+          },
+          "correlationId": "inventory-command-1",
+          "code": "E0",
+          "msg": "ok"
+        }
+      }
+    },
+    "httpStatus": 200,
+    "response": {
+      "protocolVersion": 1,
+      "requestId": "poll-2",
+      "code": "E0",
+      "msg": "ok",
+      "data": {
+        "authorizationId": "hca_fixture",
+        "hostId": "fixture-host",
+        "acknowledgedMessageId": "inventory-result-1",
+        "command": null
+      }
+    },
+    "headers": {
+      "Authorization": "RuntimeHosting rth1_0000000000000000000000000000000000000000000000000000000000000000",
+      "X-Request-Id": "poll-2"
+    }
+  }
+}

@@ -1,4 +1,5 @@
 // Operator-only local config. No control request can select these paths or keys.
+import { createHash } from 'node:crypto';
 import { constants, lstat, open, realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { isIP } from 'node:net';
@@ -33,10 +34,10 @@ export function validateHostingConfig(value) {
   if (!fields(value, configFields)
       || value.configVersion !== 1 || !outbound && (!Number.isSafeInteger(value.socketGid) || value.socketGid < 0)
       || !Number.isSafeInteger(value.enrollmentTtlMs) || value.enrollmentTtlMs < 1
-      || !Array.isArray(value.scopes) || !value.scopes.length
+      || !Array.isArray(value.scopes) || !outbound && !value.scopes.length
       || value.template !== null && !fields(value.template, ['profile', 'codexConfig', 'providerEnvironment'])) throw hostingError('HOSTING_CONFIG_INVALID');
-  if (outbound && (value.remote !== undefined || !fields(value.outbound, ['authorizationsPath', 'pollIntervalMs'])
-      || !exactHostingId(value.outbound.authorizationsPath) || !isAbsolute(value.outbound.authorizationsPath)
+  if (outbound && (value.remote !== undefined || !fields(value.outbound, ['credentialsPath', 'pollIntervalMs'])
+      || !exactHostingId(value.outbound.credentialsPath) || !isAbsolute(value.outbound.credentialsPath)
       || !Number.isSafeInteger(value.outbound.pollIntervalMs) || value.outbound.pollIntervalMs < 1))
     throw hostingError('HOSTING_OUTBOUND_CONFIG_INVALID');
   if (value.remote !== undefined) {
@@ -103,11 +104,11 @@ export async function readHostingConfig(path, hostConfig) {
   const managed = await lstat(value.managedRoot);
   if (!managed.isDirectory() || managed.uid !== process.getuid() || managed.mode & 0o077) throw hostingError('HOSTING_CONFIG_ROOT_UNSAFE');
   if (value.outbound) {
-    await canonicalHostingPath(value.outbound.authorizationsPath);
-    if ([...roots, value.managedRoot].some(root => overlap(root, value.outbound.authorizationsPath)))
+    await canonicalHostingPath(value.outbound.credentialsPath);
+    if ([...roots, value.managedRoot].some(root => overlap(root, value.outbound.credentialsPath)))
       throw hostingError('HOSTING_OUTBOUND_CREDENTIAL_ROOT_UNSAFE');
     // Content/subject admission occurs in the transport supervisor, not in each caller.
-    await readPrivateJson(value.outbound.authorizationsPath, null);
+    await readPrivateJson(value.outbound.credentialsPath, null);
   } else {
     const parent = await lstat(dirname(value.socketPath));
     if (!parent.isDirectory() || parent.uid !== process.getuid() || parent.gid !== value.socketGid
@@ -153,4 +154,23 @@ export async function readHostingTlsOptions(remote) {
   };
   return { cert: await read(remote.certificatePath, false), key: await read(remote.privateKeyPath, true),
     ca: await read(remote.clientCaPath, false), requestCert: true, rejectUnauthorized: true, minVersion: 'TLSv1.2' };
+}
+
+// Confirmed locally before any network request. The shared credential never
+// becomes part of an Agent identity, profile or lifecycle journal.
+export function validateHostingCredential(value, hostId) {
+  const host = value?.host;
+  if (!fields(value, ['configVersion', 'host', 'token']) || value.configVersion !== 1
+      || !/^rth1_[0-9a-f]{64}$/.test(value.token)
+      || !fields(host, ['hostId', 'mode', 'tenantId', 'clientId', 'ownerJiacn', 'tokenSha256'])
+      || !['hostId', 'tenantId', 'clientId'].every(key => exactHostingId(host[key]))
+      || host.hostId !== hostId || !['server', 'local'].includes(host.mode)
+      || (host.mode === 'server' ? host.ownerJiacn !== null : !exactHostingId(host.ownerJiacn))
+      || host.tokenSha256 !== createHash('sha256').update(value.token).digest('hex'))
+    throw hostingError('HOSTING_OUTBOUND_CREDENTIAL_INVALID');
+  return Object.freeze({ configVersion: 1, host: Object.freeze({ ...host }), token: value.token });
+}
+export async function readHostingCredential(config, hostId) {
+  await canonicalHostingPath(config.credentialsPath);
+  return validateHostingCredential(await readPrivateJson(config.credentialsPath, null), hostId);
 }

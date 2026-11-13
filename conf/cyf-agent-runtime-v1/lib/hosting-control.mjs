@@ -7,7 +7,7 @@ import { digestManifest, runtimeSubjectKey, stableJson, validateManifest } from 
 import { acquireRuntimeOwnership, requireOwnedPrivateRoot } from './runtime-host.mjs';
 import { RuntimeV1Client, canonicalVersion } from './runtime-client.mjs';
 import { ensurePrivateDirectory, readPrivateJson, writePrivateJson } from './security.mjs';
-import { hostingError, validateHostingConfig } from './hosting-config.mjs';
+import { hostingError, validateHostingConfig, readHostingCredential } from './hosting-config.mjs';
 import { stoppedSkillManager } from './evidence-handover.mjs';
 import { observeInstalledSkillInventory, skillInventorySnapshot } from '../../codex-bridge/skill-inventory.mjs';
 import { HOSTING_ASSOCIATION_FIELDS, HOSTING_PROTOCOL, hostingAssociation, hostingEnvelope, positiveEpoch, validQuotedInventory, validateHostingAssociation } from './hosting-wire.mjs';
@@ -37,6 +37,13 @@ export class HostingControl {
     this.gates = new Map(); this.journalGate = Promise.resolve(); this.jobs = new Map(); this.started = new Set(); this.aborters = new Map(); this.live = new Map(); this.closing = false; this.journalFailed = false;
   }
   scopeAllowed(request) { return this.config.scopes.some(scope => ['tenantId', 'clientId', 'ownerJiacn'].every(key => scope[key] === request[key])); }
+  // Persisted facts remain valid after a grant is revoked. This only validates
+  // the locally confirmed host partition, never permission to execute a command.
+  journalScopeAllowed(request) {
+    const host = this.hostCredential?.host;
+    return host ? request.tenantId === host.tenantId && request.clientId === host.clientId
+      && (host.mode === 'server' || request.ownerJiacn === host.ownerJiacn) : this.scopeAllowed(request);
+  }
   subjectAgent(subject) {
     const key = runtimeSubjectKey(subject.manifest);
     if (subject.staticProfileId !== undefined) {
@@ -54,6 +61,7 @@ export class HostingControl {
         workspaceFallbackWorkdir: resolve(root, 'work') } };
   }
   async initialize() {
+    if (this.config.outbound) this.hostCredential = await readHostingCredential(this.config.outbound, this.host.config.hostId);
     await requireOwnedPrivateRoot(this.config.managedRoot);
     this.release = await acquireRuntimeOwnership(this.config.managedRoot, { hostId: this.host.config.hostId, instanceId: this.host.instanceId, subjectKey: 'managed-control' });
     try {
@@ -100,7 +108,7 @@ export class HostingControl {
             || agent.stateRoot !== configured.stateRoot) throw hostingError('HOSTING_SUBJECT_STATIC_CONFLICT');
       } else if (subject.template === null) throw hostingError('HOSTING_JOURNAL_INVALID');
       validateHostingConfig({ ...this.config, template: subject.template });
-      if (!this.scopeAllowed(subject.initialAssociation) || runtimeSubjectKey(subject.manifest) !== key
+      if (!this.journalScopeAllowed(subject.initialAssociation) || runtimeSubjectKey(subject.manifest) !== key
           || subject.initialAssociation.operationKind !== 'INITIAL' || subject.manifest.manifestVersion !== '1'
           || !/^rti_[0-9a-f]{32}$/.test(subject.manifest.installationId)
           || (adopted ? subject.staticProfileId === undefined || subject.enrollmentSecret !== null
@@ -123,7 +131,7 @@ export class HostingControl {
         // Terminal rejection owns this intent, but never owns/creates a Runtime subject.
         if (!operation.quotedInventory || association.operationKind !== 'INITIAL'
             || operation.provisionGeneration !== 0 || operation.admittedAt !== null || operation.recoveryRequired !== false
-            || opKey(association) !== key || runtimeSubjectKey(association) !== operation.subjectKey || !this.scopeAllowed(association))
+            || opKey(association) !== key || runtimeSubjectKey(association) !== operation.subjectKey || !this.journalScopeAllowed(association))
           throw hostingError('HOSTING_JOURNAL_INVALID');
         continue;
       }
@@ -138,7 +146,7 @@ export class HostingControl {
               : !/^[0-9a-f]{64}$/.test(subject.enrollmentSecretSha256) || !positiveEpoch(subject.enrollmentExpiresAt))
           || ['tenantId', 'clientId', 'canonicalAgentId'].some(field => subject.manifest[field] !== subject.initialAssociation[field])
           || subject.manifest.installationId === current.manifest.installationId && !same(subject, this.candidateFacts(current))
-          || opKey(association) !== key || runtimeSubjectKey(association) !== operation.subjectKey || !this.scopeAllowed(association)
+          || opKey(association) !== key || runtimeSubjectKey(association) !== operation.subjectKey || !this.journalScopeAllowed(association)
           || initialFields.some(field => association[field] !== subject.initialAssociation[field])
           || !Number.isSafeInteger(operation.provisionGeneration) || operation.provisionGeneration < 1
           || association.operationKind === 'INITIAL' && operation.provisionGeneration !== 1
@@ -217,7 +225,7 @@ export class HostingControl {
     if (target === null) return null;
     if (Object.keys(target).sort().join(',') !== 'formatVersion,subject,template' || target.formatVersion !== 1
         || Object.keys(target.subject || {}).sort().join(',') !== 'canonicalAgentId,clientId,ownerJiacn,tenantId'
-        || runtimeSubjectKey(target.subject) !== subjectKey || !this.scopeAllowed(target.subject) || !target.template)
+        || runtimeSubjectKey(target.subject) !== subjectKey || !this.journalScopeAllowed(target.subject) || !target.template)
       throw hostingError('HOSTING_TARGET_INVALID');
     validateHostingAssociation({ protocol: HOSTING_PROTOCOL, method: 'target', ...target.subject });
     validateHostingConfig({ ...this.config, template: target.template });
@@ -282,10 +290,18 @@ export class HostingControl {
       manager: stoppedSkillManager({ agent, apiOrigin: this.apiOrigin, instanceId: this.host.instanceId }) }), inventorySource: 'TARGET' }
       : skillInventorySnapshot({ discovery: { data: [{ cwd: '', skills: [], errors: [] }] }, cwd: '', codexHome: '' });
   }
-  async handle(input) {
+  async handle(input, authenticatedSubject = null) {
     const request = validateHostingAssociation(input);
     if (this.closing || !this.state || !this.host.releaseHost || this.host.stopping) throw hostingError('HOSTING_CONTROL_NOT_RUNNING');
-    if (!this.scopeAllowed(request)) throw hostingError('HOSTING_SCOPE_REJECTED');
+    // Only the in-process authenticated outbound worker supplies this context.
+    // UDS/TLS callers pass only input; wire fields cannot create a context.
+    const allowed = authenticatedSubject !== null && this.config.outbound
+      ? this.journalScopeAllowed(authenticatedSubject)
+        && authenticatedSubject.hostId === this.host.config.hostId
+        && ['tenantId', 'clientId', 'ownerJiacn', ...(request.method === 'capabilities' ? [] : ['canonicalAgentId'])]
+          .every(key => request[key] === authenticatedSubject[key])
+      : !this.config.outbound && this.scopeAllowed(request);
+    if (!allowed) throw hostingError('HOSTING_SCOPE_REJECTED');
     if (request.method === 'capabilities') return { protocol: HOSTING_PROTOCOL, method: request.method, tenantId: request.tenantId,
       clientId: request.clientId, ownerJiacn: request.ownerJiacn, available: this.config.template !== null && (!this.config.template?.profile.workspacePolicyId || this.workspacePolicies.has(this.config.template?.profile.workspacePolicyId)), hostId: this.host.config.hostId };
     if (request.method === 'target') return this.withSubject(runtimeSubjectKey(request), () => this.prepareTarget(request, runtimeSubjectKey(request)));

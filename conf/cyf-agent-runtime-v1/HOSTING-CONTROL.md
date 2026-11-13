@@ -192,27 +192,39 @@ NOT an installation, enrollment, service-ready proof or a payment event. Target 
 model-only template are saved before filesystem creation; unrelated orphan roots are refused.
 Inventory uses the actual catalog observer in that private target, including installed disabled skills.
 
-Use the repository's operator utility (not an API command runner):
+### One-time host registration (1.3.108 candidate, not deployed)
+
+Generate a single host credential on the target machine, not per invitation:
 
 ```sh
 node "$REPO/shell/cyf_runtime_hosting_setup.mjs" prepare --host-id HOST_ID --output /absolute/private/NEW_DIRECTORY
-# Submit only NEW_DIRECTORY/request.json in the invitation panel. Never upload pending.json.
-# Save the returned public authorization metadata as authorization.json, chmod 600 it.
-node "$REPO/shell/cyf_runtime_hosting_setup.mjs" attach --pending /absolute/private/NEW_DIRECTORY/pending.json --authorization /absolute/private/authorization.json --authorizations /absolute/private/authorizations.json
+# Submit only request.json (hostId/tokenSha256) to the host registration UI.
+# Managed hosts use controlled maintenance, never an end-user pairing prompt.
+# Save returned public host metadata as host.json with mode 0600 and verify its ownership.
+node "$REPO/shell/cyf_runtime_hosting_setup.mjs" attach --pending /absolute/private/NEW_DIRECTORY/pending.json --host /absolute/private/host.json --credentials /absolute/private/host-credential.json
 ```
 
-The configured `outbound.authorizationsPath` must be that authorization file; the host and exact
-local allowed scope must already be configured. The utility serializes updates and preserves
-other entries. One service reloads the file without restarting other Agents. Pairing is once per
-new target, not once per HTTP connection. It does not yet automate managed-host assignment or
-new-owner local scope policy installation.
+Configure `outbound.credentialsPath` to that confirmed file. It contains
+`{configVersion:1,host:{hostId,mode,tenantId,clientId,ownerJiacn,tokenSha256},token}`.
+The local confirmation checks the token hash, host identity, deployment mode and
+owner. The file is outside all Agent-mutable roots and never enters a sandbox.
+Do not upload pending.json or the confirmed credential file. Rotation is controlled
+maintenance, not automatic re-registration. Public metadata must match API responses.
 
-The SETUP entry retains a separate `controlToken`. API returns optional/null `controlAuthorization`
-only after reserve commits. The worker verifies the same host and subject and starts an independent
-CONTROL worker with its own journal; no bearer appears in the API response or journals. On restart,
-metadata is rediscovered from authenticated SETUP polling. Different owner/Agent, same credential
-promotion or replacement of an existing CONTROL identity is rejected. Revoking/removing the parent
-stops its child transport; it does not delete self-hosted assets or assert remote cleanup.
+The supervisor GETs `/agent/runtime/v1/hosting/authorizations` using the host token,
+scans all cursor pages before removing workers, and hot-adds independent in-process
+workers. Each uses the original single-command exchange/ACK protocol. One invitation
+keeps the same authorizationId when API atomically changes SETUP to CONTROL with
+reserve; there is no second token, child worker or controlAuthorization response.
+API alone admits business methods; Runtime checks the exact authenticated Agent
+context against each command. UDS callers cannot supply this internal context.
 
-Do not enable outbound globally on an existing installation until the old lease control-authority
-migration has been completed: an unmapped lease does not silently fall back to inbound sockets.
+Host 401 pauses all management, not business execution or rent. Grant 403 quarantines
+only that worker; rescanning the directory does not resume unknown/failed execution.
+Temporary directory errors do not delete workers or delay existing business startup.
+Revoked grants retain journals; retained facts do not authorize new management work.
+
+Unmigrated existing relationships still use their explicitly configured legacy
+adapter. A mapped outbound relationship never falls back on failure or revocation.
+Import requires fixed original binding/lease/installation and operator reconciliation
+of existing journals/queues, without fake setup history or command replay.

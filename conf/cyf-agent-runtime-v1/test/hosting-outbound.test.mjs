@@ -12,7 +12,10 @@ import { readPrivateJson } from '../lib/security.mjs';
 const activationWire = JSON.parse(await readFile(new URL('./fixtures/hosting-activation-v1.json', import.meta.url)));
 const sharedWire = JSON.parse(await readFile(new URL('./fixtures/hosting-outbound-v1.json', import.meta.url)));
 const scope = { tenantId: '0', clientId: 'fixture-client', ownerJiacn: 'fixture-owner', canonicalAgentId: 'agt_outbound_new' };
-const grant = { ...sharedWire.authorization, token: `rth1_${'a'.repeat(64)}` };
+const { purpose: oldPurpose, ...grant } = sharedWire.authorization;
+const token = `rth1_${'a'.repeat(64)}`;
+const credential = { configVersion: 1, token, host: { hostId: grant.hostId, mode: 'local', ...Object.fromEntries(['tenantId','clientId','ownerJiacn'].map(key => [key, grant[key]])), tokenSha256: createHash('sha256').update(token).digest('hex') } };
+function outboundControl(f) { const c = f.control(); c.config = { ...c.config, outbound: {} }; c.hostCredential = credential; return c; }
 const inventory = (id = 'inventory-1', overrides = {}) => eventMessage('request-fixture', 'hosting.inventory', id, { ...scope, ...overrides });
 const response = (requestId, data, status = 200, code = 'E0') => new Response(JSON.stringify({ protocolVersion: 1,
   requestId, code, msg: code === 'E0' ? 'ok' : 'rejected', data }), { status, headers: { 'x-request-id': requestId } });
@@ -24,7 +27,7 @@ async function fixture(t, handler, authorization = grant) {
   const f = await hostingFixture(t, { observeInventory: fixtureInventory });
   const stateRoot = resolve(f.root, 'outbound'); await mkdir(stateRoot, { mode: 0o700 });
   const calls = []; const diagnostics = [];
-  const options = { control: f.control(), authorization, stateRoot, apiOrigin: 'https://api.example.invalid',
+  const options = { control: outboundControl(f), credential, authorization, stateRoot, apiOrigin: 'https://api.example.invalid',
     logger: (...args) => diagnostics.push(args), fetchFn: async (url, options) => {
       const body = JSON.parse(options.body); calls.push({ url, options, body });
       return handler(body, calls.length, options);
@@ -49,12 +52,12 @@ test('real HTTP outbound exchange uses existing Q/R/M and actual lifecycle; no R
   const f = await hostingFixture(t, { observeInventory: fixtureInventory });
   const before = f.peers.map(peer => structuredClone(f.states.get(peer.subjectKey)[0]));
   const stateRoot = resolve(f.root, 'outbound'); await mkdir(stateRoot, { mode: 0o700 });
-  const worker = await new HostingOutbound({ control: f.control(), authorization: grant, stateRoot,
+  const worker = await new HostingOutbound({ control: outboundControl(f), credential, authorization: grant, stateRoot,
     apiOrigin: `http://127.0.0.1:${server.address().port}` }).initialize();
   closers.push(() => worker.close());
   await worker.exchange(); await worker.exchange();
   assert.equal(requests[0].path, HOSTING_EXCHANGE_PATH);
-  assert.equal(requests[0].headers.authorization, `RuntimeHosting ${grant.token}`);
+  assert.equal(requests[0].headers.authorization, `RuntimeHosting ${token}`);
   assert.deepEqual({ ...requests[0].body, requestId: sharedWire.request.requestId }, sharedWire.request);
   assert.deepEqual(inventory(), sharedWire.response.data.command);
   assert.equal(requests[1].body.data.result.messageType, 'hosting.inventory.result');
@@ -64,7 +67,7 @@ test('real HTTP outbound exchange uses existing Q/R/M and actual lifecycle; no R
   assert.equal(f.enrollmentCount(), 0); assert.equal(f.host().agents.size, 3);
   unchangedPeers(f, before);
   await assert.rejects(stat(f.controlConfig.socketPath), { code: 'ENOENT' });
-  const bytes = await readFile(worker.path, 'utf8'); assert.equal(bytes.includes(grant.token), false);
+  const bytes = await readFile(worker.path, 'utf8'); assert.equal(bytes.includes(token), false);
   assert.equal((await stat(worker.path)).mode & 0o777, 0o600);
 });
 
@@ -87,7 +90,7 @@ test('missing acknowledgment and duplicate command do not rerun or discard pendi
   const ctx = await fixture(t, (body, count) => response(body.requestId,
     count === 1 ? reply(inventory()) : count === 2 ? reply() : reply(inventory(), body.data.result.messageId)));
   let handled = 0; const handle = ctx.f.control().handle.bind(ctx.f.control());
-  ctx.f.control().handle = input => { handled++; return handle(input); };
+  ctx.f.control().handle = (...args) => { handled++; return handle(...args); };
   await ctx.worker.exchange(); const pending = structuredClone(ctx.worker.state.result);
   await ctx.worker.exchange(); await ctx.worker.exchange();
   assert.equal(handled, 1); assert.deepEqual(ctx.worker.state.result, pending);
@@ -123,21 +126,16 @@ test('exact subject/owner/tenant and host authorization are fenced before handle
   assert.equal(handled, 0); assert.equal(ctx.worker.state.command, null);
 });
 
-test('SETUP cannot prepare/ensure paid execution, CONTROL can prepare but never enroll before ensure', async t => {
+test('API-authorized paid execution keeps the same worker and never enrolls before ensure', async t => {
   const fixtureWire = JSON.parse(await readFile(new URL('./fixtures/gss-hosting-control-v1.json', import.meta.url)));
   const request = quotedPreparation({ ...fixtureWire.prepareRequest, ...scope });
   const { protocol, method, validUntil, ...fields } = request;
   const command = eventMessage('prepare-request', 'hosting.prepare', 'prepare-id', { ...fields, validUntilAt: validUntil });
   const ctx = await fixture(t, body => response(body.requestId, reply(command)));
-  await assert.rejects(ctx.worker.exchange(), hasCode('HOSTING_OUTBOUND_SETUP_ONLY'));
-  assert.deepEqual(ctx.f.control().state.operations, {});
-  const otherRoot = resolve(ctx.f.root, 'control-transport'); await mkdir(otherRoot, { mode: 0o700 });
-  const authorized = await new HostingOutbound({ ...ctx.options, stateRoot: otherRoot,
-    authorization: { ...grant, authorizationId: 'hca_control', purpose: 'CONTROL' },
-    fetchFn: async (_, options) => response(JSON.parse(options.body).requestId, { ...reply(command), authorizationId: 'hca_control' }) }).initialize(); ctx.closers.push(() => authorized.close());
-  await authorized.exchange();
-  assert.equal(authorized.state.result.data.outcome, 'PREPARED'); assert.equal(ctx.f.enrollmentCount(), 0);
-  assert.equal(ctx.f.host().agents.size, 3);
+  await ctx.worker.exchange();
+  assert.equal(ctx.worker.state.result.data.outcome, 'PREPARED');
+  assert.equal(ctx.f.enrollmentCount(), 0); assert.equal(ctx.f.host().agents.size, 3);
+
 });
 
 test('crash after command persistence recovers same operation; invalid saved identity is rejected', async t => {
@@ -165,9 +163,9 @@ test('exclusive writer prevents another worker; concurrent exchange cannot reord
 
 test('transient reconnect keeps pending state; authorization failure stops without retry or secret logging', async t => {
   const abort = new AbortController(); let waits = 0;
-  const ctx = await fixture(t, () => { throw Object.assign(Error(grant.token), { code: 'ECONNRESET' }); });
+  const ctx = await fixture(t, () => { throw Object.assign(Error(token), { code: 'ECONNRESET' }); });
   await ctx.worker.run({ signal: abort.signal, waitFn: async () => { if (++waits === 2) abort.abort(); } });
-  assert.equal(ctx.calls.length, 2); assert.equal(JSON.stringify(ctx.diagnostics).includes(grant.token), false);
+  assert.equal(ctx.calls.length, 2); assert.equal(JSON.stringify(ctx.diagnostics).includes(token), false);
   ctx.worker.fetchFn = async (_, options) => response(JSON.parse(options.body).requestId, null, 403, 'FORBIDDEN');
   await assert.rejects(ctx.worker.run({ signal: new AbortController().signal }), hasCode('FORBIDDEN'));
   assert.equal(waits, 2);
@@ -215,47 +213,10 @@ test('mismatched HTTP request correlation and changed command cannot execute a h
   assert.equal(ctx.worker.state.command.messageId, 'inventory-1');
 });
 
-test('setup registration fixture publishes only the local bearer hash, not execution credentials', async () => {
-  const fixture = JSON.parse(await readFile(new URL('./fixtures/hosting-setup-v1.json', import.meta.url)));
-  const token = `rth1_${'c'.repeat(64)}`;
-  assert.equal(fixture.registrationRequest.data.tokenSha256, createHash('sha256').update(token).digest('hex'));
-  assert.equal(JSON.stringify(fixture).includes(token), false);
-  assert.equal(fixture.registrationResponse.data.authorization.purpose, 'SETUP');
-  assert.equal(fixture.registrationResponse.data.status, 'WAITING_INVENTORY');
-  assert.equal(fixture.registrationResponse.data.authorization.canonicalAgentId, fixture.registrationResponse.data.agentId);
-  assert.equal(fixture.targetInventorySource, 'TARGET');
-});
-
-test('SETUP discovers a separate exact CONTROL worker without changing the operator file or exposing tokens', async t => {
-  const controlAuthorization = activationWire.activationResponse.data.controlAuthorization;
-  const authorization = { ...grant, controlToken: `rth1_${'b'.repeat(64)}` };
-  let controlSeen;
-  const seen = new Promise(done => { controlSeen = done; });
-  const ctx = await fixture(t, (body, count, options) => {
-    if (body.data.authorizationId === controlAuthorization.authorizationId) {
-      assert.equal(options.headers.Authorization, `RuntimeHosting ${authorization.controlToken}`);
-      controlSeen();
-      return response(body.requestId, { ...reply(), authorizationId: controlAuthorization.authorizationId });
-    }
-    assert.equal(options.headers.Authorization, `RuntimeHosting ${grant.token}`);
-    return response(body.requestId, { ...reply(), controlAuthorization });
-  }, authorization);
-  await ctx.worker.exchange(); await seen;
-  assert.equal(ctx.worker.controlEntry.worker.control, ctx.worker.control);
-  assert.equal(ctx.f.enrollmentCount(), 0);
-  const child = ctx.worker.controlEntry.worker;
-  assert.equal((await readFile(child.path, 'utf8')).includes(authorization.controlToken), false);
-  await ctx.worker.exchange(); assert.equal(ctx.worker.controlEntry.worker, child);
-  await ctx.worker.close(); assert.equal(child.release, null);
-});
-test('SETUP cannot accept CONTROL metadata for another owner or promote its own credential', async t => {
-  const authorization = { ...grant, controlToken: `rth1_${'b'.repeat(64)}` };
-  const ctx = await fixture(t, body => response(body.requestId, { ...reply(), controlAuthorization: {
-    ...sharedWire.authorization, authorizationId: 'hca_control', purpose: 'CONTROL', ownerJiacn: 'other-owner'
-  } }), authorization);
-  await assert.rejects(ctx.worker.exchange(), hasCode('HOSTING_OUTBOUND_CONTROL_REJECTED'));
-  assert.equal(ctx.worker.controlEntry, null);
-  assert.throws(() => new HostingOutbound({ ...ctx.options, authorization: { ...authorization, controlToken: grant.token } }), hasCode('HOSTING_OUTBOUND_AUTHORIZATION_INVALID'));
+test('host directory fixture contains only public metadata; no nested CONTROL worker', async () => {
+  const fixture = JSON.parse(await readFile(new URL('./fixtures/host-control-v1.json', import.meta.url)));
+  assert.equal(JSON.stringify(fixture.directory.response.data.items).includes('token'), false);
+  assert.equal(Object.hasOwn(fixture.poll.response.data, 'controlAuthorization'), false);
 });
 
 test('shared target M fixture prepares only the isolated target before payment', async t => {

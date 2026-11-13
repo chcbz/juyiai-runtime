@@ -111,7 +111,8 @@ export async function createHostingControlServer(options) {
     const server = options.config.outbound
       ? new HostingOutboundHost({ control, apiOrigin: options.apiOrigin, logger: options.logger })
       : await startHostingServer({ control });
-    try { await server.refresh?.(); } catch (error) { await server.close(); throw error; }
+    // Directory availability must not hold existing business startup hostage.
+    if (server.refresh) void server.refresh().catch(error => server.isolated(error));
     control.resumeAdmitted(); return server;
   } catch (cause) { await control.close(); await control.releaseOwnership(); throw cause; }
 }

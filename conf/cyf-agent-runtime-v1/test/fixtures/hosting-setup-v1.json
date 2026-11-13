@@ -4,8 +4,7 @@
     "requestId": "setup-http",
     "data": {
       "mode": "local",
-      "hostId": "fixture-host",
-      "tokenSha256": "f2ac35d97503ee14b938d1e7dee3ec625420971ff09678809a61831aae6a6b41"
+      "hostId": "fixture-host"
     }
   },
   "registrationResponse": {
@@ -22,7 +21,6 @@
       "authorization": {
         "authorizationId": "hca_setup_fixture",
         "hostId": "fixture-host",
-        "purpose": "SETUP",
         "tenantId": "0",
         "clientId": "fixture-client",
         "ownerJiacn": "fixture-owner",

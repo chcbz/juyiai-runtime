@@ -532,42 +532,25 @@ base/document capabilities are measured separately. A successful synthetic probe
 is not proof of a production model turn or a remote transaction. External effects
 with unknown outcomes must not be automatically resubmitted.
 
-### Outbound host integration (1.3.106 candidate, not deployed)
+### Outbound host integration (1.3.108 candidate, not deployed)
 
-`hostingControlPath` now supports an outbound-only operator configuration. Keep
-`configVersion`, `managedRoot`, `scopes`, `template` and `enrollmentTtlMs`; replace
-`socketPath`/`socketGid` with:
+Keep the existing `hostingControlPath`, `configVersion`, `managedRoot`, `scopes`,
+`template` and `enrollmentTtlMs`. Replace socket/TLS settings with:
 
 ```json
 "outbound": {
-  "authorizationsPath": "/private/operator/hosting-authorizations.json",
+  "credentialsPath": "/private/operator/hosting-host.json",
   "pollIntervalMs": 1000
 }
 ```
 
-Do not specify `remote`, `socketPath` or `socketGid` in this mode. No Unix/TCP/TLS
-listener or socket directory is created. The credential file must be private,
-canonical, owned by the service account, and outside host/Agent/managed mutable
-roots. Its shape is `{ "configVersion": 1, "authorizations": [...] }`; each entry
-has the API-issued authorization metadata and its matching locally retained
-`token` (see `hosting-outbound.mjs`). Never fabricate production grants or copy
-credentials between users. The API stores the registered token hash, not this
-file. This file cannot replace API permission checks or issue execution sessions.
+No listener or tunnel is needed. Follow [host registration](HOSTING-CONTROL.md)
+to generate and locally confirm one private host credential. Outbound `scopes`
+may be empty: live execution uses the precise authenticated Agent directory context,
+not a user wildcard. Old UDS permissions remain unchanged.
 
-One `HostingControl` and `RuntimeHost` serve all entries. Startup and each host
-heartbeat reread the file; atomically replacing it can add/remove transport
-workers without restarting the host. Removing an entry aborts and joins only
-that worker; durable receipts remain under `managedRoot/outbound/<id-sha256>`.
-It does not delete assets, stop billing, or claim business unbinding. Same-ID
-credential/subject changes and duplicate IDs reject the replacement without
-stopping healthy transports. A permanent worker failure is isolated and is not
-restarted by unchanged heartbeat reloads. API revocation is checked on every
-exchange regardless of local file contents. Shutdown aborts/joins workers before
-releasing their writer locks.
-
-An outbound-configured host may start with `agents: []` for first onboarding;
-a host without outbound control still requires explicit Agents. This only boots
-the control infrastructure, not a billable installation. New-target preparation and
-post-reserve CONTROL discovery are implemented, but managed-host automatic pairing,
-existing-lease authority migration and real business acceptance remain release prerequisites. Existing inbound configs remain available only for
-current deployments pending the coordinated consumer migration.
+The same RuntimeHost supervises per-Agent in-process workers discovered from the
+API. A complete authenticated directory scan is needed before removing a worker;
+partial reads preserve healthy transports. Secrets never enter Agent profiles or
+journals. Management outages and revoked grants do not suspend billing or delete
+self-hosted assets. Reuse existing installation/session identities on upgrade.

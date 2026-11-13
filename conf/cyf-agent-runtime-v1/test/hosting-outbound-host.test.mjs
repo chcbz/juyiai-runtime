@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { chmod, readFile, stat, writeFile } from 'node:fs/promises';
 import { HostingOutboundHost } from '../lib/hosting-outbound-host.mjs';
@@ -10,20 +11,27 @@ import { readRuntimeHostConfig } from '../lib/manifest.mjs';
 import { runUnifiedRuntime } from '../agent-runtime.mjs';
 import { hostingFixture, tick, code } from './hosting-fixture.mjs';
 
-const grant = { authorizationId: 'hca_host_test', hostId: 'fixture-host', purpose: 'SETUP', tenantId: '0',
-  clientId: 'fixture-client', ownerJiacn: 'fixture-owner', canonicalAgentId: 'agt_target', token: `rth1_${'a'.repeat(64)}` };
-const peer = { ...grant, authorizationId: 'hca_peer', canonicalAgentId: 'agt_peer_target', token: `rth1_${'b'.repeat(64)}` };
+const grant = { authorizationId: 'hca_host_test', hostId: 'fixture-host', tenantId: '0',
+  clientId: 'fixture-client', ownerJiacn: 'fixture-owner', canonicalAgentId: 'agt_target' };
+const peer = { ...grant, authorizationId: 'hca_peer', canonicalAgentId: 'agt_peer_target' };
+const token = `rth1_${'a'.repeat(64)}`;
+const credential = { configVersion: 1, token, host: { hostId: grant.hostId, mode: 'local', tenantId: grant.tenantId,
+  clientId: grant.clientId, ownerJiacn: grant.ownerJiacn, tokenSha256: createHash('sha256').update(token).digest('hex') } };
 async function fixture(t, fetchFn) {
   const closers = []; t.after(async () => { for (const close of closers.reverse()) await close(); });
   const f = await hostingFixture(t, { staticPeers: true });
-  const authorizationsPath = resolve(f.root, 'authorizations.json');
-  const write = authorizations => writeFile(authorizationsPath, JSON.stringify({ configVersion: 1, authorizations }), { mode: 0o600 });
-  await write([]);
+  const credentialsPath = resolve(f.root, 'credentials.json');
+  await writeFile(credentialsPath, JSON.stringify(credential), { mode: 0o600 });
+  let authorizations = [];
+  const write = async items => { authorizations = [...items].sort((a, b) => a.authorizationId < b.authorizationId ? -1 : a.authorizationId > b.authorizationId ? 1 : 0); };
   const { socketPath, socketGid, ...base } = f.controlConfig;
-  const config = { ...base, outbound: { authorizationsPath, pollIntervalMs: 1 } };
-  f.control().config = validateHostingConfig(config);
+  const config = { ...base, outbound: { credentialsPath, pollIntervalMs: 1 } };
+  f.control().config = validateHostingConfig(config); f.control().hostCredential = credential;
+  const directoryFetch = async (url, request) => new Response(JSON.stringify({ protocolVersion: 1,
+    requestId: request.headers['X-Request-Id'], code: 'E0', msg: 'ok',
+    data: { host: credential.host, items: authorizations, nextCursor: null, hasMore: false } }), { status: 200 });
   const events = []; const calls = [];
-  const manager = new HostingOutboundHost({ control: f.control(), apiOrigin: 'https://api.example.invalid', logger: (...args) => events.push(args),
+  const manager = new HostingOutboundHost({ control: f.control(), apiOrigin: 'https://api.example.invalid', fetchFn: directoryFetch, logger: (...args) => events.push(args),
     createWorker: options => new HostingOutbound({ ...options, fetchFn: async (url, request) => {
       const body = JSON.parse(request.body); calls.push(body);
       if (fetchFn) return fetchFn(body, request);
@@ -65,18 +73,17 @@ test('hot add/remove grants share one host; removed transport stops and durable 
   assert.equal(first.worker.release, null); assert.equal(first.aborter.signal.aborted, true);
   assert.equal(f.manager.workers.size, 1); assert.equal(f.host().agents.size, 3); assert.equal(f.enrollmentCount(), 0);
   assert.equal((await stat(first.worker.path)).mode & 0o777, 0o600);
-  assert.equal((await readFile(first.worker.path, 'utf8')).includes(grant.token), false);
+  assert.equal((await readFile(first.worker.path, 'utf8')).includes(token), false);
   await assert.rejects(stat(f.socketPath), { code: 'ENOENT' });
 });
 
-test('invalid or changed authorization file cannot silently replace identity/token or stop healthy grants', async t => {
+test('invalid or changed directory cannot replace identity or stop healthy grants', async t => {
   const f = await fixture(t); await f.write([grant]); await f.manager.refresh();
   const first = f.manager.workers.get(grant.authorizationId);
-  await f.write([{ ...grant, token: peer.token }]);
+  await f.write([{ ...grant, canonicalAgentId: 'changed' }]);
   await assert.rejects(f.manager.refresh(), code('HOSTING_OUTBOUND_AUTHORIZATION_CONFLICT'));
-  await f.write([grant, grant]); await assert.rejects(f.manager.refresh(), code('HOSTING_OUTBOUND_AUTHORIZATION_DUPLICATE'));
+  await f.write([grant, grant]); await assert.rejects(f.manager.refresh(), code('HOSTING_OUTBOUND_DIRECTORY_INVALID'));
   await f.write([{ ...peer, ownerJiacn: 'other-owner' }]); await assert.rejects(f.manager.refresh(), code('HOSTING_OUTBOUND_AUTHORIZATION_INVALID'));
-  await chmod(f.config.outbound.authorizationsPath, 0o644); await assert.rejects(f.manager.refresh());
   assert.equal(f.manager.workers.get(grant.authorizationId), first); assert.equal(first.aborter.signal.aborted, false);
 });
 
@@ -101,7 +108,7 @@ test('permanent denial quarantines only its grant and periodic refresh never res
   })]);
   assert.equal(calls(grant.authorizationId), 1);
   assert.equal(f.host().agents.size, 3); assert.equal(f.host().stopping, false);
-  assert.equal(JSON.stringify(f.events).includes(grant.token), false);
+  assert.equal(JSON.stringify(f.events).includes(token), false);
 });
 
 test('shutdown aborts and joins in-flight fetch before releasing each writer, and is idempotent', async t => {
@@ -152,6 +159,42 @@ test('pending transport reload never delays other Agent heartbeats or host stop'
 
 test('runtime credential redaction includes outbound bearer and standalone token', async () => {
   const { redact } = await import('../lib/security.mjs');
-  const result = redact(`RuntimeHosting ${grant.token} another ${peer.token}`);
-  assert.equal(result.includes(grant.token), false); assert.equal(result.includes(peer.token), false);
+  const result = redact(`RuntimeHosting ${token} another ${token}`);
+  assert.equal(result.includes(token), false); assert.equal(result.includes(token), false);
+});
+
+test('incomplete directory never removes healthy workers; complete scan removes only absent grants', async t => {
+  const f = await fixture(t); await f.write([grant, peer]); await f.manager.refresh();
+  const original = f.manager.workers.get(grant.authorizationId);
+  let pages = 0;
+  f.manager.fetchFn = async (_, request) => {
+    if (++pages === 2) throw Object.assign(Error('unavailable'), { code: 'ECONNRESET' });
+    return new Response(JSON.stringify({ protocolVersion: 1, requestId: request.headers['X-Request-Id'], code: 'E0', msg: 'ok',
+      data: { host: credential.host, items: [peer], nextCursor: peer.authorizationId, hasMore: true } }), { status: 200 });
+  };
+  await assert.rejects(f.manager.refresh(), { code: 'ECONNRESET' });
+  assert.equal(original.aborter.signal.aborted, false); assert.equal(f.manager.workers.size, 2);
+  f.manager.fetchFn = async (_, request) => new Response(JSON.stringify({ protocolVersion: 1, requestId: request.headers['X-Request-Id'], code: 'E0', msg: 'ok',
+    data: { host: credential.host, items: [peer], nextCursor: null, hasMore: false } }), { status: 200 });
+  await f.manager.refresh(); assert.equal(original.aborter.signal.aborted, true); assert.equal(f.manager.workers.size, 1);
+});
+
+test('host 401 pauses all management but not business, and directory refresh does not restart it', async t => {
+  const f = await fixture(t); await f.write([grant, peer]); await f.manager.refresh();
+  f.manager.fetchFn = async (_, request) => new Response(JSON.stringify({ protocolVersion: 1,
+    requestId: request.headers['X-Request-Id'], code: 'HOSTING_OUTBOUND_REJECTED', msg: 'rejected', data: null }), { status: 401 });
+  await assert.rejects(f.manager.refresh(), error => error.status === 401);
+  assert.equal(f.manager.paused, true);
+  for (const entry of f.manager.workers.values()) assert.equal(entry.aborter.signal.aborted, true);
+  assert.equal(f.control().closing, false); assert.equal(f.host().stopping, false);
+  const entries = [...f.manager.workers.values()]; await f.manager.refresh();
+  assert.deepEqual([...f.manager.workers.values()], entries);
+});
+
+test('removed and rediscovered failed grant stays quarantined until explicit operator recovery', async t => {
+  const f = await fixture(t, body => new Response(JSON.stringify({ protocolVersion: 1, requestId: body.requestId,
+    code: 'FORBIDDEN', msg: 'rejected', data: null }), { status: 403 }));
+  await f.write([grant]); await f.manager.refresh(); await until(() => f.manager.quarantined.has(grant.authorizationId));
+  await f.write([]); await f.manager.refresh(); await f.write([grant]); await f.manager.refresh();
+  assert.equal(f.calls.length, 1); assert.equal(f.manager.workers.size, 0);
 });

@@ -1,13 +1,13 @@
 // Outbound transport for the existing HostingControl lifecycle. No listener,
 // business execution authority, payment decisions or second lifecycle journal.
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { encodeHttpRequest, decodeHttpResponse } from './api-envelope.mjs';
 import { validateMessage } from './message-envelope.mjs';
 import { validateHostingRequest, hostingReply } from './hosting-wire.mjs';
 import { exactHostingId, hostingError } from './hosting-config.mjs';
 import { normalizeRuntimeOrigin, classifyRuntimeError } from './runtime-client.mjs';
-import { ensurePrivateDirectory, readPrivateJson, writePrivateJson } from './security.mjs';
+import { readPrivateJson, writePrivateJson } from './security.mjs';
 import { acquireRuntimeOwnership } from './runtime-host.mjs';
 import { stableJson } from './manifest.mjs';
 
@@ -23,25 +23,26 @@ const wait = (ms, signal) => new Promise(done => {
   const timer = setTimeout(stop, ms); signal.addEventListener('abort', stop, { once: true });
 });
 
-/** One exact authorization, not a hostId-as-user credential. SETUP may only
- * inspect capabilities/inventory. The API must issue a separate CONTROL grant
- * after reserve. Neither grant is an AgentRuntime execution/session credential.
- * stateRoot is an operator-created private subdirectory, never a wire path. */
+/** One immutable Agent authorization on the existing RuntimeHost. API owns
+ * SETUP/CONTROL admission; transport identity never changes at payment. */
 export class HostingOutbound {
-  constructor({ control, authorization, stateRoot, apiOrigin, fetchFn = fetch, logger = () => {} }) {
+  constructor({ control, authorization, credential, stateRoot, apiOrigin, fetchFn = fetch, logger = () => {} }) {
     if (!control || !object(authorization) || !exactHostingId(authorization.authorizationId)
-        || !tokenPattern.test(authorization.token) || !['SETUP', 'CONTROL'].includes(authorization.purpose)
-        || authorization.controlToken !== undefined && (authorization.purpose !== 'SETUP' || !tokenPattern.test(authorization.controlToken) || authorization.controlToken === authorization.token)
+        || !tokenPattern.test(credential?.token)
+        || Object.keys(authorization).sort().join(',') !== ['authorizationId', 'hostId', ...subjectFields].sort().join(',')
         || subjectFields.some(field => !exactHostingId(authorization[field]))
-        || authorization.hostId !== control.host.config.hostId || !control.scopeAllowed(authorization))
+        || authorization.hostId !== control.host.config.hostId
+        || credential.host.hostId !== authorization.hostId
+        || ['tenantId', 'clientId'].some(key => authorization[key] !== credential.host[key])
+        || credential.host.mode === 'local' && authorization.ownerJiacn !== credential.host.ownerJiacn)
       fail('HOSTING_OUTBOUND_AUTHORIZATION_INVALID');
     this.origin = normalizeRuntimeOrigin(apiOrigin);
     const url = new URL(this.origin);
     if (url.protocol !== 'https:' && !['127.0.0.1', '[::1]'].includes(url.hostname)) fail('HOSTING_OUTBOUND_HTTPS_REQUIRED');
-    this.control = control; this.authorization = Object.freeze({ ...authorization });
-    this.identity = Object.freeze(Object.fromEntries(['authorizationId', 'hostId', 'purpose', ...subjectFields].map(key => [key, authorization[key]])));
+    this.control = control; this.authorization = Object.freeze({ ...authorization }); this.credential = credential;
+    this.identity = Object.freeze(Object.fromEntries(['authorizationId', 'hostId', ...subjectFields].map(key => [key, authorization[key]])));
     this.stateRoot = stateRoot; this.path = resolve(stateRoot, 'hosting-exchange.json');
-    this.controlEntry = null; this.fetchFn = fetchFn; this.logger = logger; this.release = null; this.state = null; this.active = false;
+    this.fetchFn = fetchFn; this.logger = logger; this.release = null; this.state = null; this.active = false;
   }
 
   async initialize() {
@@ -63,8 +64,6 @@ export class HostingOutbound {
     const request = validateHostingRequest(command);
     if (subjectFields.filter(field => field !== 'canonicalAgentId' || request.method !== 'capabilities')
       .some(field => request[field] !== this.identity[field])) fail('HOSTING_OUTBOUND_SUBJECT_REJECTED');
-    if (this.identity.purpose === 'SETUP' && !['capabilities', 'target', 'inventory'].includes(request.method))
-      fail('HOSTING_OUTBOUND_SETUP_ONLY');
     return request;
   }
 
@@ -93,7 +92,7 @@ export class HostingOutbound {
     // Existing methods reconcile exact lifecycle operation IDs. On a crash
     // before response persistence, recover that same operation, never a new one.
     // Errors remain pending/unknown; never invent FAILED_NO_EFFECT or cleanup.
-    const result = hostingReply(this.state.command, await this.control.handle(request));
+    const result = hostingReply(this.state.command, await this.control.handle(request, this.identity));
     await this.persist({ ...this.state, result });
   }
 
@@ -108,7 +107,7 @@ export class HostingOutbound {
       const response = await this.fetchFn(`${this.origin}${HOSTING_EXCHANGE_PATH}`, {
         method: 'POST', redirect: 'error', signal,
         headers: { 'Content-Type': 'application/json', 'X-Request-Id': requestId,
-          Authorization: `RuntimeHosting ${this.authorization.token}` },
+          Authorization: `RuntimeHosting ${this.credential.token}` },
         body: JSON.stringify(encodeHttpRequest({ authorizationId: this.identity.authorizationId,
           hostId: this.identity.hostId, runtimeInstanceId: this.control.host.instanceId, result: this.state.result }, requestId))
       });
@@ -116,7 +115,6 @@ export class HostingOutbound {
         responseRequestId: response.headers.get('x-request-id') ?? undefined }).value;
       if (!object(reply) || reply.authorizationId !== this.identity.authorizationId || reply.hostId !== this.identity.hostId
           || !Object.hasOwn(reply, 'acknowledgedMessageId') || !Object.hasOwn(reply, 'command')) fail('HOSTING_OUTBOUND_REPLY_INVALID');
-      await this.acceptControl(reply.controlAuthorization);
       const pending = this.state.result;
       if (reply.acknowledgedMessageId !== null && reply.acknowledgedMessageId !== pending?.messageId)
         fail('HOSTING_OUTBOUND_ACK_INVALID');
@@ -140,38 +138,9 @@ export class HostingOutbound {
     } finally { this.active = false; }
   }
 
-  async acceptControl(metadata) {
-    if (metadata == null) return;
-    if (this.identity.purpose !== 'SETUP' || !this.authorization.controlToken || !object(metadata)
-        || metadata.purpose !== 'CONTROL' || metadata.authorizationId === this.identity.authorizationId
-        || ['hostId', ...subjectFields].some(key => metadata[key] !== this.identity[key]))
-      fail('HOSTING_OUTBOUND_CONTROL_REJECTED');
-    const authorization = { ...metadata, token: this.authorization.controlToken };
-    if (this.controlEntry) {
-      if (!same(this.controlEntry.authorization, authorization)) fail('HOSTING_OUTBOUND_CONTROL_CONFLICT');
-      return;
-    }
-    const stateRoot = resolve(this.stateRoot, 'control', createHash('sha256').update(metadata.authorizationId).digest('hex'));
-    const worker = new HostingOutbound({ control: this.control, authorization, stateRoot, apiOrigin: this.origin, fetchFn: this.fetchFn, logger: this.logger });
-    await ensurePrivateDirectory(stateRoot);
-    await worker.initialize();
-    const aborter = new AbortController();
-    const entry = { authorization, worker, aborter, task: null };
-    this.controlEntry = entry;
-    entry.task = worker.run({ signal: aborter.signal }).catch(error => {
-      this.logger('hosting-outbound-control-isolated', { category: classifyRuntimeError(error).kind });
-    });
-  }
-  async closeControl() {
-    const entry = this.controlEntry;
-    if (!entry) return;
-    entry.aborter.abort(); await entry.task; await entry.worker.close();
-    this.controlEntry = null;
-  }
-
   async run({ signal, pollIntervalMs = 1000, waitFn = wait }) {
     if (!signal || !Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 1) fail('HOSTING_OUTBOUND_RUN_INVALID');
-    try { while (!signal.aborted) {
+    while (!signal.aborted) {
       try { await this.exchange(signal); }
       catch (cause) {
         if (signal.aborted) return;
@@ -181,12 +150,11 @@ export class HostingOutbound {
         this.logger('hosting-outbound-retry', { category });
       }
       if (!signal.aborted) await waitFn(pollIntervalMs, signal);
-    } } finally { await this.closeControl(); }
+    }
   }
 
   async close() {
     if (this.active) fail('HOSTING_OUTBOUND_BUSY'); // Abort/join the caller's run before releasing its writer.
-    await this.closeControl();
     await this.release?.(); this.release = null; this.state = null;
   }
 }
