@@ -317,7 +317,7 @@ test('real native open masks auto-discovered system skills, supports empty skill
       const adapter = await open(runtime, f, { skills })
       const view = adapter.nativeExecutionIsolation
       assert.equal(adapter.readback.credentialIsolation.bootstrapCredentialRemoved, true)
-      assert.equal(adapter.readback.config.config.sandbox_mode, 'workspace-write')
+      assert.equal(adapter.readback.config.config.default_permissions, 'native-execution')
       assert.equal(adapter.readback.providerSystemProxy.enabled, true)
       assert.equal(view.network.measured, true)
       assert.equal(view.network.nftDefaultDropReadback, true)
