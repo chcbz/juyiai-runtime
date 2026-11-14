@@ -1,0 +1,23 @@
+diff --git a/codex-rs/app-server/src/lib.rs b/codex-rs/app-server/src/lib.rs
+--- a/codex-rs/app-server/src/lib.rs
++++ b/codex-rs/app-server/src/lib.rs
+@@ -703,17 +703,8 @@
+             range: None,
+         });
+     }
+-    if let Some(warning) = codex_core::config::system_bwrap_warning(
+-        &config.permissions.effective_permission_profile(),
+-        &config.cwd,
+-    ) {
+-        config_warnings.push(ConfigWarningNotification {
+-            summary: warning,
+-            details: None,
+-            path: None,
+-            range: None,
+-        });
+-    }
++    // Startup diagnostics must not spawn a host-wide mount probe. Sandbox
++    // enforcement remains at actual command execution; this warning was not a gate.
+ 
+     let analytics_events_client =
+         analytics_events_client_from_config(Arc::clone(&auth_manager), &config);

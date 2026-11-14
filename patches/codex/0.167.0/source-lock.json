@@ -1,0 +1,14 @@
+{
+  "upstreamRepository": "https://github.com/openai/codex",
+  "upstreamTag": "rust-v0.167.0",
+  "upstreamCommit": "086ccc833bc9cf01024ad2dd6af7dbd421b6bf9a",
+  "scope": "app-server startup warning only; CLI/exec diagnostics and sandbox enforcement unchanged",
+  "patch": "no-app-server-startup-bwrap-probe.patch",
+  "patchSha256": "eda284a01d453f2772faab5b426ffbdcbe84443a347499a2e7207dfb4defa7bf",
+  "files": {
+    "codex-rs/app-server/src/lib.rs": {
+      "beforeSha256": "a44b0266619d6adda0c1e7135d5be18e6581cff44307e78097efecc5195f8b6c",
+      "afterSha256": "d2fac973e7255c4da5c97b003186cf9f86b5fc10088273e1c2f80dbf815c8a43"
+    }
+  }
+}
