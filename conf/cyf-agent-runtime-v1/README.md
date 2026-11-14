@@ -494,6 +494,8 @@ separate genuine probes rather than speculative readiness.
 Runtime心跳仍使用现有presence协议与30秒默认间隔，不引入第二条连接/业务重试队列。
 `UND_ERR_HEADERS_TIMEOUT`、`UND_ERR_BODY_TIMEOUT`与已有连接超时一样按传输错误重连；鉴权、TLS、重绑定和无法归类的协议错误仍隔离，不默认无限重试。重连/隔离日志只输出类别、允许字符集的错误码链和HTTP状态，不输出原报文、URL、令牌或错误message。历史只记录permanent的事件不能据此反推具体错误码。
 
+注册阶段仅对已通过当前请求关联与会话核对的 `AGENT_REGISTRATION_UNAVAILABLE` 按临时服务故障处理：立即撤销本次就绪，失效旧会话，通过既有退避重连并重新认证；收到新会话精确注册回执前不得接纳执行。初次注册与能力刷新一致，不重建业务请求、不重放 UNKNOWN。其他注册拒绝、真实1008及401/403仍按原授权失败隔离。
+
 持有host写锁后，在每轮心跳后原子更新`stateRoot/runtime-health.json`（0600）。只包含进程/实例、观测时间、间隔、各Agent连接/注册/执行就绪、最后presence发送与有效回执时间、脱敏错误事实。文件不是授权或业务状态来源；外部巡检核对当前PID与新鲜度，不能以systemd active代替可用。快照写失败不打断健康连接，外部以缺失/过期告警；停止后保留旧快照，由PID/时间拒绝。不得把快照改成在线来恢复Agent。
 
 

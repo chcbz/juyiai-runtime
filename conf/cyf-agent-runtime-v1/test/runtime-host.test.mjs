@@ -750,6 +750,48 @@ test('presence receipt control keeps genuine correlated registration errors and 
   });
 });
 
+test('correlated temporary registration failure reconnects with fresh authority, not permanent isolation', async t => {
+  for (const refresh of [false, true]) await t.test(refresh ? 'catalog refresh' : 'initial activation', async t => {
+    const c = await channelFixture(t, { ackRegistration: false });
+    let activated = false;
+    const activation = c.executors[0].activate().then(() => { activated = true; });
+    await c.opened();
+    const socket = c.sockets[0], state = c.states()[0];
+    if (refresh) {
+      socket.receive(registrationReceipt(socket.sent[0])); await activation;
+      assert.equal(c.executors[0].ready(), true);
+      state.transport.refreshCapabilities();
+    }
+    const registration = socket.sent.at(-1);
+    const unavailable = { protocolVersion: 1, requestId: registration.messageId,
+      messageType: 'protocol.error', messageId: 'registration-error', correlationId: registration.messageId,
+      data: { runtimeInstanceId: registration.runtimeInstanceId },
+      code: 'AGENT_REGISTRATION_UNAVAILABLE', msg: 'Agent registration is unavailable' };
+    socket.receive({ ...unavailable, correlationId: 'wrong-request' });
+    socket.receive({ ...unavailable, data: { ...unavailable.data, sessionGeneration: '6' } });
+    await c.tick(); assert.equal(socket.readyState, 1);
+    const acceptedBeforeFailure = [...state.accepted];
+    const reopened = c.nextOpened();
+    socket.receive(unavailable); await c.tick();
+    assert.equal(c.executors[0].ready(), false);
+    assert.equal(c.executors[0].evidence(), null);
+    if (!refresh) assert.equal(activated, false);
+    assert.deepEqual(state.accepted, acceptedBeforeFailure);
+    await reopened;
+    const next = c.sockets.find(s => s !== socket && s.readyState === 1);
+    assert.ok(next); const nextRegistration = next.sent[0];
+    assert.ok(Number(nextRegistration.sessionGeneration) > Number(registration.sessionGeneration));
+    assert.equal(c.executors[0].ready(), false);
+    next.receive(registrationReceipt(registration)); await c.tick();
+    assert.equal(c.executors[0].ready(), false);
+    next.receive(registrationReceipt(nextRegistration)); await activation; await c.tick();
+    assert.equal(c.executors[0].ready(), true);
+    assert.equal(c.logs.some(row => row.event === 'runtime-agent-isolated'), false);
+    assert.equal(c.logs.some(row => row.event === 'runtime-channel-retry' && row.status === 503), true);
+    assert.deepEqual(state.accepted, acceptedBeforeFailure);
+  });
+});
+
 test('public wire rejects unframed aliases while authenticated canonical CHAT and command reach their original engine', async t => {
   const chat = JSON.parse(await readFile(resolve(engineSource, 'contracts/api-hosted-wire-v1.json'), 'utf8'));
   const c = await channelFixture(t, { validateBusiness: true, types: ['SKILL_INSTALL'], firstIdentity: { tenantId: chat.tenantId, clientId: chat.clientId, canonicalAgentId: chat.agentId } });

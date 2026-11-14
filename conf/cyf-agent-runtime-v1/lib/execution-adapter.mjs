@@ -214,7 +214,19 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
               if (!measuring) { resolveActivated?.(); resume(); }
               return;
             }
-            if (observed === 'rejected') { channelConfirmed = false; managementSession = null; rejectActivated?.(Object.assign(adapterError('RUNTIME_REGISTRATION_REJECTED'), { status: 403 })); current.close(1008); return; }
+            if (observed === 'rejected') {
+              channelConfirmed = false; managementSession = null;
+              // The observer has already checked this registration's exact trace and
+              // session. A server-side availability failure is not a revocation.
+              // Drop the old proof and reconnect through the existing backoff loop;
+              // only a fresh authenticated registration ACK can restore readiness.
+              if (payload.code === 'AGENT_REGISTRATION_UNAVAILABLE') {
+                end(Object.assign(adapterError('RUNTIME_REGISTRATION_UNAVAILABLE'), { status: 503 }));
+                current.close(); return;
+              }
+              rejectActivated?.(Object.assign(adapterError('RUNTIME_REGISTRATION_REJECTED'), { status: 403 }));
+              current.close(1008); return;
+            }
             if (typeOnlyControl && (frame.type === 'connected' || frame.type === 'agent_registered')) return;
             if (typeOnlyControl && frame.type === 'ping') { send({ schemaVersion: 1, messageType: 'pong', messageId: randomUUID(), correlationId: frame.messageId, requestId: frame.requestId }); return; }
             // Skill management keeps its existing authenticated subject while capability ACK is pending.
