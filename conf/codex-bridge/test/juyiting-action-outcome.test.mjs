@@ -295,3 +295,11 @@ test('planning instructions route authorized unread sources through an advertise
   assert.match(ACTION_OUTCOME_INSTRUCTIONS, /ACTION_REQUEST selecting that exact actionId and sourceRefIds/);
   assert.match(ACTION_OUTCOME_INSTRUCTIONS, /Do not claim to have read those bytes before execution/);
 });
+
+// Cost disclosure is not a second authorization workflow (spec.md observable goal 3).
+test('planning instructions keep unknown skill costs advisory without inventing budget approval', () => {
+  assert.match(ACTION_OUTCOME_INSTRUCTIONS, /running-cost metadata is advisory, not an execution prerequisite/);
+  assert.match(ACTION_OUTCOME_INSTRUCTIONS, /Do not invent platform fee-check tools/);
+  assert.match(ACTION_OUTCOME_INSTRUCTIONS, /Preserve explicit user budgets and restrictions on third-party purchases or paid operations/);
+  assert.match(ACTION_OUTCOME_INSTRUCTIONS, /do not promise an unknown price/);
+});
