@@ -68,7 +68,7 @@ test('mature engine adds and recreates closed entry, refreshes profiles/profileS
   assert.notEqual(second.state(), old); assert.equal(second.state().disposed, false); assert.equal(second.state().profile.agentId, agent.manifest.canonicalAgentId);
   assert.equal(peer.state(), peerState); assert.equal(peerState.disposed, false);
   const env = buildRuntimeExecutionEnvironment(second.state().profile);
-  assert.equal(env.CYF_MANAGED_PROVIDER_API_KEY, 'unit-explicit-only'); assert.equal(env.HOME, agent.profile.codexHome);
+  assert.equal(env.CYF_MANAGED_PROVIDER_API_KEY, undefined); assert.equal(env.HOME, agent.profile.codexHome);
   assert.equal(env.OPENAI_API_KEY, undefined); assert.equal(env.NODE_OPTIONS, undefined);
 });
 
@@ -81,7 +81,7 @@ test('provider environment reaches actual child via allowlisted builder, never i
     const child = spawn(process.execPath, ['-e', 'console.log(JSON.stringify({home:process.env.HOME,codexHome:process.env.CODEX_HOME,key:process.env.CYF_MANAGED_PROVIDER_API_KEY,inherited:process.env.CYF_MANAGED_PROVIDER_INHERIT,openai:process.env.OPENAI_API_KEY,node:process.env.NODE_OPTIONS}))'], { env, cwd: agent.profile.codexWorkdir });
     let out = ''; child.on('error', reject); child.stdout.on('data', bytes => { out += bytes; }); child.on('exit', code => code === 0 ? done(out) : reject(Error('fixture child failed')));
   });
-  assert.deepEqual(JSON.parse(stdout), { home: agent.profile.codexHome, codexHome: agent.profile.codexHome, key: 'unit-explicit-only' });
+  assert.deepEqual(JSON.parse(stdout), { home: agent.profile.codexHome, codexHome: agent.profile.codexHome });
 });
 
 test('adapter replaces only closed subject/session; stalled durable replay cannot block peer heartbeat', async t => {

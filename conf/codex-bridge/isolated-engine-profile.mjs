@@ -1,3 +1,4 @@
+import { readModelAuthFile } from './model-auth.mjs'
 import { observeSandboxStartup } from './sandbox-startup.mjs'
 
 import { initializeNativeToolchain } from './native-document-toolchain.mjs'
@@ -119,15 +120,15 @@ const exactSupportedInputs = value => {
   }
   return Object.freeze(result.sort((a, b) => [a.mediaKind, a.mimeType, a.carrier, a.carrierContractDigest].join('\u001f').localeCompare([b.mediaKind, b.mimeType, b.carrier, b.carrierContractDigest].join('\u001f'))))
 }
-const copyCredentialFile = (source, target) => {
-  const lexical = lstatSync(source, { bigint: true }); const uid = typeof process.getuid === 'function' ? BigInt(process.getuid()) : null
-  if (lexical.isSymbolicLink() || !lexical.isFile() || (uid !== null && lexical.uid !== uid) || (lexical.mode & 0o077n) !== 0n) fail('TYPED_INSPECTION_AUTH_SOURCE_UNSAFE')
+const copyCredentialFile = (sourceHome, target) => {
+  const { bytes } = readModelAuthFile(sourceHome)
   const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`
-  copyFileSync(source, temporary, constants.COPYFILE_EXCL); chmodSync(temporary, 0o600)
-  const temporaryFd = openSync(temporary, constants.O_RDONLY | constants.O_NOFOLLOW); try { fsyncSync(temporaryFd) } finally { closeSync(temporaryFd) }
-  renameSync(temporary, target); fsyncDirectory(dirname(target))
-  const copied = lstatSync(target, { bigint: true }); if (!copied.isFile() || copied.isSymbolicLink() || Number(copied.mode & 0o777n) !== 0o600) fail('TYPED_INSPECTION_AUTH_COPY_UNSAFE')
-  return `sha256:${sha256File(target)}`
+  try {
+    writeFileSync(temporary, bytes, { mode: 0o600, flag: 'wx' })
+    const fd = openSync(temporary, constants.O_RDONLY | constants.O_NOFOLLOW)
+    try { fsyncSync(fd) } finally { closeSync(fd) }
+    renameSync(temporary, target); fsyncDirectory(dirname(target))
+  } finally { rmSync(temporary, { force: true }) }
 }
 const providerConfig = profile => {
   const id = String(profile.typedInspectionProviderId || '').trim(); const baseUrl = String(profile.typedInspectionProviderBaseUrl || '').trim(); const wireApi = String(profile.typedInspectionProviderWireApi || 'responses').trim()
@@ -136,7 +137,7 @@ const providerConfig = profile => {
   let parsed; try { parsed = new URL(baseUrl) } catch { fail('TYPED_INSPECTION_PROVIDER_CONFIG_INVALID') }
   if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash) fail('TYPED_INSPECTION_PROVIDER_CONFIG_INVALID')
   const escaped = value => value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')
-  return `model_provider = "${escaped(id)}"\npreferred_auth_method = "apikey"\n[model_providers."${escaped(id)}"]\nname = "Typed Inspection Provider"\nbase_url = "${escaped(parsed.toString().replace(/\/$/, ''))}"\nwire_api = "${wireApi}"\nrequires_openai_auth = true\n`
+  return `model_provider = "${escaped(id)}"\ncli_auth_credentials_store = "file"\n[model_providers."${escaped(id)}"]\nname = "Typed Inspection Provider"\nbase_url = "${escaped(parsed.toString().replace(/\/$/, ''))}"\nwire_api = "${wireApi}"\nrequires_openai_auth = true\n`
 }
 const usesChatFiles = profile => profile?.typedInspectionSupportedInputs?.some(input => input.carrier === 'LOCAL_FILE') === true
 export const buildTypedInspectionCodexConfig = profile => {
@@ -146,9 +147,7 @@ export const buildTypedInspectionCodexConfig = profile => {
 }
 const stageCodexHome = (profile, stateRoot, { nativeExecution = false, webSearch = 'disabled', modelCatalog = null } = {}) => {
   const codexHome = ensurePrivateDirectory(resolve(stateRoot, 'codex-home')); ensurePrivateDirectory(resolve(stateRoot, 'home'))
-  const sourceAuth = resolve(profile.codexHome || '', 'auth.json')
-  if (!profile.codexHome || !existsSync(sourceAuth)) fail('TYPED_INSPECTION_AUTH_SOURCE_REQUIRED')
-  const authDigest = copyCredentialFile(sourceAuth, resolve(codexHome, 'auth.json'))
+  copyCredentialFile(profile.codexHome, resolve(codexHome, 'auth.json'))
   const modelCatalogPath = nativeExecution && modelCatalog ? stateMarker(codexHome, JSON.parse(modelCatalog.text), 'model-catalog.json') : null
   const readOnlyConfig = (modelCatalogPath ? 'model_catalog_json = "/state/codex-home/model-catalog.json"\n' : '') + buildTypedInspectionCodexConfig(nativeExecution ? { ...profile, typedInspectionSupportedInputs: [] } : profile)
   const config = nativeExecution ? buildNativeExecutionCodexConfig(readOnlyConfig, { webSearch }) : readOnlyConfig
@@ -156,7 +155,7 @@ const stageCodexHome = (profile, stateRoot, { nativeExecution = false, webSearch
   writeFileSync(temporary, config, { mode: 0o600, flag: 'wx' }); chmodSync(temporary, 0o600)
   const configFd = openSync(temporary, constants.O_RDONLY | constants.O_NOFOLLOW); try { fsyncSync(configFd) } finally { closeSync(configFd) }
   renameSync(temporary, configPath); fsyncDirectory(codexHome)
-  return { codexHome, modelCatalogPath, authPath: resolve(codexHome, 'auth.json'), authDigest, configDigest: `sha256:${sha256(Buffer.from(config))}` }
+  return { codexHome, modelCatalogPath, authPath: resolve(codexHome, 'auth.json'), configDigest: `sha256:${sha256(Buffer.from(config))}` }
 }
 const engineStateBinding = value => {
   const keys = ['schemaVersion', 'requestKey', 'authorizationId', 'manifestDigest', 'requestId', 'turnId', 'inputPolicyDigest']
@@ -369,7 +368,8 @@ export class IsolatedEngineProfileRuntime {
     adapter.typedInspectionEngineState = engineState; adapter.typedInspectionNetworkMode = networkMode; return adapter
   }
   async _initializeAndSeal(adapter) {
-    const readback = await adapter.initialize(); const pid = readback?.processExecutable?.pid
+    const fileAuth = { id: this.profile.typedInspectionProviderId, baseUrl: this.profile.typedInspectionProviderBaseUrl, wireApi: this.profile.typedInspectionProviderWireApi || 'responses' }
+    const readback = await adapter.initialize({fileAuth}); const pid = readback?.processExecutable?.pid
     if (!Number.isInteger(pid) || pid <= 0) fail('TYPED_INSPECTION_SANDBOX_PROCESS_REQUIRED')
     const systemProxyEnabled = readback?.config?.config?.features?.respect_system_proxy === true
     if (adapter.typedInspectionNetworkMode === 'provider-restricted' && !systemProxyEnabled) fail('TYPED_INSPECTION_SYSTEM_PROXY_NOT_ENABLED')

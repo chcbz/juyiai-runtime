@@ -264,3 +264,16 @@ apply; Flow must not call/wait for production hosts.
 默认私有输入/状态根位于 `workspaceFileRootDir/.native-runtime/<主体目录>/{probes,state}`。可由本地静态配置指定 `nativeExecutionRootDir`/`nativeExecutionStateRoot`；旧资料根已配置时保留原生请求原有路径，防止破坏绑定恢复。跨主体可写根仍由现有 manifest 统一检查；托管模板只允许 Provider 标量，不继承私有根。传输连接超时不是业务请求/流的强制 deadline。
 
 代码修复不替代生产配置或发布：缺少该主体可信 Provider 时，须在获授权后单独配置并部署验证。聊天能回复不证明安装技能已执行。
+
+### Model file authentication (1.1.76)
+
+CYF model execution reads only the subject's `CODEX_HOME/auth.json`, with the
+exact API-key shape `auth_mode=apikey` and `OPENAI_API_KEY`. Config explicitly
+uses `cli_auth_credentials_store="file"` and a Provider with
+`requires_openai_auth=true`, without `env_key` or alternate credentials.
+Ordinary execution retains the source file; isolated execution seals only its
+private bootstrap copy. Effective app-server config is checked before provider
+catalog requests. Skill service environments and Runtime identity are separate.
+Operator provisioning, stopped cleanup and the offline one-time migration are
+specified in `../cyf-agent-runtime-v1/HOSTING-CONTROL.md`. No runtime legacy-env
+fallback or automatic credential rotation is implemented.

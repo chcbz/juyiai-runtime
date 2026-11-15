@@ -30,7 +30,7 @@ async function fixture(t) {
   await symlink(repository, resolve(work, 'link'));
   const fixture = { root, home, stateRoot, repository, privateRoots, options: { agent: { profile, stateRoot, manifest: { canonicalAgentId: 'agent' } },
     apiOrigin: 'https://example.test', instanceId: 'boot', ownerJiacn: 'original', operationId: 'finish', leaseId: 'lease', flushPlatformCosts: async () => ({ confirmed: true }),
-    publicRepositoryRoots: [repository], publicFiles: { 'config.toml': 'model="test"' } } };
+    publicRepositoryRoots: [repository], publicFiles: { 'config.toml': 'model="test"', 'auth.json': JSON.stringify({auth_mode:'apikey',OPENAI_API_KEY:'cleanup-operator-baseline'}) }  } };
   fixture.options.recordKnowledgeStatus = async status => { fixture.options.knowledgeStatus = status; };
   return fixture;
 }
@@ -45,7 +45,7 @@ test('aggregate cleanup attempts extraction before erasure and clears all owned 
   assert.deepEqual(await cleanStoppedPrivateData(f.options), { confirmed: true, knowledgeStatus: 'EXTRACTED' });
   assert.equal(extractions, 1);
   for (const root of f.privateRoots) assert.deepEqual(await readdir(root), []);
-  assert.deepEqual((await readdir(f.home)).sort(), ['config.toml', 'skills']);
+  assert.deepEqual((await readdir(f.home)).sort(), ['auth.json', 'config.toml', 'skills']);
   assert.deepEqual((await readdir(f.stateRoot)).sort(), ['.runtime-writer.lock', 'handover.json']);
   assert.equal(await readFile(resolve(f.repository, '.git/history'), 'utf8'), 'public commits');
   for (const parent of [f.options.agent.profile.typedInspectionRootDir, f.options.agent.profile.typedInspectionStateRoot,
@@ -117,7 +117,7 @@ test('configured real knowledge pipeline publishes outside private roots before 
   f.options.flushPlatformCosts = f.options.extractKnowledge.flushPlatformCosts;
   assert.deepEqual(await cleanStoppedPrivateData(f.options), { confirmed: true, knowledgeStatus: 'EXTRACTED' });
   assert.equal(calls, 2);
-  assert.deepEqual((await readdir(f.home)).sort(), ['config.toml', 'skills']);
+  assert.deepEqual((await readdir(f.home)).sort(), ['auth.json', 'config.toml', 'skills']);
   assert.equal((await readdir(resolve(hostRoot, 'public-knowledge'))).length, 1);
   assert.equal((await readdir(resolve(hostRoot, 'platform-usage'))).length, 1);
   assert.equal(await readFile(resolve(f.repository, '.git/history'), 'utf8'), 'public commits');

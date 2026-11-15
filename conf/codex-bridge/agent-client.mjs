@@ -1,3 +1,4 @@
+import { readModelAuthFile } from './model-auth.mjs'
 import { isDeepStrictEqual } from 'node:util'
 import { NativeExecutionProfileRuntime, nativeExecutionProfile } from './native-execution-runtime.mjs'
 import { ChatUsageDelivery } from './chat-usage-delivery.mjs'
@@ -4527,6 +4528,7 @@ export const runCodex = (profile, message, mode = 'command', overrides = {}) => 
   const startedAt = Date.now()
   let child
   try {
+    if (profile.runtimeIdentity) readModelAuthFile(profile.codexHome)
     child = spawnFn(profile.codexBin, args, {
       cwd: codexWorkdir,
       env: profile.runtimeIdentity ? buildRuntimeExecutionEnvironment(profile, overrides.env)
@@ -6184,12 +6186,13 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
         const warm = await restoreProfileChatIdleAdapter(state, profile.runtimeIdentity ? buildRuntimeExecutionEnvironment(profile) : {})
         if (warm) { state.appServerRestartAttempt = 0; state.appServerNotBefore = 0; return warm }
         if (!isCurrent()) return null
+        if (profile.runtimeIdentity) readModelAuthFile(profile.codexHome)
         const schemaMeasurement = await measureCodexAppServerBinaryAsync(profile, profile.runtimeIdentity ? { environment: buildRuntimeExecutionEnvironment(profile) } : {})
         if (!isCurrent()) return null
         const adapter = await AppServerAdapter.spawnAsync(profile, { cwd: chatWorkdir, schemaMeasurement, shouldSpawn: () => !shuttingDown && isCurrent(),
           ...(profile.runtimeIdentity ? { spawnFn: (binary, args, options) => spawn(binary, args, { ...options, env: { ...buildRuntimeExecutionEnvironment(profile), NO_PROXY: '*', no_proxy: '*' } }) } : {}) })
         state.appServerStartingAdapter = adapter
-        try { await adapter.verifySpawnedExecutable(); await adapter.initialize() } catch (error) { if (state.appServerStartingAdapter === adapter) state.appServerStartingAdapter = null; await adapter.shutdown({ timeoutMs: 1000 }); throw error }
+        try { await adapter.verifySpawnedExecutable(); await adapter.initialize(profile.runtimeIdentity ? {fileAuth: runtimeFileAuthProvider(profile)} : {}) } catch (error) { if (state.appServerStartingAdapter === adapter) state.appServerStartingAdapter = null; await adapter.shutdown({ timeoutMs: 1000 }); throw error }
         adapter.readback.hostedWireContract = hostedWireContract
         if (!isCurrent()) { if (state.appServerStartingAdapter === adapter) state.appServerStartingAdapter = null; await adapter.shutdown({ timeoutMs: 1000 }); return null }
         state.appServerStartingAdapter = null
@@ -6246,12 +6249,13 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
         if (conversationToolSession) {
           const base = await state.ensureAppServer()
           conversationToolSession.binding.checkActive()
+          if (profile.runtimeIdentity) readModelAuthFile(profile.codexHome)
           toolAdapter = await AppServerAdapter.spawnAsync(profile, { cwd: chatWorkdir, schemaMeasurement: base?.readback.schema,
             conversationTools: conversationToolSession.binding, shouldSpawn: current,
             ...(profile.runtimeIdentity ? { spawnFn: (binary, args, options) => spawn(binary, args, { ...options,
               env: { ...buildRuntimeExecutionEnvironment(profile), NO_PROXY: '*', no_proxy: '*' } }) } : {}) })
           state.conversationToolAdapters.add(toolAdapter)
-          await toolAdapter.verifySpawnedExecutable(); await toolAdapter.initialize()
+          await toolAdapter.verifySpawnedExecutable(); await toolAdapter.initialize(profile.runtimeIdentity ? {fileAuth: runtimeFileAuthProvider(profile)} : {})
           toolAdapter.readback.hostedWireContract = hostedWireContract
         }
         return await runProfileChat(profile, message, {
@@ -6548,14 +6552,17 @@ export const runtimeInstallationProfile = (agent, apiOrigin) => {
       workspaceFileRootDir: profile.workspaceFileRootDir || resolve(agent.stateRoot, 'workspace-files') } : {}) }
 }
 
+const runtimeFileAuthProvider = profile => {
+  const p = nativeExecutionProfile(profile)
+  return p.typedInspectionProviderId ? {id:p.typedInspectionProviderId, baseUrl:p.typedInspectionProviderBaseUrl, wireApi:p.typedInspectionProviderWireApi || 'responses'} : null
+}
 let runtimeExecutionOwner = null
 export const buildRuntimeExecutionEnvironment = (profile, overrides = {}) => {
   const allowed = new Set(['PATH', 'LANG', 'LC_ALL', 'TZ', 'TMPDIR',
     'CYF_WORKSPACE_FILE_TOOLCHAIN_PYTHON', 'CYF_WORKSPACE_FILE_DELIVERY_TOOL'])
   for (const key of Object.keys(overrides || {})) if (!allowed.has(key)) throw new AgentProtocolError('RUNTIME_EXECUTION_ENV_FORBIDDEN', 'Execution environment key is not allowlisted')
   const inherited = Object.fromEntries(['PATH', 'LANG', 'LC_ALL', 'TZ'].filter(key => typeof process.env[key] === 'string').map(key => [key, process.env[key]]))
-  const managedProvider = Object.fromEntries(Object.entries(profile.runtimeProviderEnvironment || {}).filter(([key]) => /^CYF_MANAGED_PROVIDER_[A-Z][A-Z0-9_]*$/.test(key)))
-  return { ...inherited, ...managedProvider, ...overrides, HOME: profile.codexHome, CODEX_HOME: profile.codexHome }
+  return { ...inherited, ...overrides, HOME: profile.codexHome, CODEX_HOME: profile.codexHome }
 }
 
 // Observation only: no payload/error text, timeout, admission decision, or new queue.
@@ -6582,7 +6589,7 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
     const installationProfile = runtimeInstallationProfile(agent, origin.origin)
     const profile = { ...normalizeProfile(installationProfile, {}, 0, { isolated: true }), runtimeSubjectKey: subjectKey,
       runtimeIdentity: Object.freeze({ ...manifest }), runtimeApiOrigin: origin.origin, runtimeInstanceId, runtimeStateRoot: agent.stateRoot,
-      runtimeProviderEnvironment: Object.freeze({ ...(providerEnvironments.get(subjectKey) || agent.providerEnvironment || {}) }) }
+      runtimeProviderEnvironment: Object.freeze({ ...(providerEnvironments.get(subjectKey) || {}) }) }
     if (profile.agentId !== manifest.canonicalAgentId || profile.apiKey || profile.workspaceFileRuntimeAuthHeader) throw new AgentProtocolError('RUNTIME_PROFILE_IDENTITY_INVALID', 'Runtime profile cannot substitute its installation identity')
     return [subjectKey, { agent, profile, state: null, closed: false }]
   }

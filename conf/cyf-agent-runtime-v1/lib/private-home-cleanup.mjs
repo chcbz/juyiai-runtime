@@ -1,3 +1,4 @@
+import { parseModelAuth } from '../../codex-bridge/model-auth.mjs';
 // Storage step for the stopped handover, after evidence delivery, skill retirement
 // and the knowledge-extraction attempt. Not a standalone relationship-release API.
 // publicFiles must come from the operator/template, never the old HOME or wire input.
@@ -12,12 +13,12 @@ const overlaps = (a, b) => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a
 export async function validateStoppedHomeCleanup({ agent, publicFiles, publicRepositoryRoots = [] }) {
   const home = agent?.profile?.codexHome;
   if (typeof home !== 'string' || resolve(home) !== home) fail('RUNTIME_HOME_CLEANUP_ROOT_INVALID');
-  // Config availability is established before deleting private state. Missing auth
-  // means credentials are supplied by trusted environment; old auth is not retained.
+  // Both operator baseline files must be valid before any private data deletion.
   if (!publicFiles || typeof publicFiles['config.toml'] !== 'string'
       || !publicFiles['config.toml'].trim()
       || Object.entries(publicFiles).some(([name, bytes]) => !['config.toml', 'auth.json'].includes(name) || typeof bytes !== 'string'))
     fail('RUNTIME_HOME_PUBLIC_BASELINE_REQUIRED');
+  try { parseModelAuth(publicFiles['auth.json']); } catch { fail('RUNTIME_HOME_PUBLIC_BASELINE_REQUIRED'); }
   for (const root of publicRepositoryRoots) {
     if (typeof root !== 'string' || resolve(root) !== root) fail('RUNTIME_PUBLIC_REPOSITORY_ROOT_INVALID');
     if (overlaps(home, root)) fail('RUNTIME_HOME_PUBLIC_REPOSITORY_OVERLAP');

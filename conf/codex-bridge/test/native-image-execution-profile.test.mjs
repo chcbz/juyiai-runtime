@@ -26,7 +26,7 @@ test('real app-server runs native-image against synthetic HTTPS via restricted C
   const inputs = mkdir(resolve(execution, 'inputs')), scratch = mkdir(resolve(execution, 'scratch')), drafts = mkdir(resolve(execution, 'drafts'))
   const snapshots = mkdir(resolve(execution, 'snapshots')), stateRoot = mkdir(resolve(root, 'state')), sourceHome = mkdir(resolve(root, 'home'))
   const materializerRoot = mkdir(resolve(root, 'materializer'))
-  writeFileSync(resolve(sourceHome, 'auth.json'), '{"OPENAI_API_KEY":"nonfunctional-isolation-fixture"}', { mode: 0o600 })
+  writeFileSync(resolve(sourceHome, 'auth.json'), '{"auth_mode":"apikey","OPENAI_API_KEY":"nonfunctional-isolation-fixture"}', { mode: 0o600 })
   writeFileSync(resolve(inputs, 'reference.png'), png, { mode: 0o600 })
   const cert = resolve(root, 'cert.pem'), key = resolve(root, 'key.pem')
   const openssl = spawnSync('/usr/bin/openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key, '-out', cert, '-days', '1', '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost'], { stdio: 'ignore' })

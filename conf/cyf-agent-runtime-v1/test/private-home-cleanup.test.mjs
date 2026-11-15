@@ -14,7 +14,7 @@ async function fixture(t) {
   await writeFile(resolve(repository, 'source'), 'public code with uncommitted work');
   await mkdir(resolve(home, 'skills')); await writeFile(resolve(home, 'skills/public-skill'), 'retained package');
   const agent = { profile: { codexHome: home, codexWorkdir: repository } };
-  return { root, home, repository, agent, publicFiles: { 'config.toml': 'model = "test"\n' } };
+  return { root, home, repository, agent, publicFiles: { 'config.toml': 'model = "test"\n', 'auth.json': JSON.stringify({auth_mode:'apikey',OPENAI_API_KEY:'operator-baseline'})+'\n' } };
 }
 
 test('stopped HOME cleanup removes all private classes, rebuilds trusted public files and leaves project history untouched', async t => {
@@ -25,7 +25,7 @@ test('stopped HOME cleanup removes all private classes, rebuilds trusted public 
     await mkdir(resolve(f.home, name)); await writeFile(resolve(f.home, name, 'private'), 'private');
   }
   await symlink(f.repository, resolve(f.home, 'workspace-link'));
-  f.publicFiles['auth.json'] = '{"public":"synthetic operator credential"}\n';
+  f.publicFiles['auth.json'] = JSON.stringify({auth_mode:'apikey',OPENAI_API_KEY:'operator-baseline'})+'\n';
   assert.deepEqual(await cleanStoppedCodexHome({ ...f, publicRepositoryRoots: [f.repository] }), { homeCleaned: true });
   assert.deepEqual((await readdir(f.home)).sort(), ['auth.json', 'config.toml', 'skills']);
   for (const [name, bytes] of Object.entries(f.publicFiles)) {
@@ -43,7 +43,7 @@ test('HOME cleanup rejects public-repository overlap and missing public baseline
   const f = await fixture(t); await writeFile(resolve(f.home, 'private'), 'still present');
   for (const repository of [f.home, f.root, resolve(f.home, 'project')])
     await assert.rejects(cleanStoppedCodexHome({ ...f, publicRepositoryRoots: [repository] }), { code: 'RUNTIME_HOME_PUBLIC_REPOSITORY_OVERLAP' });
-  for (const publicFiles of [null, {}, { 'config.toml': '' }, { 'config.toml': 'valid', '../escape': 'bad' }])
+  for (const publicFiles of [null, {}, { 'config.toml': '' }, { 'config.toml': 'valid', '../escape': 'bad' }, { 'config.toml': 'valid' }])
     await assert.rejects(cleanStoppedCodexHome({ ...f, publicFiles }), { code: 'RUNTIME_HOME_PUBLIC_BASELINE_REQUIRED' });
   assert.equal(await readFile(resolve(f.home, 'private'), 'utf8'), 'still present');
 });
@@ -61,5 +61,5 @@ test('HOME cleanup retry removes interrupted public writes and does not retain u
   await writeFile(resolve(f.home, '.public-interrupted.tmp'), 'partial secret');
   await writeFile(resolve(f.home, 'auth.json'), 'old private credential');
   await cleanStoppedCodexHome(f);
-  assert.deepEqual((await readdir(f.home)).sort(), ['config.toml', 'skills']);
+  assert.deepEqual((await readdir(f.home)).sort(), ['auth.json', 'config.toml', 'skills']);
 });

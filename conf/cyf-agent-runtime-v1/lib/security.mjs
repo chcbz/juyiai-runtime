@@ -1,3 +1,4 @@
+import { redactModelSecrets } from '../../codex-bridge/model-auth.mjs';
 import { constants, link, lstat, mkdir, open, realpath, rename, unlink } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -7,7 +8,7 @@ const REDACTED = '[REDACTED]';
 
 export function redact(value, knownSecrets = []) {
   if (typeof value === 'string') {
-    return knownSecrets.filter(Boolean).reduce((result, secret) => result.split(secret).join(REDACTED), value)
+    return knownSecrets.filter(Boolean).reduce((result, secret) => result.split(secret).join(REDACTED), redactModelSecrets(value))
       .replace(/(?:Bearer|AgentRuntime|RuntimeHosting)\s+[^\s,;]+/gi, `Authorization ${REDACTED}`)
       .replace(/(?:rts1|rth1)_[0-9a-f]{64}/g, REDACTED);
   }

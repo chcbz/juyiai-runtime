@@ -125,9 +125,10 @@ test('restricted profile resolves an absolute public CA symlink into private fix
 
 test('provider-restricted initialization fails closed when native config readback does not enable system proxy routing', async () => {
   const runtime = Object.create(TypedInspectionProfileRuntime.prototype)
+  runtime.profile = {typedInspectionProviderId:'probe',typedInspectionProviderBaseUrl:'https://example.invalid/v1'}
   const adapter = {
     typedInspectionNetworkMode: 'provider-restricted',
-    initialize: async () => ({ processExecutable: { pid: process.pid }, config: { config: { features: { respect_system_proxy: false } } } })
+    initialize: async () => ({ processExecutable: { pid: process.pid }, config: { config: { cli_auth_credentials_store:'file', model_provider:'probe', model_providers:{probe:{requires_openai_auth:true,wire_api:'responses',base_url:'https://example.invalid/v1'}}, features: { respect_system_proxy: false } } } })
   }
   await assert.rejects(() => runtime._initializeAndSeal(adapter), error => error.code === 'TYPED_INSPECTION_SYSTEM_PROXY_NOT_ENABLED')
 })
@@ -294,9 +295,9 @@ function conversationStateFixture(t) {
   const root = mkdtempSync(resolve(tmpdir(), 'inspection-conversation-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
   const source = resolve(root, 'source'); mkdirSync(source, { mode: 0o700 })
-  writeFileSync(resolve(source, 'auth.json'), '{"synthetic":true}', { mode: 0o600 })
+  writeFileSync(resolve(source, 'auth.json'), '{"auth_mode":"apikey","OPENAI_API_KEY":"synthetic-test-only"}', { mode: 0o600 })
   const runtime = Object.assign(Object.create(TypedInspectionProfileRuntime.prototype), {
-    stateRoot: root, profile: { codexHome: source }, activeAdapters: new Map(), conversationOwners: new Map()
+    stateRoot: root, profile: { codexHome: source, typedInspectionProviderId:'probe', typedInspectionProviderBaseUrl:'https://example.invalid/v1', typedInspectionProviderWireApi:'responses' }, activeAdapters: new Map(), conversationOwners: new Map()
   })
   const binding = suffix => ({ schemaVersion: 1, requestKey: `key-${suffix}`, authorizationId: `auth-${suffix}`,
     manifestDigest: `manifest-${suffix}`, requestId: `request-${suffix}`, turnId: `turn-${suffix}`, inputPolicyDigest: 'policy' })
@@ -443,7 +444,7 @@ function warmConversationFixture(t) {
   const original = AppServerAdapter.spawnAsync
   AppServerAdapter.spawnAsync = async (profile, options) => {
     options.spawnFn('synthetic-unused', [], { env: { CODEX_HOME: profile.codexHome } })
-    const adapter = { closed: false, readback: { tools: { data: [] }, processExecutable: { pid: process.pid } },
+    const adapter = { closed: false, readback: { config: { config: { cli_auth_credentials_store:'file', model_provider:'probe', model_providers:{probe:{requires_openai_auth:true,base_url:'https://example.invalid/v1',wire_api:'responses'}} } }, tools: { data: [] }, processExecutable: { pid: process.pid } },
       verifySpawnedExecutable: async () => {}, initialize: async () => {},
       shutdown: async () => { adapter.closed = true; closed.push(adapter) } }
     spawned.push(adapter); return adapter
@@ -558,7 +559,7 @@ test('file-enabled ordinary CHAT reuses warm engine, canonical Home and joins eg
   runtime.egressFactory = () => ({ proxyUrl: 'synthetic', start: async () => {}, bindOwner: async () => {}, attach: async () => {}, dispose: async () => { disposed.push(true) } })
   runtime._spawnAdapter = async options => {
     opens.push(options)
-    const adapter = { closed: false, typedInspectionEngineState: options.engineState, readback: { tools: { data: [] }, processExecutable: { pid: process.pid } },
+    const adapter = { closed: false, typedInspectionEngineState: options.engineState, readback: { config: { config: { cli_auth_credentials_store:'file', model_provider:'probe', model_providers:{probe:{requires_openai_auth:true,base_url:'https://example.invalid/v1',wire_api:'responses'}} } }, tools: { data: [] }, processExecutable: { pid: process.pid } },
       initialize: async () => adapter.readback, shutdown: async () => { adapter.closed = true } }
     return adapter
   }

@@ -1,8 +1,9 @@
+import { serializeModelAuth } from '../../codex-bridge/model-auth.mjs';
 // SAME RuntimeHost, private persistent candidate/admission journal. No DB/API key
 // broker, second engine/service, payment, caller-selected config or blind enroll.
-import { createHash, randomBytes } from 'node:crypto';
-import { constants, lstat, mkdir, open } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { constants, lstat, mkdir, open, link, unlink } from 'node:fs/promises';
+import { resolve, dirname } from 'node:path';
 import { digestManifest, runtimeSubjectKey, stableJson, validateManifest } from './manifest.mjs';
 import { acquireRuntimeOwnership, requireOwnedPrivateRoot } from './runtime-host.mjs';
 import { RuntimeV1Client, canonicalVersion } from './runtime-client.mjs';
@@ -26,8 +27,14 @@ const opKey = request => sha(stableJson({ tenantId: request.tenantId, clientId: 
 const same = (a, b) => stableJson(a) === stableJson(b);
 const initialFields = ['tenantId', 'clientId', 'ownerJiacn', 'canonicalAgentId', 'bindingId', 'leaseId', 'initialIntentId', 'reservedAt'];
 const privateFile = async (path, bytes) => {
-  const file = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-  try { await file.writeFile(bytes); await file.sync(); } finally { await file.close(); }
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  const file = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  try {
+    try { await file.writeFile(bytes); await file.sync(); } finally { await file.close(); }
+    await link(temporary, path);
+    const directory = await open(dirname(path), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    try { await directory.sync(); } finally { await directory.close(); }
+  } finally { await unlink(temporary).catch(() => {}); }
 };
 
 export class HostingControl {
@@ -55,8 +62,7 @@ export class HostingControl {
     const root = resolve(this.config.managedRoot, key);
     return { subjectKey: key, manifest: subject.manifest, stateRoot: resolve(root, 'state'),
       manifestPath: resolve(root, 'manifest.json'), profilePath: resolve(root, 'profile.json'),
-      providerEnvironment: subject.template.providerEnvironment,
-      publicFiles: Object.freeze({ 'config.toml': subject.template.codexConfig }),
+      publicFiles: Object.freeze({ 'config.toml': subject.template.codexConfig, 'auth.json': serializeModelAuth(subject.template.modelAuth) }),
       profile: { ...withoutRetiredChatSwitches(subject.template.profile), profileId: `managed-${key}`, agentId: subject.manifest.canonicalAgentId,
         codexHome: resolve(root, 'home'), codexWorkdir: resolve(root, 'work'), chatWorkdir: resolve(root, 'work'),
         workspaceFallbackWorkdir: resolve(root, 'work') } };
@@ -234,17 +240,19 @@ export class HostingControl {
   }
   targetAgent(target) { return this.subjectAgent({ manifest: target.subject, template: target.template }); }
   async materializeConfig(agent, template) {
-    const path = resolve(agent.profile.codexHome, 'config.toml');
-    try { await privateFile(path, template.codexConfig); }
+    for (const [name, bytes] of Object.entries({ 'config.toml': template.codexConfig, 'auth.json': serializeModelAuth(template.modelAuth) })) {
+    const path = resolve(agent.profile.codexHome, name);
+    try { await privateFile(path, bytes); }
     catch (cause) {
       if (cause.code !== 'EEXIST') throw cause;
       const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       try {
         const stat = await file.stat();
-        if (!stat.isFile() || stat.uid !== process.getuid() || stat.mode & 0o077 || await file.readFile('utf8') !== template.codexConfig)
+        if (!stat.isFile() || stat.uid !== process.getuid() || stat.mode & 0o077 || await file.readFile('utf8') !== bytes)
           throw hostingError('HOSTING_STATE_UNCONFIRMED');
       } finally { await file.close(); }
     }
+  }
   }
   async prepareTarget(request, subjectKey) {
     const existing = this.state.subjects[subjectKey];
@@ -548,7 +556,7 @@ export class HostingControl {
       }
       if (!current) await writePrivateJson(path, value, { exclusive: true });
     }
-    // New independent HOME: no auth.json or other user's file is read/copied.
+    // New independent HOME: operator model auth only, no borrowed auth or other user's file is read/copied.
     // A missing config after a partial materialization can be safely filled from
     // the exact durable template; an existing one must remain byte-identical.
     await this.materializeConfig(agent, subject.template);

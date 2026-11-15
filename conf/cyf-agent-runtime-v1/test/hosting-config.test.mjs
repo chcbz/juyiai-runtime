@@ -54,22 +54,22 @@ test('managed template denies identity, credential, HOME, path, command and envi
   for (const field of ['profileId', 'agentId', 'codexHome', 'codexWorkdir', 'workspaceFileRootDir', 'apiKey', 'runtimeAuthorization', 'runtimeProviderEnvironment', 'command']) {
     const value = structuredClone(f.config); value.template.profile[field] = 'synthetic-never-accepted'; assert.throws(() => validateHostingConfig(value), code('HOSTING_TEMPLATE_INVALID'));
   }
-  for (const key of ['HOME', 'CODEX_HOME', 'NODE_OPTIONS', 'OPENAI_API_KEY', 'CYF_MANAGED_PROVIDER_', 'CYF_MANAGED_PROVIDER_bad']) {
-    const value = structuredClone(f.config); value.template.providerEnvironment[key] = 'synthetic'; assert.throws(() => validateHostingConfig(value), code('HOSTING_TEMPLATE_INVALID'));
+  for (const key of ['HOME', 'CODEX_HOME', 'NODE_OPTIONS', 'OTHER_KEY', 'CYF_MANAGED_PROVIDER_', 'CYF_MANAGED_PROVIDER_bad']) {
+    const value = structuredClone(f.config); value.template.modelAuth[key] = 'synthetic'; assert.throws(() => validateHostingConfig(value), code('HOSTING_TEMPLATE_INVALID'));
   }
   for (const change of [{ configVersion: 2 }, { socketGid: -1 }, { socketGid: 1.1 }, { enrollmentTtlMs: 0 }, { scopes: [] }, { unknown: true }]) assert.throws(() => validateHostingConfig({ ...f.config, ...change }));
   const duplicate = structuredClone(f.config); duplicate.scopes.push(duplicate.scopes[0]); assert.throws(() => validateHostingConfig(duplicate), code('HOSTING_CONFIG_SCOPE_DUPLICATE'));
 });
 
-test('provider config requires one exact independent provider with managed env, no raw auth/include/alternate provider', async t => {
+test('provider config requires one exact independent provider with file auth, no raw auth/include/alternate provider', async t => {
   const f = await configFixture(t); const toml = f.config.template.codexConfig;
-  for (const value of ['', 'model_provider = "openai"\n', toml.replace('env_key = "CYF_MANAGED_PROVIDER_API_KEY"', 'env_key = "OPENAI_API_KEY"'),
+  for (const value of ['', 'model_provider = "openai"\n', toml.replace('cli_auth_credentials_store = "file"', 'cli_auth_credentials_store = "auto"'),
     toml.replace('https://', 'http://'), toml.replace('no-network.invalid', 'user:secret@no-network.invalid'), toml.replace('/v1"', '/v1?token=synthetic"'),
-    toml.replace('requires_openai_auth = false', 'requires_openai_auth = true'), toml + 'requires_openai_auth = true\n',
+    toml.replace('requires_openai_auth = true', 'requires_openai_auth = false'), toml + 'requires_openai_auth = true\n',
     toml + '[model_providers.other]\nenv_key = "OPENAI_API_KEY"\n', toml + 'include = "/other/user/home"\n',
     toml + 'http_headers = { Authorization = "raw-secret" }\n', toml + 'env_key = "CYF_MANAGED_PROVIDER_API_KEY"\n',
     toml.replace('model_provider = "managed"', 'model_provider = "different"'), toml + 'wire_api = "chat"\n',
-    toml.replace('env_key = "CYF_MANAGED_PROVIDER_API_KEY"', 'env_key = "CYF_MANAGED_PROVIDER_MISSING"')]) {
+    toml.replace('cli_auth_credentials_store = "file"', 'preferred_auth_method = "apikey"')]) {
     const config = structuredClone(f.config); config.template.codexConfig = value; assert.throws(() => validateHostingConfig(config));
   }
 });
@@ -111,8 +111,10 @@ test('single source installer/validator explicitly collate control payload and t
 
 test('managed native-only provider controls are trusted scalar settings, not private root inheritance', async t => {
   const f = await configFixture(t)
-  Object.assign(f.config.template.profile, { nativeExecutionProviderId: 'operator', nativeExecutionProviderBaseUrl: 'https://provider.invalid/v1', nativeExecutionProviderWireApi: 'responses', nativeExecutionNetworkConnectTimeoutMs: 3000 })
+  Object.assign(f.config.template.profile, { nativeExecutionProviderId: 'managed', nativeExecutionProviderBaseUrl: 'https://no-network.invalid/v1', nativeExecutionProviderWireApi: 'responses', nativeExecutionNetworkConnectTimeoutMs: 3000 })
   assert.equal(validateHostingConfig(f.config), f.config)
+  const mismatch = structuredClone(f.config); mismatch.template.profile.nativeExecutionProviderBaseUrl = 'https://other.invalid/v1';
+  assert.throws(() => validateHostingConfig(mismatch), code('HOSTING_TEMPLATE_DELIBERATION_CONFIG_REQUIRED'));
   for (const field of ['nativeExecutionRootDir', 'nativeExecutionStateRoot']) {
     const value = structuredClone(f.config); value.template.profile[field] = '/private/other-subject'
     assert.throws(() => validateHostingConfig(value), code('HOSTING_TEMPLATE_INVALID'))

@@ -68,7 +68,7 @@ test('real app-server ordinary browser script preserves TLS, origins and read-on
   console.log('diagnostic: browser dependency measurement complete')
   const packageRoot = mkdir(resolve(root, 'browser-fixture'))
   writeFileSync(resolve(packageRoot, 'SKILL.md'), '---\nname: browser-fixture\ndescription: Synthetic browser network test only.\n---\nUse the configured synthetic site.\n', { mode: 0o600 })
-  writeFileSync(resolve(sourceHome, 'auth.json'), '{"OPENAI_API_KEY":"nonfunctional-isolation-fixture"}', { mode: 0o600 })
+  writeFileSync(resolve(sourceHome, 'auth.json'), '{"auth_mode":"apikey","OPENAI_API_KEY":"nonfunctional-isolation-fixture"}', { mode: 0o600 })
   runtime = new NativeExecutionProfileRuntime({ profile: { profileId: 'native-browser-probe', agentId: 'native-browser-probe-agent', codexBin: process.env.CYF_CODEX_BIN || '/usr/local/bin/codex', codexHome: sourceHome,
     typedInspectionProviderNetwork: 'restricted-proxy', typedInspectionProviderId: 'isolation-probe', typedInspectionProviderBaseUrl: 'https://provider.invalid/v1', typedInspectionNetworkConnectTimeoutMs: 10000 }, materializerRoot, stateRoot, nativeToolchain })
   // Existing profile fixture mechanism: trust only this synthetic CA. Do not

@@ -77,8 +77,8 @@ test('real control/host/adapter/engine preserve installed skill through cleanup 
     socketPath: resolve(root, 'socket/control.sock'), socketGid: process.getgid(), managedRoot: resolve(root, 'managed'),
     scopes: ['fixture-owner', 'next-owner'].map(ownerJiacn => ({ tenantId: '0', clientId: 'fixture-client', ownerJiacn })), enrollmentTtlMs: 3600000,
     template: { profile: { codexBin: '/bin/true', appServerEnabled: false, fastChatEnabled: false },
-      codexConfig: 'model_provider = "managed"\n[model_providers.managed]\nbase_url = "https://no-network.invalid/v1"\nenv_key = "CYF_MANAGED_PROVIDER_API_KEY"\nrequires_openai_auth = false\n',
-      providerEnvironment: { CYF_MANAGED_PROVIDER_API_KEY: 'never-live-fixture' } } } }).initialize();
+      codexConfig: 'cli_auth_credentials_store = "file"\nmodel_provider = "managed"\n[model_providers.managed]\nbase_url = "https://no-network.invalid/v1"\nwire_api = "responses"\nrequires_openai_auth = true\n',
+      modelAuth: { auth_mode: 'apikey', OPENAI_API_KEY: 'never-live-fixture' } } } }).initialize();
   const wire = JSON.parse(await readFile(new URL('./fixtures/gss-hosting-control-v1.json', import.meta.url)));
   const request = quotedPreparation(wire.prepareRequest, 'real-fixture-host'), candidate = await control.handle(request);
   await control.handle(candidateRequest(request, candidate, 'ensure')); await Promise.all([...control.jobs.values()]);

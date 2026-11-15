@@ -1,3 +1,4 @@
+import { assertFileAuthConfig } from './model-auth.mjs'
 import { usageEvidenceFromNotification } from './app-server-usage.mjs'
 import { waitForSandboxStartup } from './sandbox-startup.mjs'
 import { CHAT_FILE_PERMISSION_PROFILE, NATIVE_PERMISSION_PROFILE } from './native-execution-profile.mjs'
@@ -484,7 +485,7 @@ export class AppServerAdapter extends EventEmitter {
     })
   }
   notify(method, params = {}) { if (!this.closed) this.send({ method, params }) }
-  async initialize({ catalogOnly = false } = {}) {
+  async initialize({ catalogOnly = false, fileAuth = undefined } = {}) {
     const timings = []
     const measured = async (phase, operation) => {
       const started = performance.now(); let completed = false
@@ -502,9 +503,14 @@ export class AppServerAdapter extends EventEmitter {
       this.notify('initialized', {})
       // Inventory requires only native skill discovery, never provider/account/tool startup.
       if (catalogOnly) return this.readback
+      // Verify effective provider configuration before any provider/model request.
+      if (fileAuth !== undefined) {
+        this.readback.config = await measured('config/read', () => this.request('config/read', {}))
+        assertFileAuthConfig(this.readback.config, fileAuth)
+      }
       this.readback.account = await measured('account/read', () => this.request('account/read', { refreshToken: false }))
       this.readback.models = await measured('model/list', () => this.request('model/list', {}))
-      this.readback.config = await measured('config/read', () => this.request('config/read', {}))
+      if (fileAuth === undefined) this.readback.config = await measured('config/read', () => this.request('config/read', {}))
       this.readback.tools = await measured('mcpServerStatus/list', () => this.request('mcpServerStatus/list', { detail: 'toolsAndAuthOnly' })).catch(error => ({ unavailable: true, reason: error.code || error.message }))
       return this.readback
     } finally {

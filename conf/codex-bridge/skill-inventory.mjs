@@ -53,7 +53,7 @@ export function skillInventorySnapshot({ discovery, managed = [], cwd, codexHome
 export async function observeInstalledSkillInventory({ profile, manager = null,
   measure = measureCodexAppServerBinaryAsync, spawn = (p, options) => AppServerAdapter.spawnAsync(p, { ...options,
     spawnFn: (command, args, settings) => spawnProcess(command, args, { ...settings,
-      env: { ...settings.env, HOME: dirname(p.codexHome) } }) }) }) {
+      env: { ...settings.env, HOME: p.codexHome, CODEX_HOME: p.codexHome } }) }) }) {
   const before = manager?.listInstalledSkills() || []
   const schemaMeasurement = await measure(profile)
   const adapter = await spawn(profile, { cwd: profile.codexWorkdir, schemaMeasurement })

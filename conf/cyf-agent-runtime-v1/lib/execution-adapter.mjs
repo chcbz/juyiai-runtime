@@ -476,6 +476,7 @@ export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   "typed-inspection-network.mjs",
   "typed-inspection-profile.mjs",
   "isolated-engine-profile.mjs",
+  "model-auth.mjs",
   "native-execution-runtime.mjs",
   "typed-inspection-runtime.mjs",
   "workspace-file-bridge.mjs",

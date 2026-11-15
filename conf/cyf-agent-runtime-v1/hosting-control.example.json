@@ -28,9 +28,10 @@
       "nativeExecutionProviderWireApi": "responses",
       "nativeExecutionNetworkConnectTimeoutMs": 15000
     },
-    "codexConfig": "model = \"OPERATOR_MANAGED_MODEL_REQUIRED\"\nmodel_provider = \"managed\"\n[model_providers.managed]\nname = \"Operator-managed hosting provider\"\nbase_url = \"https://provider.example.invalid/v1\"\nwire_api = \"responses\"\nenv_key = \"CYF_MANAGED_PROVIDER_API_KEY\"\nrequires_openai_auth = false\n",
-    "providerEnvironment": {
-      "CYF_MANAGED_PROVIDER_API_KEY": "OPERATOR_MANAGED_SECRET_REQUIRED"
+    "codexConfig": "cli_auth_credentials_store = \"file\"\nmodel = \"OPERATOR_MANAGED_MODEL_REQUIRED\"\nmodel_provider = \"managed\"\n[model_providers.managed]\nname = \"Operator-managed hosting provider\"\nbase_url = \"https://provider.example.invalid/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n",
+    "modelAuth": {
+      "auth_mode": "apikey",
+      "OPENAI_API_KEY": "OPERATOR_MANAGED_SECRET_REQUIRED"
     }
   }
 }

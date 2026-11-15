@@ -87,7 +87,7 @@ test('adopted static installation uses the same stopped evidence and private cle
   const result = await f.control().handle({ ...handover, method: 'cleanup' });
   assert.equal(result.outcome, 'CLEANED');
   assert.equal(await readFile(resolve(peer.profile.codexHome, 'config.toml'), 'utf8'), peer.publicFiles['config.toml']);
-  await assert.rejects(readFile(resolve(peer.profile.codexHome, 'auth.json')), { code: 'ENOENT' });
+  assert.equal(await readFile(resolve(peer.profile.codexHome, 'auth.json'), 'utf8'), peer.publicFiles['auth.json']);
   assert.deepEqual(await readdir(peer.profile.codexWorkdir), []);
   await f.stop(); await f.start(); f.control().resumeAdmitted(); await f.settle();
   assert.equal(f.host().snapshot().agents[0].ready, false);

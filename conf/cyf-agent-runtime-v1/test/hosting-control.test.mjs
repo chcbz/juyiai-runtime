@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { eventMessage, validateMessage } from '../lib/message-envelope.mjs';
 import { createHash } from 'node:crypto';
-import { chmod, lstat, mkdir, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { connect } from 'node:net';
 import { resolve } from 'node:path';
 import { hostingFixture, candidateRequest, quotedPreparation, fixtureInventory, tick, code } from './hosting-fixture.mjs';
@@ -274,7 +274,7 @@ test('persisted journal rejects extra fields, orphan operation, duplicate instal
     state => { state.subjects[subjectKey].activeOperationKey = 'missing'; }, state => { state.operations[operationKey].subjectKey = 'missing'; },
     state => { state.operations[operationKey].provisionGeneration = 2; }, state => { state.operations[operationKey].recoveryRequired = 'false'; },
     state => { state.subjects[subjectKey].enrollmentSecret = 'f'.repeat(64); }, state => { state.subjects[subjectKey].initialAssociation.ownerJiacn = 'wrong'; },
-    state => { state.subjects[subjectKey].template.providerEnvironment.HOME = '/other/user'; }];
+    state => { state.subjects[subjectKey].template.modelAuth.HOME = '/other/user'; }];
   for (const change of changes) { const modified = structuredClone(pristine); change(modified); f.control().state = modified; assert.throws(() => f.control().validateJournal()); }
   f.control().state = pristine; assert.doesNotThrow(() => f.control().validateJournal()); assert.equal(f.enrollmentCount(), 0);
 });
@@ -422,7 +422,7 @@ test('cleanup control uses trusted saved template, requires evidence and preserv
   assert.equal(cleans, 0);
   const result = await control.handle(request); assert.equal(result.outcome, 'CLEANED'); assert.equal(cleans, 1);
   assert.equal(await readFile(resolve(agent.profile.codexHome, 'config.toml'), 'utf8'), subject.template.codexConfig);
-  await assert.rejects(readFile(resolve(agent.profile.codexHome, 'auth.json')), { code: 'ENOENT' });
+  assert.equal(await readFile(resolve(agent.profile.codexHome, 'auth.json'), 'utf8'), agent.publicFiles['auth.json']);
   assert.deepEqual(await readdir(agent.profile.codexWorkdir), []);
   assert.deepEqual(await control.handle(request), result); assert.equal(cleans, 1);
   const sessions = f.sessionCount(); await f.stop(); await f.start(); f.control().resumeAdmitted(); await f.settle();
@@ -570,7 +570,7 @@ test('CLEANED public subject can be invited twice more in the same roots with fr
       publicFiles: options.agent.publicFiles, publicRepositoryRoots: [rootAgent.profile.codexWorkdir],
       flushPlatformCosts: async () => ({ confirmed: true }), extractKnowledge: async () => ({ confirmed: true }) });
     assert.equal((await f.control().handle({ ...finish, method: 'cleanup' })).outcome, 'CLEANED');
-    await assert.rejects(readFile(privateCredential), { code: 'ENOENT' });
+    assert.equal(await readFile(privateCredential, 'utf8'), rootAgent.publicFiles['auth.json']);
     await assert.rejects(readFile(resolve(rootAgent.stateRoot, 'runtime-authorization.json')), { code: 'ENOENT' });
     if (invitation === 2) { await f.stop(); await f.start(); } // Cleanup must survive host restart before prepare.
     const nextCandidate = await f.control().handle(next);
@@ -844,4 +844,17 @@ test('retired CHAT fields on disk survive materialization and restart without we
     assert.equal(f.enrollmentCount(), 1);
   }
   await writePrivateJson(agent.profilePath, historical);
+});
+
+test('new managed materialization creates exact auth baseline, resumes missing half, and never overwrites conflicting credentials', async t => {
+  const f = await hostingFixture(t); const candidate = await f.control().handle(prepare);
+  await f.control().handle(candidateRequest(prepare, candidate, 'ensure')); await f.settle();
+  const subject = f.control().state.subjects[runtimeSubjectKey(candidate.manifest)]; const agent = f.control().subjectAgent(subject);
+  const authPath = resolve(agent.profile.codexHome, 'auth.json');
+  assert.equal(await readFile(authPath, 'utf8'), agent.publicFiles['auth.json']);
+  assert.equal((await lstat(authPath)).mode & 0o777, 0o600); assert.equal(agent.providerEnvironment, undefined);
+  await rm(authPath); await f.control().materializeConfig(agent, subject.template);
+  assert.equal(await readFile(authPath, 'utf8'), agent.publicFiles['auth.json']);
+  await writeFile(authPath, 'conflict'); await assert.rejects(f.control().materializeConfig(agent, subject.template), code('HOSTING_STATE_UNCONFIRMED'));
+  assert.equal(await readFile(authPath, 'utf8'), 'conflict');
 });

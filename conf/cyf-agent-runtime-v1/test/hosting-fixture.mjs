@@ -21,8 +21,8 @@ export async function hostingFixture(t, { loseEnrollment = false, stalled = fals
   let now = 1791594000000; let enrollments = 0; let sessions = 0;
   const states = new Map(); const peers = [];
   const template = { profile: { codexBin: '/bin/true', appServerEnabled: false, fastChatEnabled: false },
-    codexConfig: 'model_provider = "managed"\n[model_providers.managed]\nname = "Synthetic hosting provider"\nbase_url = "https://no-network.invalid/v1"\nenv_key = "CYF_MANAGED_PROVIDER_API_KEY"\nrequires_openai_auth = false\n',
-    providerEnvironment: { CYF_MANAGED_PROVIDER_API_KEY: 'synthetic-provider-never-live' } };
+    codexConfig: 'cli_auth_credentials_store = "file"\nmodel_provider = "managed"\n[model_providers.managed]\nname = "Synthetic hosting provider"\nbase_url = "https://no-network.invalid/v1"\nwire_api = "responses"\nrequires_openai_auth = true\n',
+    modelAuth: { auth_mode: 'apikey', OPENAI_API_KEY: 'synthetic-provider-never-live' } };
   const controlConfig = { configVersion: 1, socketPath: resolve(root, 'socket/control.sock'), socketGid: process.getgid(),
     managedRoot: resolve(root, 'managed'), scopes: scopes || [scope],
     template: staticPeers ? null : template, enrollmentTtlMs: 3600000 };
@@ -34,7 +34,7 @@ export async function hostingFixture(t, { loseEnrollment = false, stalled = fals
     const manifest = { ...unsigned, manifestSha256: digestManifest(unsigned) };
     const manifestPath = resolve(base, 'manifest.json');
     if (staticPeers) await writeFile(manifestPath, JSON.stringify(manifest), { mode: 0o600 });
-    peers.push({ manifest, ...(staticPeers ? { manifestPath, publicFiles: { 'config.toml': 'model = "fixture-public"\n' } } : {}), subjectKey: runtimeSubjectKey(manifest), stateRoot: resolve(base, 'state'),
+    peers.push({ manifest, ...(staticPeers ? { manifestPath, publicFiles: { 'config.toml': 'model = "fixture-public"\n', 'auth.json': JSON.stringify({auth_mode:'apikey',OPENAI_API_KEY:'synthetic-static'})+'\n' } } : {}), subjectKey: runtimeSubjectKey(manifest), stateRoot: resolve(base, 'state'),
       profile: { profileId: `peer-${index}`, agentId: manifest.canonicalAgentId, codexBin: '/bin/true',
         codexHome: resolve(base, 'home'), codexWorkdir: resolve(base, 'work'), appServerEnabled: false, fastChatEnabled: false } });
   }

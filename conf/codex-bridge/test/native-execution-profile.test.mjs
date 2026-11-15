@@ -18,7 +18,7 @@ const tool = (sourcePath, sandboxPath) => ({ sourcePath: realpathSync(sourcePath
 const fixture = () => {
   const root = mkdtempSync(resolve(tmpdir(), 'cyf-native-profile-')); chmodSync(root, 0o700)
   const execution = mkdir(resolve(root, 'execution')); const stateRoot = mkdir(resolve(root, 'state')); const sourceHome = mkdir(resolve(root, 'main-home'))
-  writeFileSync(resolve(sourceHome, 'auth.json'), '{"OPENAI_API_KEY":"nonfunctional-isolation-fixture"}', { mode: 0o600 })
+  writeFileSync(resolve(sourceHome, 'auth.json'), '{"auth_mode":"apikey","OPENAI_API_KEY":"nonfunctional-isolation-fixture"}', { mode: 0o600 })
   writeFileSync(resolve(sourceHome, 'private-host-canary'), 'not-visible', { mode: 0o600 })
   const inputDirectory = mkdir(resolve(execution, 'inputs')); const scratchDirectory = mkdir(resolve(execution, 'scratch')); const draftsDirectory = mkdir(resolve(execution, 'drafts'))
   const trustedOutputs = mkdir(resolve(execution, 'outputs')); writeFileSync(resolve(trustedOutputs, 'private-blob'), 'trusted-not-visible', { mode: 0o600 })

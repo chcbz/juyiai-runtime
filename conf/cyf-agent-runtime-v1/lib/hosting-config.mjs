@@ -1,3 +1,4 @@
+import { validateModelAuth } from '../../codex-bridge/model-auth.mjs';
 // Operator-only local config. No control request can select these paths or keys.
 import { createHash } from 'node:crypto';
 import { constants, lstat, open, realpath } from 'node:fs/promises';
@@ -16,8 +17,6 @@ export const MANAGED_PROFILE_FIELDS = Object.freeze(['codexBin', 'codexModel', '
   'workspaceNoTaskPolicy', 'workspaceNonCodingCommandTypes', 'executionReportCommandTypes', 'nativeConversationHttpPollEnabled',
   'nativeExecutionProviderId', 'nativeExecutionProviderBaseUrl', 'nativeExecutionProviderWireApi', 'nativeExecutionNetworkConnectTimeoutMs',
   'abilities', 'skills']);
-// Distinct operator-managed provider environment. Never inherit HOME/auth/session.
-export const managedProviderKey = key => /^CYF_MANAGED_PROVIDER_[A-Z][A-Z0-9_]*$/.test(key);
 export async function canonicalHostingPath(path) {
   if (!exactHostingId(path) || !isAbsolute(path) || resolve(path) !== path) throw hostingError('HOSTING_CONFIG_PATH_INVALID');
   let cursor = path;
@@ -36,7 +35,7 @@ export function validateHostingConfig(value) {
       || value.configVersion !== 1 || !outbound && (!Number.isSafeInteger(value.socketGid) || value.socketGid < 0)
       || !Number.isSafeInteger(value.enrollmentTtlMs) || value.enrollmentTtlMs < 1
       || !Array.isArray(value.scopes) || !outbound && !value.scopes.length
-      || value.template !== null && !fields(value.template, ['profile', 'codexConfig', 'providerEnvironment'])) throw hostingError('HOSTING_CONFIG_INVALID');
+      || value.template !== null && !fields(value.template, ['profile', 'codexConfig', 'modelAuth'])) throw hostingError('HOSTING_CONFIG_INVALID');
   if (outbound && (value.remote !== undefined || !fields(value.outbound, ['credentialsPath', 'pollIntervalMs'])
       || !exactHostingId(value.outbound.credentialsPath) || !isAbsolute(value.outbound.credentialsPath)
       || !Number.isSafeInteger(value.outbound.pollIntervalMs) || value.outbound.pollIntervalMs < 1))
@@ -56,18 +55,17 @@ export function validateHostingConfig(value) {
   }
   // Static-only hosts need no provisioning template or duplicate provider credentials.
   if (value.template === null) return value;
-  const { profile, codexConfig, providerEnvironment } = value.template;
+  const { profile, codexConfig, modelAuth } = value.template;
+  try { validateModelAuth(modelAuth); } catch { throw hostingError('HOSTING_TEMPLATE_INVALID'); }
   if (!object(profile) || Object.keys(profile).some(key => !MANAGED_PROFILE_FIELDS.includes(key) && !RETIRED_CHAT_SWITCHES.includes(key))
       || !exactHostingId(profile.codexBin) || !isAbsolute(profile.codexBin)
-      || typeof codexConfig !== 'string' || !codexConfig.trim() || codexConfig.includes('\0')
-      || !object(providerEnvironment) || !Object.keys(providerEnvironment).length
-      || Object.entries(providerEnvironment).some(([key, secret]) => !managedProviderKey(key) || !exactHostingId(secret))) throw hostingError('HOSTING_TEMPLATE_INVALID');
+      || typeof codexConfig !== 'string' || !codexConfig.trim() || codexConfig.includes('\0')) throw hostingError('HOSTING_TEMPLATE_INVALID');
   // Deliberately small TOML subset, not a second general-purpose TOML parser.
   // Exactly one provider table and scalar allowlists exclude includes, alternate
   // credential stores, headers, duplicate settings and multiline auth fallback.
   const top = {}; const provider = {}; let selectedTable = null;
-  const topKeys = new Set(['model', 'model_provider', 'model_reasoning_effort', 'disable_response_storage']);
-  const providerKeys = new Set(['name', 'base_url', 'wire_api', 'env_key', 'requires_openai_auth']);
+  const topKeys = new Set(['model', 'model_provider', 'model_reasoning_effort', 'disable_response_storage', 'cli_auth_credentials_store']);
+  const providerKeys = new Set(['name', 'base_url', 'wire_api', 'requires_openai_auth']);
   for (const raw of codexConfig.split(/\r?\n/)) {
     const line = raw.trim(); if (!line || line.startsWith('#')) continue;
     const table = /^\[model_providers\.([A-Za-z0-9_-]+)\]$/.exec(line);
@@ -85,11 +83,15 @@ export function validateHostingConfig(value) {
   }
   let providerUrl; try { providerUrl = new URL(provider.base_url); } catch {}
   if (!exactHostingId(top.model_provider) || selectedTable !== top.model_provider || selectedTable === 'openai'
-      || !managedProviderKey(provider.env_key) || !Object.hasOwn(providerEnvironment, provider.env_key)
+      || top.cli_auth_credentials_store !== 'file'
       || providerUrl?.protocol !== 'https:' || providerUrl.username || providerUrl.password || providerUrl.search || providerUrl.hash
-      || provider.requires_openai_auth !== false || provider.wire_api !== undefined && provider.wire_api !== 'responses'
+      || provider.requires_openai_auth !== true || provider.wire_api !== 'responses'
       || Object.entries(top).some(([key, scalar]) => key === 'disable_response_storage' ? typeof scalar !== 'boolean' : typeof scalar !== 'string')
       || Object.entries(provider).some(([key, scalar]) => key === 'requires_openai_auth' ? typeof scalar !== 'boolean' : typeof scalar !== 'string')) throw hostingError('HOSTING_TEMPLATE_PROVIDER_REQUIRED');
+  if ([profile.nativeExecutionProviderId, profile.nativeExecutionProviderBaseUrl, profile.nativeExecutionProviderWireApi].some(value => value !== undefined)
+      && (profile.nativeExecutionProviderId !== selectedTable
+      || profile.nativeExecutionProviderBaseUrl !== provider.base_url || profile.nativeExecutionProviderWireApi !== provider.wire_api))
+    throw hostingError('HOSTING_TEMPLATE_DELIBERATION_CONFIG_REQUIRED');
   return value;
 }
 // New managed enrollment only. Existing relationship recovery must not be

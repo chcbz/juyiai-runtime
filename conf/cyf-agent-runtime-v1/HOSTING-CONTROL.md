@@ -103,35 +103,30 @@ operator-created owned 0700 root disjoint from host/static Agent roots), `scopes
 safe integer, native enrollment expiry only), and `template`.
 
 `template` has exactly `profile`, `codexConfig` (explicit TOML string), and
-`providerEnvironment`. Managed profile fields are the exported
-`MANAGED_PROFILE_FIELDS` catalog in `lib/hosting-config.mjs`; `codexBin` is explicit.
-No profileId/agentId/HOME/workdir/state paths, Runtime credentials, legacy key,
-or request-selected command/URL can enter the template. Runtime derives
-`managedRoot/SHA256(tenantId,clientId,canonicalAgentId)/{home,work,state}` and a
-subject-specific profileId. It creates a new HOME `config.toml` from this exact
-private template, never copies another user's HOME/auth/tasks. Secrets are
-operator-owned template material, not submitted by API control requests.
+`modelAuth: {"auth_mode":"apikey","OPENAI_API_KEY":"operator-provided-secret"}`.
+Managed profile fields remain `MANAGED_PROFILE_FIELDS`; request input cannot
+supply credentials, HOME, identity or commands. Runtime derives each independent
+subject HOME and atomically materializes BOTH config.toml and auth.json (0600).
+Existing files must match the frozen template; conflicting files are not overwritten.
 
-`providerEnvironment` permits only **CYF_MANAGED_PROVIDER_[A-Z][A-Z0-9_]*** string
-keys. `codexConfig` explicitly selects a custom provider and its matching managed
-`env_key` (example `CYF_MANAGED_PROVIDER_API_KEY`), explicit HTTPS `base_url` and
-`requires_openai_auth=false`
-avoids borrowing personal OpenAI HOME authorization. The supported TOML subset is
-one `[model_providers.NAME]` table, single-line double-quoted scalars/booleans,
-and comments on their own lines. Top-level allowed keys: `model`,
-`model_provider`, `model_reasoning_effort`, `disable_response_storage`.
-Provider keys: `name`, `base_url`, `wire_api` (only `responses`), `env_key`,
-`requires_openai_auth` (must be false). Duplicates, other tables, headers,
-includes, inline/multiline credential material and alternate auth are rejected.
-The example enables WS app-server CHAT but leaves native HTTP poll disabled;
-ordinary task commands additionally require a trusted `workspacePolicyId` and
-matching `CYF_RUNTIME_WORKSPACE_POLICIES_FILE` (existing policy loader), not a
-request-selected directory or policy. No task/provider capability is claimed
-from the placeholder example. The mature engine's actual
-child environment builder passes these explicit values, not `process.env` secrets;
-HOME/CODEX_HOME remain the new subject HOME. PATH/LANG/LC_ALL/TZ keep the existing
-narrow inherited environment. Environment credentials cannot override HOME,
-NODE_OPTIONS, shell state, existing user's auth, or Runtime session proof.
+`codexConfig` selects exactly one HTTPS custom Provider, `wire_api="responses"`,
+`requires_openai_auth=true`, and top-level `cli_auth_credentials_store="file"`.
+No `env_key`, `providerEnvironment`, headers or alternate authentication are accepted.
+`preferred_auth_method` is not supported and must not be generated. Ordinary and
+native Provider bindings must agree when native metadata is supplied; new modern
+CHAT enrollment still requires complete native metadata. Historical inactive
+subjects lacking that metadata are not activated or repaired by credential migration.
+
+All model execution consumes this subject's auth.json, never host environment or
+another subject's credentials. Ordinary processes retain the source file; isolated
+execution stages a private copy and removes only that copy after initialization.
+The operator baseline includes config/auth so stopped private-HOME cleanup and
+readmission can rebuild them without retaining old-owner secrets. Other skill
+provider environments and Runtime identity credentials are separate and unchanged.
+No key rotation or runtime legacy-schema fallback is provided. Existing templates,
+journals, targets and operator baselines must be migrated offline together using
+`tools/migrate-model-auth.mjs` under the authorized installer's release lock with
+writers stopped. Its plan prints paths only; private backups contain secrets.
 
 The initial template snapshot is private and durable per subject. Existing
 subject profile/config must match the journal; edits/credential rotation require

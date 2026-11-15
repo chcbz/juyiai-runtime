@@ -4305,6 +4305,7 @@ test('E05 lease/start failure and checkpoint write failure are side-effect fence
 test('E05 original runCodex workspace acquire/release reused; exact child cancellation on session loss, no report or result success', async t => {
   t.mock.method(Date, 'now', () => 2000)
   const selected = { ...e05Profile(), codexTimeoutMs: 0, codexHome: temporaryDirectory() }
+  writeFileSync(resolve(selected.codexHome,'auth.json'), JSON.stringify({auth_mode:'apikey',OPENAI_API_KEY:'e05-model-fixture'}), {mode:0o600})
   const native = e05OfflineNative(); const controller = new AbortController(); let acquisitions = 0; let releases = 0; let spawned = 0; let child
   const kills = []; const reports = []
   const workspaceManager = { acquireCommandWorkspace: () => {
@@ -4459,6 +4460,7 @@ test('E05 actual Node fetch HTTP→session/lease/original executor/result lostre
 test('E05 timer heartbeat final confirmed version feeds result using original runCodex output/workspace lifecycle', async () => {
   const started = Date.now(); const native = e05OfflineNative(); let heartbeatRequests = 0; let body; let releases = 0; let originalRun = 0
   const selected = { ...e05Profile(), codexHome: temporaryDirectory(), codexTimeoutMs: 0 }
+  writeFileSync(resolve(selected.codexHome,'auth.json'), JSON.stringify({auth_mode:'apikey',OPENAI_API_KEY:'e05-model-fixture'}), {mode:0o600})
   const workspaceManager = { acquireCommandWorkspace: () => ({ workspace: { workspacePath: selected.codexHome }, release: () => { releases++ } }) }
   let child
   const result = await runManagedCommand({ profile: selected, message: normalizeInboundMessage(e05Fixture()), workspaceManager, apiOrigin: 'https://api.example.test',
