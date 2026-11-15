@@ -88,3 +88,22 @@ test('disposed native owner withdraws cached declaration and settles in-flight m
   assert.equal(runtime.nativeExecutionDeclaration(), null)
   assert.equal(await runtime.measureNativeExecution(), null)
 })
+
+
+test('new installation modern CHAT defaults include formal deliberation and isolated file delivery, not invented readiness', async () => {
+  const { runtimeInstallationProfile, buildAgentRegistrationPayload } = await import('../agent-client.mjs')
+  const modern = { chatEngine: 'app-server', fastChatEnabled: true, appServerEnabled: true }
+  const a = runtimeInstallationProfile({ stateRoot: '/private/a/state', profile: { ...modern, agentId: 'a' } }, 'https://api.example.test')
+  const b = runtimeInstallationProfile({ stateRoot: '/private/b/state', profile: { ...modern, agentId: 'b' } }, 'https://api.example.test')
+  assert.equal(a.typedDeliberationEnabled, true)
+  assert.equal(a.workspaceFileApiOrigin, 'https://api.example.test')
+  assert.equal(a.workspaceFileRootDir, '/private/a/state/workspace-files')
+  assert.notEqual(a.workspaceFileRootDir, b.workspaceFileRootDir)
+  assert.equal(a.nativeExecutionProviderId, undefined)
+  assert.equal(a.apiKey, undefined)
+  const declaration = buildAgentRegistrationPayload(normalizeProfile(a, {}, 0, { isolated: true })).typedDeliberation
+  assert.equal(declaration.state, 'UNAVAILABLE')
+  assert.equal(declaration.nativeExecution, undefined)
+  assert.equal(runtimeInstallationProfile({ stateRoot: '/private/a/state', profile: { ...modern, typedDeliberationEnabled: false } }, 'https://api.example.test').typedDeliberationEnabled, false)
+  assert.equal(runtimeInstallationProfile({ stateRoot: '/private/a/state', profile: {} }, 'https://api.example.test').typedDeliberationEnabled, undefined)
+})

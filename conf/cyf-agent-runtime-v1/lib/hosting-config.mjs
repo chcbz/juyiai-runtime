@@ -91,6 +91,17 @@ export function validateHostingConfig(value) {
       || Object.entries(provider).some(([key, scalar]) => key === 'requires_openai_auth' ? typeof scalar !== 'boolean' : typeof scalar !== 'string')) throw hostingError('HOSTING_TEMPLATE_PROVIDER_REQUIRED');
   return value;
 }
+// New managed enrollment only. Existing relationship recovery must not be
+// reinterpreted as a new purchase or silently rewritten to a new template.
+export function requireHostingDeliberationTemplate(template) {
+  const p = template?.profile;
+  if (!p || p.typedDeliberationEnabled === false || p.chatEngine !== 'app-server'
+      || p.fastChatEnabled !== true || p.appServerEnabled !== true) return;
+  if (![p.nativeExecutionProviderId, p.nativeExecutionProviderBaseUrl, p.nativeExecutionProviderWireApi].every(exactHostingId)
+      || !Number.isSafeInteger(p.nativeExecutionNetworkConnectTimeoutMs) || p.nativeExecutionNetworkConnectTimeoutMs <= 0)
+    throw hostingError('HOSTING_TEMPLATE_DELIBERATION_CONFIG_REQUIRED');
+}
+
 export async function readHostingConfig(path, hostConfig) {
   await canonicalHostingPath(path);
   const value = validateHostingConfig(await readPrivateJson(path, null));

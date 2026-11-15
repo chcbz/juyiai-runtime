@@ -4,7 +4,11 @@
   "socketGid": 1000,
   "managedRoot": "/home/isp/state/cyf-agent-runtime-v1-managed/unified",
   "scopes": [
-    { "tenantId": "TENANT_ID_REQUIRED", "clientId": "CLIENT_ID_REQUIRED", "ownerJiacn": "OWNER_JIACN_REQUIRED" }
+    {
+      "tenantId": "TENANT_ID_REQUIRED",
+      "clientId": "CLIENT_ID_REQUIRED",
+      "ownerJiacn": "OWNER_JIACN_REQUIRED"
+    }
   ],
   "enrollmentTtlMs": 3600000,
   "template": {
@@ -21,9 +25,16 @@
       "appServerEnabled": true,
       "trueDeltaEnabled": true,
       "nativeConversationHttpPollEnabled": false,
-      "workspaceNoTaskPolicy": "reject"
+      "workspaceNoTaskPolicy": "reject",
+      "typedDeliberationEnabled": true,
+      "nativeExecutionProviderId": "managed",
+      "nativeExecutionProviderBaseUrl": "https://provider.example.invalid/v1",
+      "nativeExecutionProviderWireApi": "responses",
+      "nativeExecutionNetworkConnectTimeoutMs": 15000
     },
     "codexConfig": "model = \"OPERATOR_MANAGED_MODEL_REQUIRED\"\nmodel_provider = \"managed\"\n[model_providers.managed]\nname = \"Operator-managed hosting provider\"\nbase_url = \"https://provider.example.invalid/v1\"\nwire_api = \"responses\"\nenv_key = \"CYF_MANAGED_PROVIDER_API_KEY\"\nrequires_openai_auth = false\n",
-    "providerEnvironment": { "CYF_MANAGED_PROVIDER_API_KEY": "OPERATOR_MANAGED_SECRET_REQUIRED" }
+    "providerEnvironment": {
+      "CYF_MANAGED_PROVIDER_API_KEY": "OPERATOR_MANAGED_SECRET_REQUIRED"
+    }
   }
 }

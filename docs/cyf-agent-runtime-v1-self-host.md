@@ -166,7 +166,7 @@ for(const [name,value] of [[`${e.SUBJECT}.profile.json`,profile],[`${e.INSTANCE}
 JS
 ```
 
-模板只开普通原生文本通道，不自动启用图片能力或付费Provider。本次核对源码的文本开关要求 native HTTP 轮询且不能与 controlled-image profile 混用；已有图片角色升级应保留图片配置，不能机械套用此文本模板。托管 hosting-control profile 无原生文件根目录，不能套本单机模板。
+模板只开普通原生文本通道，不自动启用图片能力或付费Provider。本次核对源码的文本开关要求 native HTTP 轮询且不能与 controlled-image profile 混用；已有图片角色升级应保留图片配置，不能机械套用此文本模板。托管 hosting-control 不照搬本单机路径：新安装现代CHAT profile 由安装身份提供 API origin、在该主体 stateRoot 下分配 workspace-files，并默认开启正式议事（显式关闭仍保留）。新托管INITIAL准备在写入候选/调用enroll前拒绝缺失原生Provider配置（HOSTING_TEMPLATE_DELIBERATION_CONFIG_REQUIRED），不影响原关系只读恢复；托管模板还须按 `hosting-control.example.json` 明确配置 nativeExecutionProviderId/BaseUrl/WireApi/NetworkConnectTimeoutMs；使用该主体已有的受管Provider环境，不能借其他Agent的凭据。配置只允许开始测量，不代表READY；注册声明和真实原生工具实测均就绪后才可新承办。缺配置、声明或测量失败必须在API预占费用前拒绝，不以presence在线当正式议事可用。
 
 普通 `command.dispatch` 的仓库工作任务还需单独 `workspacePolicyId` 和受信任仓库策略（见执行引擎 workspace-manager 与已有运行配置）；上面原生文本模板不代表所有代码工作区能力已启用。不要借此临时克隆不可信仓库。
 

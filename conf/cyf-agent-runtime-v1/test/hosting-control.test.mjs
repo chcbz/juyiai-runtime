@@ -768,3 +768,38 @@ test('SETUP target rejects changed owner and does not overwrite local config', a
   await assert.rejects(control.handle(targetRequest), code('HOSTING_STATE_UNCONFIRMED'));
   assert.equal(await readFile(resolve(agent.profile.codexHome, 'config.toml'), 'utf8'), 'do-not-overwrite');
 });
+
+
+test('modern new hosted Agent with missing native provider config fails before enrollment or candidate creation', async t => {
+  const f = await hostingFixture(t);
+  Object.assign(f.controlConfig.template.profile, { chatEngine: 'app-server', appServerEnabled: true, fastChatEnabled: true });
+  await assert.rejects(f.control().handle(prepare), code('HOSTING_TEMPLATE_DELIBERATION_CONFIG_REQUIRED'));
+  assert.equal(f.enrollmentCount(), 0);
+  assert.equal(Object.keys(f.control().state.subjects).length, 0);
+  assert.equal(Object.keys(f.control().state.operations).length, 0);
+});
+
+test('explicit managed native config is accepted but preparation is not execution readiness', async t => {
+  const f = await hostingFixture(t);
+  Object.assign(f.controlConfig.template.profile, { chatEngine: 'app-server', appServerEnabled: true, fastChatEnabled: true,
+    typedDeliberationEnabled: true, nativeExecutionProviderId: 'managed', nativeExecutionProviderBaseUrl: 'https://no-network.invalid/v1',
+    nativeExecutionProviderWireApi: 'responses', nativeExecutionNetworkConnectTimeoutMs: 15000 });
+  const result = await f.control().handle(prepare);
+  assert.equal(result.outcome, 'PREPARED');
+  assert.equal(f.enrollmentCount(), 0);
+  assert.equal((await f.control().handle(candidateRequest(prepare, result, 'observe'))).outcome, 'UNKNOWN');
+  // Actual provisioning -> actual engine profile defaults -> actual wire builder.
+  // Measured adapter/tool facts below are offline fixtures, not a live Provider test.
+  const { runtimeInstallationProfile, normalizeProfile, buildAgentRegistrationPayload } = await import('../../codex-bridge/agent-client.mjs');
+  const subject = Object.values(f.control().state.subjects)[0];
+  const agent = f.control().subjectAgent(subject);
+  const profile = normalizeProfile(runtimeInstallationProfile(agent, 'https://api.example.test'), {}, 0, { isolated: true });
+  const native = { schemaVersion: 1, executionProtocolVersion: 5, toolPolicyRef: 'NATIVE_LOCAL_FILES_V1', outputMimeTypes: ['text/plain'] };
+  const payload = buildAgentRegistrationPayload(profile, null, true,
+    { readback: { initialize: {}, schema: { measured: true } } }, null, null, null, { nativeExecutionDeclaration: () => native });
+  assert.equal(payload.typedDeliberation.state, 'READY');
+  assert.deepEqual(payload.typedDeliberation.nativeExecution, native);
+  assert.equal(profile.nativeExecutionProviderId, 'managed');
+  assert.equal(profile.workspaceFileApiOrigin, 'https://api.example.test');
+  assert.equal(profile.workspaceFileRootDir, resolve(agent.stateRoot, 'workspace-files'));
+});

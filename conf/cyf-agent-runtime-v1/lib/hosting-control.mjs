@@ -7,7 +7,7 @@ import { digestManifest, runtimeSubjectKey, stableJson, validateManifest } from 
 import { acquireRuntimeOwnership, requireOwnedPrivateRoot } from './runtime-host.mjs';
 import { RuntimeV1Client, canonicalVersion } from './runtime-client.mjs';
 import { ensurePrivateDirectory, readPrivateJson, writePrivateJson } from './security.mjs';
-import { hostingError, validateHostingConfig, readHostingCredential } from './hosting-config.mjs';
+import { hostingError, validateHostingConfig, readHostingCredential, requireHostingDeliberationTemplate } from './hosting-config.mjs';
 import { stoppedSkillManager } from './evidence-handover.mjs';
 import { observeInstalledSkillInventory, skillInventorySnapshot } from '../../codex-bridge/skill-inventory.mjs';
 import { HOSTING_ASSOCIATION_FIELDS, HOSTING_PROTOCOL, hostingAssociation, hostingEnvelope, positiveEpoch, validQuotedInventory, validateHostingAssociation } from './hosting-wire.mjs';
@@ -260,6 +260,7 @@ export class HostingControl {
         throw hostingError('HOSTING_TEMPLATE_PROFILE_INVALID');
       try { await lstat(resolve(this.config.managedRoot, subjectKey)); throw hostingError('HOSTING_SUBJECT_CONFLICT'); }
       catch (cause) { if (cause.code !== 'ENOENT') throw cause; }
+      requireHostingDeliberationTemplate(this.config.template);
       target = { formatVersion: 1, subject, template: structuredClone(this.config.template) };
       // Persist ownership/template before creating directories. A restart resumes this exact
       // target; an unrelated existing directory is never adopted as an empty inventory.
@@ -391,6 +392,7 @@ export class HostingControl {
           if (!readmission && (subject || this.host.agents.has(subjectKey))) throw hostingError('HOSTING_SUBJECT_CONFLICT');
           const template = readmission ? subject.template : target?.template ?? this.config.template;
           if (!readmission && template === null) throw hostingError('HOSTING_TEMPLATE_PROFILE_INVALID');
+          if (!readmission) requireHostingDeliberationTemplate(template);
           const staticProfileId = readmission ? subject.staticProfileId : undefined;
           const unsigned = { runtimeProtocolVersion: 'v1', manifestVersion: '1', installationId: `rti_${randomBytes(16).toString('hex')}`,
             tenantId: request.tenantId, clientId: request.clientId, canonicalAgentId: request.canonicalAgentId };

@@ -6547,6 +6547,16 @@ const disposeProfileStateOnce = async (state, reason) => {
 // UR-01 executor injection seam. Transport/session validation is injected by the
 // frozen Runtime wire adapter; this factory never opens legacy sockets or watches
 // .env/profile files. A second in-process host cannot replace its global context.
+/** Installation-scoped defaults for newly enrolled modern CHAT agents. Explicit
+ * disablement and provider credentials are never synthesized or inherited. */
+export const runtimeInstallationProfile = (agent, apiOrigin) => {
+  const modernChat = agent.profile.chatEngine === 'app-server' && agent.profile.fastChatEnabled === true && agent.profile.appServerEnabled === true
+  return { ...agent.profile,
+    ...(modernChat ? { typedDeliberationEnabled: agent.profile.typedDeliberationEnabled ?? true,
+      workspaceFileApiOrigin: agent.profile.workspaceFileApiOrigin || apiOrigin,
+      workspaceFileRootDir: agent.profile.workspaceFileRootDir || resolve(agent.stateRoot, 'workspace-files') } : {}) }
+}
+
 let runtimeExecutionOwner = null
 export const buildRuntimeExecutionEnvironment = (profile, overrides = {}) => {
   const allowed = new Set(['PATH', 'LANG', 'LC_ALL', 'TZ', 'TMPDIR',
@@ -6578,7 +6588,8 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
     const manifest = agent.manifest
     const subjectKey = createHash('sha256').update(JSON.stringify({ canonicalAgentId: manifest.canonicalAgentId, clientId: manifest.clientId, tenantId: manifest.tenantId })).digest('hex')
     if (agent.subjectKey !== subjectKey) throw new AgentProtocolError('RUNTIME_SUBJECT_KEY_INVALID', 'Runtime subject storage key must match exact identity')
-    const profile = { ...normalizeProfile(agent.profile, {}, 0, { isolated: true }), runtimeSubjectKey: subjectKey,
+    const installationProfile = runtimeInstallationProfile(agent, origin.origin)
+    const profile = { ...normalizeProfile(installationProfile, {}, 0, { isolated: true }), runtimeSubjectKey: subjectKey,
       runtimeIdentity: Object.freeze({ ...manifest }), runtimeApiOrigin: origin.origin, runtimeInstanceId, runtimeStateRoot: agent.stateRoot,
       runtimeProviderEnvironment: Object.freeze({ ...(providerEnvironments.get(subjectKey) || agent.providerEnvironment || {}) }) }
     if (profile.agentId !== manifest.canonicalAgentId || profile.apiKey || profile.workspaceFileRuntimeAuthHeader) throw new AgentProtocolError('RUNTIME_PROFILE_IDENTITY_INVALID', 'Runtime profile cannot substitute its installation identity')
