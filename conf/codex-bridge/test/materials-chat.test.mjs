@@ -305,7 +305,7 @@ test('material CHAT uses its canonical conversation cwd for thread resume and tu
 
 for (const fileTools of [false, true]) test(`production CHAT wiring retains one thread across warm text, material sandbox, and warm text (file tools=${fileTools})`, async t => {
   const c = context(t), root = mkdtempSync(resolve(tmpdir(), 'chat-continuity-wiring-'))
-  const source = resolve(root, 'source'); mkdirSync(source, { mode: 0o700 }); writeFileSync(resolve(source, 'auth.json'), '{}', { mode: 0o600 })
+  const source = resolve(root, 'source'); mkdirSync(source, { mode: 0o700 }); writeFileSync(resolve(source, 'auth.json'), JSON.stringify({auth_mode:'apikey',OPENAI_API_KEY:'synthetic-materials-key'}), { mode: 0o600 })
   const selectedProfile = { ...profile, codexHome: source, typedInspectionProviderNetwork: 'restricted-proxy',
     typedInspectionProviderId: 'synthetic', typedInspectionProviderBaseUrl: 'https://provider.example/v1' }
   const readback = { ...c.adapter.readback, tools: { data: [] }, processExecutable: { pid: process.pid },

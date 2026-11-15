@@ -2005,7 +2005,7 @@ test('private cleanup host gate uses real storage aggregate and persists extract
     await writeFile(resolve(root, 'private'), 'old user');
   const host = new RuntimeHost({ config, createExecutor: engine.createExecutor, flushEvidence: async () => ({ confirmed: true }),
     cleanPrivateData: options => cleanStoppedPrivateData({ ...options, apiOrigin: 'https://api.example.test', instanceId: 'cleanup',
-      publicFiles: { 'config.toml': 'model="test"' }, flushPlatformCosts: async () => ({ confirmed: true }), extractKnowledge: async () => {
+      publicFiles: { 'config.toml': 'model="test"', 'auth.json': JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'synthetic-cleanup-key' }) }, flushPlatformCosts: async () => ({ confirmed: true }), extractKnowledge: async () => {
         extractions++; assert.equal(await readFile(resolve(agent.profile.codexHome, 'private'), 'utf8'), 'old user');
         throw new Error('synthetic private error text');
       } }) });
@@ -2017,7 +2017,7 @@ test('private cleanup host gate uses real storage aggregate and persists extract
   assert.equal(record.cleanupComplete, true); assert.equal(record.knowledgeStatus, 'FAILED');
   assert.equal(JSON.stringify(record).includes('synthetic private'), false);
   assert.deepEqual(await readdir(agent.profile.codexWorkdir), []);
-  assert.deepEqual(await readdir(agent.profile.codexHome), ['config.toml']);
+  assert.deepEqual((await readdir(agent.profile.codexHome)).sort(), ['auth.json', 'config.toml']);
   assert.ok(host.agents.get(agent.subjectKey).release); assert.equal(extractions, 1);
   await host.stop();
   const restarted = new RuntimeHost({ config, createExecutor: engine.createExecutor });
@@ -2067,7 +2067,7 @@ test('knowledge checkpoint survives lost final cleanup receipt and restart witho
   const engine = executors(); let calls = 0, lose = true;
   const cleanup = async options => {
     const result = await cleanStoppedPrivateData({ ...options, apiOrigin: 'https://example.test', instanceId: 'test',
-      publicFiles: { 'config.toml': 'model="test"' }, flushPlatformCosts: async () => ({ confirmed: true }), extractKnowledge: async () => { calls++; return { confirmed: true }; } });
+      publicFiles: { 'config.toml': 'model="test"', 'auth.json': JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'synthetic-cleanup-key' }) }, flushPlatformCosts: async () => ({ confirmed: true }), extractKnowledge: async () => { calls++; return { confirmed: true }; } });
     if (lose) throw new Error('lost final cleanup receipt');
     return result;
   };
