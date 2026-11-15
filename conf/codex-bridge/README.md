@@ -13,6 +13,16 @@ The execution, CHAT, workspace, current capability and ACK implementations remai
 `migrate-ack-high-water.mjs` is still referenced by the separate active ACK task;
 it is excluded from the installed execution payload, not automatically executed.
 
+## Built-in modern CHAT
+
+`chatEngine: "app-server"` selects modern CHAT. Formal deliberation, adapter startup,
+and real streaming do not have separate enable switches. Historical
+`typedDeliberationEnabled`, `fastChatEnabled`, `appServerEnabled`, and `trueDeltaEnabled`
+inputs are ignored and removed from effective profiles. This does not bypass the
+read-only policy, measured live readiness, Provider configuration, authenticated
+scope, or lifecycle/skill authorization. Existing v1 capability-result field names
+remain compatible; they are derived results, never operator opt-ins.
+
 ## Retained implementation notes
 
 The following notes describe retained code, not additional UR06 delivery gates.

@@ -59,14 +59,14 @@ test('capability and read facts are exact; previous reading does not add an unsu
 })
 
 test('v5 CHAT dispatch binds exact task/conversation/generation/target; unknown versions never downgrade to v3', () => {
-  const profile = { agentId: 'a', typedDeliberationEnabled: true }
+  const profile = { agentId: 'a', }
   const message = { durable: true, route: 'CHAT', taskId: 'task', conversationId: 'c', conversationGeneration: '1', targetAgentId: 'a',
     contextSnapshot: { facts: { typedDeliberation: facts(), conversation: { id: 'c', generation: '1', scopeType: 'bounty' }, task: { id: 'task' }, targetAgentId: 'a' } } }
   assert.deepEqual(resolveActionChatRequest(profile, message), facts())
   for (const patch of [{ targetAgentId: 'foreign' }, { conversationId: 'foreign' }, { conversationGeneration: '2' }, { taskId: 'other' }, { route: 'INSPECT' }, { durable: false }]) {
     assert.throws(() => resolveActionChatRequest(profile, { ...message, ...patch }), /ACTION_BINDING_INVALID/)
   }
-  assert.throws(() => resolveActionChatRequest({ ...profile, typedDeliberationEnabled: false }, message), /DISABLED/)
+  assert.deepEqual(resolveActionChatRequest({ ...profile, typedDeliberationEnabled: false }, message), resolveActionChatRequest(profile, message))
   message.contextSnapshot.facts.typedInspection = {}
   assert.throws(() => resolveActionChatRequest(profile, message), /ACTION_MARKER_CONFLICT/)
 })
@@ -248,7 +248,7 @@ test('facts v6 advertises native execution with empty skill while preserving out
   assert.equal(validateActionOutcome(a, f).schemaVersion, 5)
   const message = { durable: true, route: 'CHAT', taskId: 'task', conversationId: 'c', conversationGeneration: '1', targetAgentId: 'agent',
     contextSnapshot: { facts: { typedDeliberation: f, conversation: { id: 'c', generation: '1', scopeType: 'bounty' }, task: { id: 'task' }, targetAgentId: 'agent' } } }
-  assert.deepEqual(resolveActionChatRequest({ agentId: 'agent', typedDeliberationEnabled: true }, message), f)
+  assert.deepEqual(resolveActionChatRequest({ agentId: 'agent', }, message), f)
   assert.match(ACTION_OUTCOME_INSTRUCTIONS, /EXECUTE_NATIVE/)
   assert.doesNotMatch(ACTION_OUTCOME_INSTRUCTIONS, /All advertised actions are EXECUTE_SKILL/)
 })

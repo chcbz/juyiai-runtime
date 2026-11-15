@@ -27,7 +27,7 @@ const wire = (profile, registry, supportedInputs) => JSON.stringify(toAgentWire(
 test('registration growth follows current catalog, not refresh count or retained history; status stays constant', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'registration-footprint-')); t.after(() => rmSync(directory, { recursive: true, force: true }))
   const profile = { agentId: 'agent', agentName: 'agent', personaName: 'agent', codexWorkdir: directory,
-    typedDeliberationEnabled: true, workspaceFileApiOrigin: 'https://example.test', workspaceFileRootDir: directory }
+    chatEngine: 'app-server', workspaceFileApiOrigin: 'https://example.test', workspaceFileRootDir: directory }
   let rows = []; let retainedReads = 0
   const registry = new SkillRegistry({ scope, loadInstalled: () => rows,
     loadRetained: () => { retainedReads++; return Array.from({ length: 1000 }, (_, i) => row(i)) }, now: () => 1793232000000 })

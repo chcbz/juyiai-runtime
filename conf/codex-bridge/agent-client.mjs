@@ -70,7 +70,7 @@ import {
   loadManagedImageScopeAuthorizations,
   managedImageScopeMatches
 } from './managed-image-scope-config.mjs'
-import { emptyManagedChatScopes, loadManagedChatScopes, applyManagedChatScope } from './managed-chat-scope-config.mjs'
+import { emptyManagedChatScopes, loadManagedChatScopes, applyManagedChatScope, withoutRetiredChatSwitches } from './managed-chat-scope-config.mjs'
 import { CHAT_CONTEXT_INSTRUCTIONS, canResumePreEngineInspection, buildContextEnvelope, buildChatDispatchAck, validateChatDispatch, PersistentChatInbox, ChatAckOutbox, FairLaneScheduler, buildThreadKey, chatTaskAuthorityDigest, ThreadBindingStore, prepareChatWorkdir, canonicalSha256, timing, verifyHostedWireContract, hostedWireContractReadback } from './chat-runtime.mjs'
 import {
   AppServerAdapter, cleanupCodexAppServerSnapshots,
@@ -587,10 +587,6 @@ export const normalizeProfile = (profile, fallback = {}, index = 0, { isolated =
     chatSandbox: profile.chatSandbox || fallback.chatSandbox || 'read-only',
     chatToolPolicy: profile.chatToolPolicy || fallback.chatToolPolicy || 'read-only-constrained',
     chatWorkdir: profile.chatWorkdir || fallback.chatWorkdir || '',
-    fastChatEnabled: parseEnabledFlag(profile.fastChatEnabled ?? fallback.fastChatEnabled),
-    appServerEnabled: parseEnabledFlag(profile.appServerEnabled ?? fallback.appServerEnabled),
-    trueDeltaEnabled: parseEnabledFlag(profile.trueDeltaEnabled ?? fallback.trueDeltaEnabled),
-    typedDeliberationEnabled: parseEnabledFlag(profile.typedDeliberationEnabled ?? fallback.typedDeliberationEnabled),
     typedInspectionEnabled: parseEnabledFlag(profile.typedInspectionEnabled ?? fallback.typedInspectionEnabled),
     typedInspectionRootDir: String(profile.typedInspectionRootDir ?? fallback.typedInspectionRootDir ?? '').trim(),
     typedInspectionStateRoot: String(profile.typedInspectionStateRoot ?? fallback.typedInspectionStateRoot ?? '').trim(),
@@ -4121,9 +4117,7 @@ export const resolveProfileAbilities = profile => discoverWorkspaceAbilities(pro
  * read-only-constrained rather than claiming a strict no-tools Provider guarantee.
  */
 export const hasReadOnlyConstrainedChatProfile = profile => Boolean(
-  profile?.fastChatEnabled
-  && profile?.appServerEnabled
-  && profile?.chatEngine === 'app-server'
+  profile?.chatEngine === 'app-server'
   && profile?.chatSandbox === 'read-only'
   && profile?.chatToolPolicy === 'read-only-constrained'
 )
@@ -4151,9 +4145,10 @@ export const buildRuntimeCapabilities = profile => {
       // Existing command paths are legacy compatibility, not new execution-orchestration admission.
       EXECUTE: Object.freeze({ supported: false, enabled: false })
     }),
-    fastChatEnabled: Boolean(profile?.fastChatEnabled),
-    appServerEnabled: Boolean(profile?.appServerEnabled),
-    trueDeltaEnabled: Boolean(profile?.trueDeltaEnabled)
+    // v1 wire result fields retained for existing consumers; never profile switches.
+    fastChatEnabled: chatEnabled,
+    appServerEnabled: profile?.chatEngine === 'app-server',
+    trueDeltaEnabled: chatEnabled
   })
 }
 
@@ -4704,8 +4699,8 @@ export const runFastChat = async (profile, message, {
   const actionContract = actionRequest ? buildActionOutcomeContract(actionRequest, message.contextSnapshot?.facts?.reviewBasis ?? null, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryParent ?? null, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryTargets ?? []) : null
   const outputSchema = actionContract ? actionContract.outputSchema : TYPED_DELIBERATION_OUTPUT_SCHEMA
   const outcomeInstructions = actionContract ? actionContract.instructions : TYPED_DELIBERATION_INSTRUCTIONS
-  if (!profile.fastChatEnabled || !profile.appServerEnabled) {
-    throw new AgentProtocolError('FAST_CHAT_FEATURE_DISABLED', 'Modern durable CHAT is disabled for this profile; legacy workspace execution is forbidden')
+  if (profile.chatEngine !== 'app-server') {
+    throw new AgentProtocolError('FAST_CHAT_ENGINE_UNSUPPORTED', 'Modern durable CHAT requires app-server; legacy workspace execution is forbidden')
   }
   if (!message.contextSnapshot) throw new AgentProtocolError('FAST_CHAT_CONTEXT_REQUIRED', 'Modern durable CHAT requires contextSnapshot')
   let selectedAdapter = adapter
@@ -4789,7 +4784,7 @@ export const runFastChat = async (profile, message, {
     if (warmOpened) await controls.markPrepared({ schemaVersion: 1, contract: 'juyiting-action-chat-preparation-v1',
       conversationKey, threadKey: key, engineThreadId: binding.threadId })
     metrics.engineStartAt = Date.now()
-    let acceptedTurn = null; let typedStreamError = null
+    let acceptedTurn = null; let typedStreamError = null; let nativeDeltaObserved = false
     const decoder = typedRequest ? new TypedUserReplyStreamDecoder() : null
     const recordRecovery = reason => (materials || warmOpened)
       ? bindingStore?.put(key, { ...binding, state: 'RECOVERY_REQUIRED', recoveryReason: reason, recoveryMessageId: message.messageId, updatedAt: Date.now() })
@@ -4802,7 +4797,8 @@ export const runFastChat = async (profile, message, {
         policy: { cwd: chatWorkdir, model: profile.chatModel || profile.codexModel, effort: profile.chatReasoningEffort, ...(typedRequest ? { outputSchema } : {}) },
         onAccepted: accepted => { acceptedTurn = accepted; controls.markRunning(() => selectedAdapter.interrupt(accepted.threadId, accepted.turnId), accepted) },
         onDelta: event => {
-          if (!profile.trueDeltaEnabled || !event.content || controls.isCancelled() || typedStreamError) return
+          if (!event.content || controls.isCancelled() || typedStreamError) return
+          nativeDeltaObserved = true
           let content = event.content
           if (decoder) {
             try { content = decoder.push(content) } catch (error) {
@@ -4823,10 +4819,8 @@ export const runFastChat = async (profile, message, {
       metrics.finalAt = Date.now()
       if (typedRequest) {
         const outcome = actionRequest ? validateActionOutcome(result.content, typedRequest, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryParent ?? null, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryTargets ?? [], message.contextSnapshot?.facts?.reviewBasis ?? null) : validateTypedInteractionOutcome(result.content, typedRequest)
-        if (profile.trueDeltaEnabled) {
-          const suffix = decoder.finish(outcome.text, outcome.kind)
-          if (suffix) { metrics.firstEventAt ||= Date.now(); sendChatDelta(profile, message, suffix, { routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', streamOutcomeKind: decoder.kind }, sendProtocolFn) }
-        }
+        const suffix = decoder.finish(outcome.text, outcome.kind)
+        if (suffix && nativeDeltaObserved) { metrics.firstEventAt ||= Date.now(); sendChatDelta(profile, message, suffix, { routeUsed: 'CHAT_FAST', productPolicy: 'read-only-constrained', streamOutcomeKind: decoder.kind }, sendProtocolFn) }
         if (materials) {
           const validateOutcome = raw => validateActionOutcome(raw, typedRequest, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryParent ?? null, message.contextSnapshot?.facts?.typedDeliberationAdmission?.deliveryTargets ?? [], message.contextSnapshot?.facts?.reviewBasis ?? null)
           const finalPrepared = buildMaterialsChatFinal({ message, materials, rawOutcome: outcome, receiptDraft: preparedMaterials.inspectionInputReceiptDraft,
@@ -4978,15 +4972,12 @@ export const profileConfigurationErrors = profile => {
   if (!['new', 'resume'].includes(profile.codexSessionMode)) {
     errors.push('codexSessionMode must be new or resume')
   }
-  if (profile.fastChatEnabled && (!profile.appServerEnabled || profile.chatEngine !== 'app-server')) {
-    errors.push('fastChatEnabled requires appServerEnabled=true and chatEngine=app-server')
-  }
-  if (profile.fastChatEnabled && (profile.chatSandbox !== 'read-only' || profile.chatToolPolicy !== 'read-only-constrained')) {
+  if (profile.chatEngine === 'app-server' && (profile.chatSandbox !== 'read-only' || profile.chatToolPolicy !== 'read-only-constrained')) {
     errors.push('Fast CHAT requires chatSandbox=read-only and chatToolPolicy=read-only-constrained; approval never is not deny-all')
   }
   const typedInspectionControls = [profile.workspaceFileApiOrigin, profile.typedInspectionRootDir, profile.typedInspectionStateRoot]
   if ([profile.typedInspectionRootDir, profile.typedInspectionStateRoot].some(Boolean) && !typedInspectionControls.every(Boolean)) errors.push('INSPECT requires the shared workspaceFileApiOrigin and distinct private input/state roots')
-  if (profile.typedInspectionEnabled && (!profile.appServerEnabled || !typedInspectionControls.every(Boolean) || !profile.typedInspectionSupportedInputs.length)) errors.push('typedInspectionEnabled requires appServerEnabled plus fixed API origin plus distinct private input/state roots; runtime remains unavailable until isolation measurement is attached')
+  if (profile.typedInspectionEnabled && (profile.chatEngine !== 'app-server' || !typedInspectionControls.every(Boolean) || !profile.typedInspectionSupportedInputs.length)) errors.push('typedInspectionEnabled requires chatEngine=app-server plus fixed API origin plus distinct private input/state roots; runtime remains unavailable until isolation measurement is attached')
   if (!['isolated', 'restricted-proxy'].includes(profile.typedInspectionProviderNetwork)) errors.push('typedInspectionProviderNetwork must be isolated or restricted-proxy')
   if (profile.typedInspectionProviderNetwork === 'restricted-proxy' && (!profile.typedInspectionProviderId || !profile.typedInspectionProviderBaseUrl)) errors.push('typedInspectionProviderNetwork=restricted-proxy requires an exact provider id and HTTPS base URL')
   if (profile.typedInspectionProviderNetwork === 'restricted-proxy' && (!Number.isSafeInteger(profile.typedInspectionNetworkConnectTimeoutMs) || profile.typedInspectionNetworkConnectTimeoutMs <= 0)) errors.push('typedInspectionProviderNetwork=restricted-proxy requires an explicit positive typedInspectionNetworkConnectTimeoutMs transport timeout')
@@ -6037,7 +6028,7 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
     localImage: { supportedMimeTypes: ['image/png'], toNativeInput: ({ path }) => ({ type: 'localImage', path }) },
     localAudio: { supportedMimeTypes: ['audio/wav'], toNativeInput: ({ path }) => ({ type: 'localAudio', path }) }
   }
-  const hostedWireContract = profile.fastChatEnabled && profile.appServerEnabled ? verifyHostedWireContract() : null
+  const hostedWireContract = profile.chatEngine === 'app-server' ? verifyHostedWireContract() : null
   const lanes = new FairLaneScheduler({ chatConcurrency: 1, inspectConcurrency: 1, commandConcurrency: 1, maxQueuedPerLane: 256 })
   const legacyExecutionGate = new SerialExecutionGate()
   const sendAckFn = envelope => sendRaw(bindChatDispatchAckToSession(envelope, profile), profile)
@@ -6153,7 +6144,7 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
     // suppress native execution measurement or turn it into a materials grant.
     void state.ensureTypedInspectionProfile().finally(() => state.ensureNativeExecutionProfile())
   }
-  if (profile.fastChatEnabled && profile.appServerEnabled) {
+  if (profile.chatEngine === 'app-server') {
     const isCurrent = () => !state.disposed && (!profileStates.has(profileStateKey(profile)) || getProfileState(profile) === state)
     const scheduleRestart = () => {
       if (shuttingDown || !isCurrent() || state.appServerPermanentFailure || state.appServerRestartTimer) return
@@ -6167,7 +6158,7 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
     }
     const adapterLifecycle = {
       onChange: () => {
-        if (profile.typedDeliberationEnabled) publishMeasuredRuntimeCapabilities(profile, state)
+        publishMeasuredRuntimeCapabilities(profile, state)
         if (state.ws?.readyState === WebSocketClient.OPEN) sendStatus(profile, isProfileBusy(profile) ? 'busy' : 'online')
       },
       onExit: () => { state.appServerRestartAttempt++; scheduleRestart() }
@@ -6209,7 +6200,7 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
       }).catch(error => {
         state.appServerAdapter = null; state.appServerRestartAttempt++; state.appServerNotBefore = 0
         if (error.code === 'APP_SERVER_BINARY_UNTRUSTED') state.appServerPermanentFailure = error
-        if (isCurrent() && profile.typedDeliberationEnabled) publishMeasuredRuntimeCapabilities(profile, state)
+        if (isCurrent()) publishMeasuredRuntimeCapabilities(profile, state)
         console.warn(`app-server unavailable | profile=${profile.profileId} | ${error.code || error.message}`)
         if (isCurrent() && !state.appServerPermanentFailure) scheduleRestart()
         return null
@@ -6547,14 +6538,14 @@ const disposeProfileStateOnce = async (state, reason) => {
 // UR-01 executor injection seam. Transport/session validation is injected by the
 // frozen Runtime wire adapter; this factory never opens legacy sockets or watches
 // .env/profile files. A second in-process host cannot replace its global context.
-/** Installation-scoped defaults for newly enrolled modern CHAT agents. Explicit
- * disablement and provider credentials are never synthesized or inherited. */
+/** Installation-scoped CHAT defaults. Retired booleans cannot disable core
+ * capabilities; provider credentials/readiness are never synthesized. */
 export const runtimeInstallationProfile = (agent, apiOrigin) => {
-  const modernChat = agent.profile.chatEngine === 'app-server' && agent.profile.fastChatEnabled === true && agent.profile.appServerEnabled === true
-  return { ...agent.profile,
-    ...(modernChat ? { typedDeliberationEnabled: agent.profile.typedDeliberationEnabled ?? true,
-      workspaceFileApiOrigin: agent.profile.workspaceFileApiOrigin || apiOrigin,
-      workspaceFileRootDir: agent.profile.workspaceFileRootDir || resolve(agent.stateRoot, 'workspace-files') } : {}) }
+  const profile = withoutRetiredChatSwitches(agent.profile)
+  return { ...profile,
+    ...(profile.chatEngine === 'app-server' ? {
+      workspaceFileApiOrigin: profile.workspaceFileApiOrigin || apiOrigin,
+      workspaceFileRootDir: profile.workspaceFileRootDir || resolve(agent.stateRoot, 'workspace-files') } : {}) }
 }
 
 let runtimeExecutionOwner = null

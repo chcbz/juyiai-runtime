@@ -8,6 +8,7 @@ import { acquireRuntimeOwnership, requireOwnedPrivateRoot } from './runtime-host
 import { RuntimeV1Client, canonicalVersion } from './runtime-client.mjs';
 import { ensurePrivateDirectory, readPrivateJson, writePrivateJson } from './security.mjs';
 import { hostingError, validateHostingConfig, readHostingCredential, requireHostingDeliberationTemplate } from './hosting-config.mjs';
+import { withoutRetiredChatSwitches } from '../../codex-bridge/managed-chat-scope-config.mjs';
 import { stoppedSkillManager } from './evidence-handover.mjs';
 import { observeInstalledSkillInventory, skillInventorySnapshot } from '../../codex-bridge/skill-inventory.mjs';
 import { HOSTING_ASSOCIATION_FIELDS, HOSTING_PROTOCOL, hostingAssociation, hostingEnvelope, positiveEpoch, validQuotedInventory, validateHostingAssociation } from './hosting-wire.mjs';
@@ -56,7 +57,7 @@ export class HostingControl {
       manifestPath: resolve(root, 'manifest.json'), profilePath: resolve(root, 'profile.json'),
       providerEnvironment: subject.template.providerEnvironment,
       publicFiles: Object.freeze({ 'config.toml': subject.template.codexConfig }),
-      profile: { ...subject.template.profile, profileId: `managed-${key}`, agentId: subject.manifest.canonicalAgentId,
+      profile: { ...withoutRetiredChatSwitches(subject.template.profile), profileId: `managed-${key}`, agentId: subject.manifest.canonicalAgentId,
         codexHome: resolve(root, 'home'), codexWorkdir: resolve(root, 'work'), chatWorkdir: resolve(root, 'work'),
         workspaceFallbackWorkdir: resolve(root, 'work') } };
   }
@@ -538,7 +539,10 @@ export class HostingControl {
     for (const path of [agent.stateRoot, agent.profile.codexHome, agent.profile.codexWorkdir]) await ensurePrivateDirectory(path);
     for (const [path, value] of [[agent.manifestPath, subject.manifest], [agent.profilePath, agent.profile]]) {
       const current = await readPrivateJson(path, null);
-      if (current && !same(current, value)) {
+      // Retired feature gates have no execution semantics. Preserve old bytes,
+      // but keep every effective profile field and manifest strictly bound.
+      const comparable = current && path === agent.profilePath ? withoutRetiredChatSwitches(current) : current;
+      if (current && !same(comparable, value)) {
         if (path !== agent.manifestPath || !previousManifest || !same(current, previousManifest)) throw hostingError('HOSTING_STATE_UNCONFIRMED');
         await writePrivateJson(path, value);
       }

@@ -4,14 +4,15 @@ import { constants, lstat, open, realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { isIP } from 'node:net';
 import { readPrivateJson } from './security.mjs';
+import { RETIRED_CHAT_SWITCHES } from '../../codex-bridge/managed-chat-scope-config.mjs';
 
 export const hostingError = code => Object.assign(new Error(code), { code });
 export const exactHostingId = value => typeof value === 'string' && value.length > 0 && value.trim() === value && !/[\x00-\x1f\x7f]/u.test(value);
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const fields = (value, allowed) => object(value) && Object.keys(value).length === allowed.length && allowed.every(key => Object.hasOwn(value, key));
 export const MANAGED_PROFILE_FIELDS = Object.freeze(['codexBin', 'codexModel', 'codexSandbox', 'codexApproval', 'codexSessionMode',
-  'chatEngine', 'chatModel', 'chatReasoningEffort', 'chatSandbox', 'chatToolPolicy', 'fastChatEnabled', 'appServerEnabled',
-  'appServerSchemaContractId', 'trueDeltaEnabled', 'typedDeliberationEnabled', 'workspacePolicyId', 'workspaceRole',
+  'chatEngine', 'chatModel', 'chatReasoningEffort', 'chatSandbox', 'chatToolPolicy',
+  'appServerSchemaContractId', 'workspacePolicyId', 'workspaceRole',
   'workspaceNoTaskPolicy', 'workspaceNonCodingCommandTypes', 'executionReportCommandTypes', 'nativeConversationHttpPollEnabled',
   'nativeExecutionProviderId', 'nativeExecutionProviderBaseUrl', 'nativeExecutionProviderWireApi', 'nativeExecutionNetworkConnectTimeoutMs',
   'abilities', 'skills']);
@@ -56,7 +57,7 @@ export function validateHostingConfig(value) {
   // Static-only hosts need no provisioning template or duplicate provider credentials.
   if (value.template === null) return value;
   const { profile, codexConfig, providerEnvironment } = value.template;
-  if (!object(profile) || Object.keys(profile).some(key => !MANAGED_PROFILE_FIELDS.includes(key))
+  if (!object(profile) || Object.keys(profile).some(key => !MANAGED_PROFILE_FIELDS.includes(key) && !RETIRED_CHAT_SWITCHES.includes(key))
       || !exactHostingId(profile.codexBin) || !isAbsolute(profile.codexBin)
       || typeof codexConfig !== 'string' || !codexConfig.trim() || codexConfig.includes('\0')
       || !object(providerEnvironment) || !Object.keys(providerEnvironment).length
@@ -95,8 +96,7 @@ export function validateHostingConfig(value) {
 // reinterpreted as a new purchase or silently rewritten to a new template.
 export function requireHostingDeliberationTemplate(template) {
   const p = template?.profile;
-  if (!p || p.typedDeliberationEnabled === false || p.chatEngine !== 'app-server'
-      || p.fastChatEnabled !== true || p.appServerEnabled !== true) return;
+  if (!p || p.chatEngine !== 'app-server') return;
   if (![p.nativeExecutionProviderId, p.nativeExecutionProviderBaseUrl, p.nativeExecutionProviderWireApi].every(exactHostingId)
       || !Number.isSafeInteger(p.nativeExecutionNetworkConnectTimeoutMs) || p.nativeExecutionNetworkConnectTimeoutMs <= 0)
     throw hostingError('HOSTING_TEMPLATE_DELIBERATION_CONFIG_REQUIRED');

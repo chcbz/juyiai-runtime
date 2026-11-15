@@ -29,7 +29,6 @@ const legacyContract = CODEX_APP_SERVER_SCHEMA_CONTRACTS['codex-cli-0.153.4']
 const nativeContract = CODEX_APP_SERVER_SCHEMA_CONTRACTS['codex-cli-0.159.2']
 const profile = {
   profileId: 'typed-profile', agentId: hosted.targetAgentId, agentName: 'Typed Agent', personaName: 'Typed Agent',
-  fastChatEnabled: true, appServerEnabled: true, typedDeliberationEnabled: true, trueDeltaEnabled: true,
   chatEngine: 'app-server', chatSandbox: 'read-only', chatToolPolicy: 'read-only-constrained', chatModel: 'operator-selected',
   appServerSchemaContractId: nativeContract.contractId
 }
@@ -134,9 +133,9 @@ test('typed and plain CHAT use distinct threads while plain wire/content stays w
   assert.equal(Object.hasOwn(plainFrames.at(-1).payload, 'outcomeContractVersion'), false)
 })
 
-test('disabled, malformed or unready typed request rejects before any engine start with no fallback', async () => {
+test('unsupported engine, malformed or unready typed request rejects before any engine start with no fallback', async () => {
   for (const scenario of [
-    { selectedProfile: { ...profile, typedDeliberationEnabled: false }, selectedMessage: typedMessage(), adapter: { readback: measuredReadback() } },
+    { selectedProfile: { ...profile, chatEngine: 'legacy-codex' }, selectedMessage: typedMessage(), adapter: { readback: measuredReadback() } },
     { selectedProfile: profile, selectedMessage: typedMessage({ route: 'INSPECT' }), adapter: { readback: measuredReadback() } },
     { selectedProfile: profile, selectedMessage: typedMessage(), adapter: { closed: false, readback: measuredReadback(nativeContract, { measured: false }) } },
     { selectedProfile: profile, selectedMessage: typedMessage(), adapter: { closed: true, readback: measuredReadback() } },

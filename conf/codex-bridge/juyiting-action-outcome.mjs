@@ -272,7 +272,6 @@ export const resolveActionChatRequest = (profile, message) => {
   const facts = message?.contextSnapshot?.facts
   if (!facts || !Object.hasOwn(facts, 'typedDeliberation') || ![5, 6].includes(facts.typedDeliberation?.schemaVersion)) return null
   if (Object.hasOwn(facts, 'typedInspection')) fail('ACTION_MARKER_CONFLICT')
-  if (profile?.typedDeliberationEnabled !== true) fail('TYPED_DELIBERATION_DISABLED')
   const conversation = facts.conversation; const task = facts.task
   const route = message.route === undefined ? message.routing?.interactionMode : message.route
   const ids = [message.conversationId, message.conversationGeneration, message.taskId, message.targetAgentId,

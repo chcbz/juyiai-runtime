@@ -15,8 +15,8 @@ const doc = entries => JSON.stringify({ schemaVersion: 1, authorizations: entrie
 const scopes = parseManagedChatScopes(doc([authorization]))
 test('exact scoped composition enables native typed CHAT, not a fabricated READY', () => {
   const enabled = resolveManagedRuntimeProfile(profile, { chatWorkdir: '/forbidden/template' }, undefined, scopes)
-  assert.equal(enabled.fastChatEnabled, true); assert.equal(enabled.appServerEnabled, true)
-  assert.equal(enabled.typedDeliberationEnabled, true); assert.equal(enabled.chatEngine, 'app-server')
+  for (const key of ['fastChatEnabled', 'appServerEnabled', 'typedDeliberationEnabled', 'trueDeltaEnabled']) assert.equal(Object.hasOwn(enabled, key), false)
+  assert.equal(enabled.chatEngine, 'app-server')
   assert.equal(enabled.chatSandbox, 'read-only'); assert.equal(enabled.chatToolPolicy, 'read-only-constrained')
   assert.equal(enabled.chatWorkdir, undefined)
   assert.equal(enabled.appServerSchemaContractId, undefined)
@@ -28,12 +28,17 @@ test('every identity dimension is exact; global defaults cannot enable unrelated
     const changed = { ...profile, [field]: profile[field] + '-other' }
     const result = resolveManagedRuntimeProfile(changed, { fastChatEnabled: true, typedDeliberationEnabled: true }, undefined, scopes)
     assert.equal(result.typedDeliberationEnabled, undefined)
+    assert.equal(result.chatEngine, undefined)
+    assert.equal(buildTypedDeliberationDeclaration(result, null), null)
   }
   assert.equal(resolveManagedRuntimeProfile(profile, { typedDeliberationEnabled: true }).typedDeliberationEnabled, undefined)
 })
-test('explicit disabled profile stays disabled', () => {
+test('retired false fields cannot disable authorized managed CHAT; actual lifecycle policy stays explicit', () => {
   const result = resolveManagedRuntimeProfile({ ...profile, fastChatEnabled: false, typedDeliberationEnabled: false }, {}, undefined, scopes)
-  assert.equal(result.fastChatEnabled, false); assert.equal(buildTypedDeliberationDeclaration(result, null), null)
+  assert.equal(Object.hasOwn(result, 'fastChatEnabled'), false)
+  assert.equal(buildTypedDeliberationDeclaration(result, null).state, 'UNAVAILABLE')
+  const inactive = normalizeProfile({ ...result, enabled: false })
+  assert.equal(inactive.enabled, false)
 })
 test('reject duplicate, extra fields and wildcard authorizations', () => {
   assert.throws(() => parseManagedChatScopes(doc([authorization, authorization])))

@@ -155,7 +155,7 @@ if(e.CODEX_HOME_PATH !== `${e.STATE}/agents/${e.SUBJECT}/codex-home`) throw Erro
 const profile={profileId:e.SUBJECT,agentId:e.AGENT_ID,codexBin:e.CODEX_BIN,
   codexHome:e.CODEX_HOME_PATH,codexWorkdir:`${e.STATE}/agents/${e.SUBJECT}/workspace`,
   codexModel:e.CODEX_MODEL,codexSandbox:'workspace-write',codexApproval:'never',codexSessionMode:'new',codexTimeoutMs:0,
-  chatEngine:'app-server',appServerEnabled:true,fastChatEnabled:true,trueDeltaEnabled:true,typedDeliberationEnabled:true,
+  chatEngine:'app-server',
   chatModel:e.CODEX_MODEL,chatSandbox:'read-only',chatToolPolicy:'read-only-constrained',
   workspaceFileApiOrigin:e.API_ORIGIN,workspaceFileRootDir:`${e.STATE}/agents/${e.SUBJECT}/private-runs`,
   nativeConversationHttpPollEnabled:true,nativeConversationTextFileEnabled:true};
@@ -529,3 +529,10 @@ CYF任务先读`/home/isp/wsps/cyf/AGENTS.md`；本节不修改其他项目发�
 - 必要状态备份策略及主机维护入口统一维护于CYF `ops/maintenance/RUNTIME_BACKUP_RETENTION.md`，不在本仓复制清理规则。程序内的请求/会话目录不是诊断垃圾；不得随瘦身删除身份、授权、ACK、任务绑定或会话事实。
 
 定向入口：磁盘TMPDIR下`python3 -B tests/test_runtime_python_freeze.py -v`、`tests/test_runtime_python_artifact.py -v`。真实冻结探测可显式提供`CYF_TEST_FREEZE_PYTHON`；本次全部12项冻结用例及11项归档用例通过，并完成生产工具链**隔离复制**的文档/图片探测、sandbox重建及打包→新目录提取验证。不代表应用已发布。证据与已安装维护工具版本见CYF `docs/implementation/handoffs/RUNTIME-FOOTPRINT-20261109.md`。
+
+### 基础CHAT不再需要功能开关（2026-11-15）
+选择`chatEngine: "app-server"`及既有只读CHAT策略后，正式议事、适配器启动和真实流式输出是内建行为，
+不再配置`typedDeliberationEnabled`、`fastChatEnabled`、`appServerEnabled`、`trueDeltaEnabled`。
+历史配置中的同名字段允许读取但忽略（包括false），不再写入生成的运行profile；升级不修改原始身份、历史状态或授权。
+是否READY仍取决于当前实测适配器/native Provider能力，缺Provider配置仍明确失败；关闭整个主体仍使用既有生命周期策略。
+v1注册报文保留三个Enabled同名的能力**结果**字段供旧消费者读取，不接受它们作为运行开关。

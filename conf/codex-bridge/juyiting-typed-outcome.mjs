@@ -172,7 +172,6 @@ export const validateTypedDeliberationFacts = value => {
 export const resolveTypedDeliberationRequest = (profile, message) => {
   const facts = message?.contextSnapshot?.facts
   if (!facts || !own(facts, 'typedDeliberation')) return null
-  if (profile?.typedDeliberationEnabled !== true) fail('TYPED_DELIBERATION_DISABLED')
   const typed = validateTypedDeliberationFacts(facts.typedDeliberation)
   const conversation = facts.conversation; const task = facts.task
   const route = message.route === undefined ? message.routing?.interactionMode : message.route
@@ -194,10 +193,10 @@ export const typedDeliberationAdapterReady = (profile, adapter) => {
 }
 
 export const buildTypedDeliberationDeclaration = (profile, adapter) => {
-  if (profile?.typedDeliberationEnabled !== true) return null
+  if (profile?.chatEngine !== 'app-server') return null
   return freeze({
     schemaVersion: 5,
-    state: profile.fastChatEnabled === true && profile.appServerEnabled === true && profile.chatEngine === 'app-server' &&
+    state:
       profile.chatSandbox === 'read-only' && profile.chatToolPolicy === 'read-only-constrained' && typedDeliberationAdapterReady(profile, adapter) ? 'READY' : 'UNAVAILABLE',
     carrier: 'CHAT_MESSAGE_FINAL_SIDECAR_V5',
     referenceModes: ['NONE', 'AVAILABLE'],

@@ -19,8 +19,7 @@ const fixture = JSON.parse(fixtureBytes)
 const provenance = JSON.parse(readFileSync(new URL('./fixtures/mixed-material-api-wire-v3.provenance.json', import.meta.url)))
 const sha = bytes => createHash('sha256').update(bytes).digest('hex')
 const schema = CODEX_APP_SERVER_SCHEMA_CONTRACTS['codex-cli-0.159.2']
-const profile = { profileId: 'runtime-profile', agentId: 'agent', typedDeliberationEnabled: true, fastChatEnabled: true,
-  appServerEnabled: true, chatEngine: 'app-server', chatSandbox: 'read-only', chatToolPolicy: 'read-only-constrained',
+const profile = { profileId: 'runtime-profile', agentId: 'agent', chatEngine: 'app-server', chatSandbox: 'read-only', chatToolPolicy: 'read-only-constrained',
   appServerSchemaContractId: schema.contractId, chatModel: 'no-provider-test' }
 const bytes = new Map(fixture.materials.map(item => [item.sourceRefId, Buffer.from(item.bytesBase64, 'base64')]))
 const historicalSources = fixture.inspection.payload.contextSnapshot.facts.typedInspection.manifest.sources

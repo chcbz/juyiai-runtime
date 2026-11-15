@@ -772,7 +772,7 @@ test('SETUP target rejects changed owner and does not overwrite local config', a
 
 test('modern new hosted Agent with missing native provider config fails before enrollment or candidate creation', async t => {
   const f = await hostingFixture(t);
-  Object.assign(f.controlConfig.template.profile, { chatEngine: 'app-server', appServerEnabled: true, fastChatEnabled: true });
+  Object.assign(f.controlConfig.template.profile, { chatEngine: 'app-server' });
   await assert.rejects(f.control().handle(prepare), code('HOSTING_TEMPLATE_DELIBERATION_CONFIG_REQUIRED'));
   assert.equal(f.enrollmentCount(), 0);
   assert.equal(Object.keys(f.control().state.subjects).length, 0);
@@ -781,8 +781,9 @@ test('modern new hosted Agent with missing native provider config fails before e
 
 test('explicit managed native config is accepted but preparation is not execution readiness', async t => {
   const f = await hostingFixture(t);
-  Object.assign(f.controlConfig.template.profile, { chatEngine: 'app-server', appServerEnabled: true, fastChatEnabled: true,
-    typedDeliberationEnabled: true, nativeExecutionProviderId: 'managed', nativeExecutionProviderBaseUrl: 'https://no-network.invalid/v1',
+  Object.assign(f.controlConfig.template.profile, { chatEngine: 'app-server',
+    typedDeliberationEnabled: false, fastChatEnabled: false, appServerEnabled: false, trueDeltaEnabled: false,
+    nativeExecutionProviderId: 'managed', nativeExecutionProviderBaseUrl: 'https://no-network.invalid/v1',
     nativeExecutionProviderWireApi: 'responses', nativeExecutionNetworkConnectTimeoutMs: 15000 });
   const result = await f.control().handle(prepare);
   assert.equal(result.outcome, 'PREPARED');
@@ -799,7 +800,48 @@ test('explicit managed native config is accepted but preparation is not executio
     { readback: { initialize: {}, schema: { measured: true } } }, null, null, null, { nativeExecutionDeclaration: () => native });
   assert.equal(payload.typedDeliberation.state, 'READY');
   assert.deepEqual(payload.typedDeliberation.nativeExecution, native);
+  for (const key of ['typedDeliberationEnabled', 'fastChatEnabled', 'appServerEnabled', 'trueDeltaEnabled']) {
+    assert.equal(Object.hasOwn(agent.profile, key), false);
+    assert.equal(Object.hasOwn(profile, key), false);
+  }
   assert.equal(profile.nativeExecutionProviderId, 'managed');
   assert.equal(profile.workspaceFileApiOrigin, 'https://api.example.test');
   assert.equal(profile.workspaceFileRootDir, resolve(agent.stateRoot, 'workspace-files'));
+});
+
+
+test('historical false CHAT switches cannot bypass new managed native template admission', async t => {
+  const f = await hostingFixture(t);
+  Object.assign(f.controlConfig.template.profile, { chatEngine: 'app-server', typedDeliberationEnabled: false,
+    fastChatEnabled: false, appServerEnabled: false, trueDeltaEnabled: false });
+  await assert.rejects(f.control().handle(prepare), code('HOSTING_TEMPLATE_DELIBERATION_CONFIG_REQUIRED'));
+  assert.equal(f.enrollmentCount(), 0);
+  assert.equal(Object.keys(f.control().state.subjects).length, 0);
+  assert.equal(Object.keys(f.control().state.operations).length, 0);
+});
+
+
+test('retired CHAT fields on disk survive materialization and restart without weakening profile identity', async t => {
+  const f = await hostingFixture(t);
+  const prepared = await f.control().handle(prepare);
+  await f.control().handle(candidateRequest(prepare, prepared, 'ensure')); await f.settle();
+  const subject = Object.values(f.control().state.subjects)[0];
+  const agent = f.control().subjectAgent(subject);
+  const historical = { ...agent.profile, typedDeliberationEnabled: false, fastChatEnabled: false,
+    appServerEnabled: false, trueDeltaEnabled: false };
+  await writePrivateJson(agent.profilePath, historical);
+  const bytes = await readFile(agent.profilePath);
+  await f.control().materialize(subject);
+  assert.deepEqual(await readFile(agent.profilePath), bytes);
+  await f.stop(); await f.start(); await f.control().resumeAdmitted(); await f.settle();
+  assert.deepEqual(await readFile(agent.profilePath), bytes);
+  assert.equal(f.enrollmentCount(), 1);
+  assert.equal(f.sessionCount(), 2);
+  const resumed = Object.values(f.control().state.subjects)[0];
+  for (const field of ['agentId', 'codexHome', 'codexBin']) {
+    await writePrivateJson(agent.profilePath, { ...historical, [field]: historical[field] + '-changed' });
+    await assert.rejects(f.control().materialize(resumed), code('HOSTING_STATE_UNCONFIRMED'));
+    assert.equal(f.enrollmentCount(), 1);
+  }
+  await writePrivateJson(agent.profilePath, historical);
 });

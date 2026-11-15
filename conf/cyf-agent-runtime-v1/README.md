@@ -150,8 +150,14 @@ Each sealed manifest contains exact `installationId`, `tenantId`, `clientId`,
 `manifestSha256` (`sha256:` + SHA256 of recursively key-sorted unsigned JSON).
 Each profile explicitly selects the same `agentId`, a `profileId`, `codexBin`,
 `codexHome`, `codexWorkdir`, and existing per-operation executor policies. For
-example, `appServerEnabled` and `fastChatEnabled` select execution adapters;
-none imply readiness without the real adapter. Skill management is built in: no
+example, `chatEngine: "app-server"` selects the modern CHAT adapter, whose formal
+deliberation and real streaming are built in. The obsolete `typedDeliberationEnabled`,
+`fastChatEnabled`, `appServerEnabled`, and `trueDeltaEnabled` inputs are ignored,
+not toggles. Existing managed profile files may retain these four fields: recovery
+ignores only those fields without rewriting the file or frozen template; identity,
+paths and every other effective profile field must still match exactly.
+Readiness still requires the measured live adapter and native execution
+capability; profile/skill lifecycle policies and authorization remain unchanged. Skill management is built in: no
 `skillInstallEnabled` opt-in is required (historical values are ignored). Installation,
 position reconciliation and archive reconciliation still require a bound authenticated
 session, intact durable state and their existing command authorization. Per-skill

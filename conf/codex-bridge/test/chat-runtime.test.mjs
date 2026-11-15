@@ -19,7 +19,7 @@ import {
 } from '../app-server-adapter.mjs'
 import { bindChatDispatchAckToSession, normalizeInboundMessage, runFastChat, runProfileChat, MESSAGE_TYPES, disposeAppServerState } from '../agent-client.mjs'
 
-const profile = { profileId: 'profile-A', agentId: 'hosted-a', fastChatEnabled: false, appServerEnabled: false }
+const profile = { profileId: 'profile-A', agentId: 'hosted-a', chatEngine: 'app-server' }
 const fixturePath = resolve(import.meta.dirname, '..', 'contracts', 'api-hosted-wire-v1.json')
 const apiWire = () => JSON.parse(readFileSync(fixturePath, 'utf8'))
 const appContract = JSON.parse(readFileSync(resolve(import.meta.dirname, 'fixtures', 'codex-app-server-0.153.4-contract.json'), 'utf8'))
@@ -119,7 +119,7 @@ test('production Fast CHAT path emits only real schema-v1 delta/final with exact
     interrupt: async () => {},
     reconcileTurn: async () => ({ status: 'READBACK' })
   }
-  const result = await runFastChat({ ...profile, fastChatEnabled: true, appServerEnabled: true, trueDeltaEnabled: true }, message, {
+  const result = await runFastChat({ ...profile, }, message, {
     adapter, chatWorkdir: '/runtime-owned-empty-chat',
     bindingStore: { get: key => bindings.get(key), put: (key, value) => bindings.set(key, value), markRecovery: () => {} },
     sendProtocolFn: (type, payload) => frames.push({ type, payload })
@@ -168,7 +168,7 @@ test('Fast CHAT isolates host project docs and never resumes a pre-isolation bin
   }
   const options = { adapter, chatWorkdir: '/empty-chat', ...hashes,
     bindingStore: { get: key => bindings.get(key), put: (key, value) => bindings.set(key, value) }, sendProtocolFn: () => {} }
-  const enabled = { ...profile, fastChatEnabled: true, appServerEnabled: true }
+  const enabled = { ...profile, }
   const first = await runFastChat(enabled, message, options)
   const second = await runFastChat(enabled, message, options)
   assert.notEqual(first.threadKey, oldKey)
@@ -203,7 +203,7 @@ test('Fast CHAT persists unknown turn acceptance as recovery-required after read
     runTurn: async () => { throw Object.assign(new Error('turn/start timed out'), { code: 'TURN_ACCEPTANCE_UNKNOWN', reconciliation: { status: 'READBACK' } }) },
     reconcileTurn: async () => { throw new Error('must use existing readback') }
   }
-  await assert.rejects(() => runFastChat({ ...profile, fastChatEnabled: true, appServerEnabled: true }, message, {
+  await assert.rejects(() => runFastChat({ ...profile, }, message, {
     adapter, chatWorkdir: '/runtime-owned-empty-chat',
     bindingStore: { get: () => null, put: () => {}, markRecovery: (key, reason) => recovered.push({ key, reason }) },
     sendProtocolFn: () => assert.fail('unknown turn must not publish')
@@ -807,7 +807,7 @@ test('modern durable CHAT fails closed on binary trust mismatch and never invoke
     try { const measured = measureCodexAppServerBinary({ codexBin: bad, codexHome: root }, { cache: new Map(), temporaryRoot: root }); writeFileSync(bad, '#!/bin/sh\nexit 1\n'); verifyCodexAppServerBinaryIdentity({ codexBin: bad }, measured) } catch (error) { trustError = error }
     assert.equal(trustError?.code, 'APP_SERVER_BINARY_UNTRUSTED')
     let legacySpawns = 0
-    await assert.rejects(() => runProfileChat({ ...profile, fastChatEnabled: true, appServerEnabled: true }, normalizedWire({ route: 'CHAT' }), {
+    await assert.rejects(() => runProfileChat({ ...profile, }, normalizedWire({ route: 'CHAT' }), {
       adapterPromise: Promise.reject(trustError), chatWorkdir: root,
       runLegacy: async () => { legacySpawns++; return { status: 'completed' } }
     }), error => error.code === 'APP_SERVER_BINARY_UNTRUSTED')
@@ -1025,7 +1025,7 @@ test('Fast CHAT includes installed maintenance guidance without splitting thread
     conversationToolSession: { catalog: { tools: [{ name: 'maintenance' }], skills: [{ skillKey: 'some-position-skill' }] }, instructions: 'Verified installed maintenance guidance' } }
   for (const dispatchId of ['dispatch-a', 'dispatch-b']) {
     const message = normalizedWire({ route: 'CHAT', dispatchId })
-    await runFastChat({ ...profile, fastChatEnabled: true, appServerEnabled: true }, message, options)
+    await runFastChat({ ...profile, }, message, options)
   }
   assert.equal(keys[0], keys[1]); assert.equal(instructions.length, 2)
   assert.ok(instructions.every(text => text.includes('Verified installed maintenance guidance')))
@@ -1054,7 +1054,7 @@ test('delta context requires its native binding before resume and before turn/st
   const options = { adapter, chatWorkdir: '/runtime-owned-empty-chat',
     bindingStore: { get: () => null, put: () => assert.fail('no changed binding'), markRecovery: () => {} },
     sendProtocolFn: () => assert.fail('no final or delta before execution') }
-  const ready = { ...profile, fastChatEnabled: true, appServerEnabled: true }
+  const ready = { ...profile, }
   await assert.rejects(runFastChat(ready, m, options), { code: 'CHAT_CONTEXT_BOOTSTRAP_REQUIRED' })
   assert.equal(resumeCalls, 0); assert.equal(modelCalls, 0)
   options.bindingStore.get = () => ({ threadId: 'native-A', state: 'HOT' })
@@ -1087,7 +1087,7 @@ test('delta context plain final carries actual native receipt but incomplete nat
     const options = { adapter, chatWorkdir: '/runtime-owned-empty-chat',
       bindingStore: { get: () => ({ threadId: 'native-A', state: 'HOT' }), put: () => {}, markRecovery: () => {} },
       sendProtocolFn: (type, payload) => frames.push({ type, payload }) }
-    const call = runFastChat({ ...profile, fastChatEnabled: true, appServerEnabled: true }, makeMessage(), options)
+    const call = runFastChat({ ...profile, }, makeMessage(), options)
     if (Object.keys(patch).length) {
       await assert.rejects(call, { code: 'TURN_ACCEPTANCE_UNKNOWN' })
       assert.equal(frames.length, 0)
@@ -1115,7 +1115,7 @@ for (const outcome of ['completed', 'cancelled', 'TURN_FAILED', 'TURN_INTERRUPTE
         return { threadId: 'usage-thread', turnId: 'usage-turn', content: 'fixture', finishReason: 'completed', usageEvidence: evidence }
       }
     }
-    const call = runFastChat({ ...profile, fastChatEnabled: true, appServerEnabled: true, chatModel: 'requested' }, message, {
+    const call = runFastChat({ ...profile, chatModel: 'requested' }, message, {
       adapter, chatWorkdir: '/runtime-owned-empty-chat',
       controls: { markRunning() {}, isCancelled: () => outcome === 'cancelled',
         recordUsage: (phase, model, usageEvidence) => { observations.push({ phase, model, usageEvidence }); events.push(phase) } },
@@ -1129,3 +1129,22 @@ for (const outcome of ['completed', 'cancelled', 'TURN_FAILED', 'TURN_INTERRUPTE
     else { assert.equal(observations.length, 2); assert.deepEqual(observations[1].usageEvidence, evidence) }
   })
 }
+
+
+test('obsolete false feature switches cannot suppress an actual native CHAT delta or final', async () => {
+  const message = normalizedWire({ route: 'CHAT' }); const frames = []
+  const adapter = {
+    readback: {},
+    startOrResumeThread: async () => ({ threadId: 'native-built-in', state: 'HOT' }),
+    runTurn: async options => {
+      options.onAccepted({ threadId: 'native-built-in', turnId: 'turn-built-in' })
+      options.onDelta({ content: 'actual native delta' })
+      return { threadId: 'native-built-in', turnId: 'turn-built-in', content: 'actual native final' }
+    }
+  }
+  const result = await runFastChat({ ...profile, typedDeliberationEnabled: false,
+    fastChatEnabled: false, appServerEnabled: false, trueDeltaEnabled: false }, message,
+    { adapter, chatWorkdir: '/private/native-chat', sendProtocolFn: (type, payload) => frames.push({ type, payload }) })
+  assert.equal(result.status, 'completed')
+  assert.deepEqual(frames.map(frame => frame.payload.content), ['actual native delta', 'actual native final'])
+})

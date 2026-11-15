@@ -9,7 +9,7 @@ import { AgentMessageProcessor, runFastChat } from '../agent-client.mjs'
 import { toAgentWire } from '../agent-message-wire.mjs'
 
 const raw = JSON.parse(readFileSync(new URL('../contracts/api-hosted-wire-v1.json', import.meta.url)))
-const profile = { profileId: 'context-retry-test', agentId: raw.targetAgentId }
+const profile = { profileId: 'context-retry-test', agentId: raw.targetAgentId, chatEngine: 'app-server' }
 const delta = { schemaVersion: 1, mode: 'DELTA', baseTurnId: 'previous-turn', engineThreadId: 'native-A', afterMessageId: '1', throughMessageId: '2' }
 const makeMessage = (dispatchId = 'delta-attempt', plan = delta) => {
   const wire = structuredClone(raw)
@@ -105,7 +105,7 @@ test('same error code after native turn attempt is uncertainty, never a bootstra
   const adapter = { readback: {}, startOrResumeThread: async () => ({ threadId: 'native-A', state: 'HOT' }),
     runTurn: async () => { calls++; throw Object.assign(new Error('adapter failure'), { code: 'CHAT_CONTEXT_BOOTSTRAP_REQUIRED' }) },
     reconcileTurn: async () => { reconciliations++ } }
-  await assert.rejects(runFastChat({ ...profile, fastChatEnabled: true, appServerEnabled: true }, makeMessage(), {
+  await assert.rejects(runFastChat({ ...profile, }, makeMessage(), {
     adapter, chatWorkdir: '/runtime-owned-empty-chat',
     bindingStore: { get: () => ({ threadId: 'native-A', state: 'HOT' }), put: () => {}, markRecovery: () => {} },
     sendProtocolFn: () => assert.fail('no completed reply')

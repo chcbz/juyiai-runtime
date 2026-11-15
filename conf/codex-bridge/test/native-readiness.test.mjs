@@ -92,10 +92,10 @@ test('disposed native owner withdraws cached declaration and settles in-flight m
 
 test('new installation modern CHAT defaults include formal deliberation and isolated file delivery, not invented readiness', async () => {
   const { runtimeInstallationProfile, buildAgentRegistrationPayload } = await import('../agent-client.mjs')
-  const modern = { chatEngine: 'app-server', fastChatEnabled: true, appServerEnabled: true }
+  const modern = { chatEngine: 'app-server', }
   const a = runtimeInstallationProfile({ stateRoot: '/private/a/state', profile: { ...modern, agentId: 'a' } }, 'https://api.example.test')
   const b = runtimeInstallationProfile({ stateRoot: '/private/b/state', profile: { ...modern, agentId: 'b' } }, 'https://api.example.test')
-  assert.equal(a.typedDeliberationEnabled, true)
+  assert.equal(Object.hasOwn(a, 'typedDeliberationEnabled'), false)
   assert.equal(a.workspaceFileApiOrigin, 'https://api.example.test')
   assert.equal(a.workspaceFileRootDir, '/private/a/state/workspace-files')
   assert.notEqual(a.workspaceFileRootDir, b.workspaceFileRootDir)
@@ -104,6 +104,25 @@ test('new installation modern CHAT defaults include formal deliberation and isol
   const declaration = buildAgentRegistrationPayload(normalizeProfile(a, {}, 0, { isolated: true })).typedDeliberation
   assert.equal(declaration.state, 'UNAVAILABLE')
   assert.equal(declaration.nativeExecution, undefined)
-  assert.equal(runtimeInstallationProfile({ stateRoot: '/private/a/state', profile: { ...modern, typedDeliberationEnabled: false } }, 'https://api.example.test').typedDeliberationEnabled, false)
+  assert.equal(Object.hasOwn(runtimeInstallationProfile({ stateRoot: '/private/a/state', profile: { ...modern, typedDeliberationEnabled: false } }, 'https://api.example.test'), 'typedDeliberationEnabled'), false)
   assert.equal(runtimeInstallationProfile({ stateRoot: '/private/a/state', profile: {} }, 'https://api.example.test').typedDeliberationEnabled, undefined)
+})
+
+
+test('retired modern CHAT switches are absent from normalized profiles and cannot disable foundational capabilities', async () => {
+  const { runtimeInstallationProfile, normalizeProfile, buildAgentRegistrationPayload } = await import('../agent-client.mjs')
+  const keys = ['typedDeliberationEnabled', 'fastChatEnabled', 'appServerEnabled', 'trueDeltaEnabled']
+  for (const value of [undefined, false, true, 'false']) {
+    const legacy = Object.fromEntries(keys.map(key => [key, value]))
+    const installed = runtimeInstallationProfile({ stateRoot: '/private/new/state', profile: { agentId: 'new', chatEngine: 'app-server', ...legacy } }, 'https://api.example.test')
+    const normalized = normalizeProfile(installed, legacy, 0, { isolated: true })
+    for (const key of keys) {
+      assert.equal(Object.hasOwn(installed, key), false, `installed still contains ${key}`)
+      assert.equal(Object.hasOwn(normalized, key), false, `normalized still contains ${key}`)
+    }
+    const measured = { readback: { initialize: {}, schema: { measured: true } } }
+    assert.equal(buildAgentRegistrationPayload(normalized, null, true, measured).typedDeliberation.state, 'READY')
+    assert.equal(buildAgentRegistrationPayload(normalized).typedDeliberation.state, 'UNAVAILABLE')
+    assert.equal(normalized.workspaceFileRootDir, '/private/new/state/workspace-files')
+  }
 })

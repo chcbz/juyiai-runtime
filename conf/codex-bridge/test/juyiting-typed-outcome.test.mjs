@@ -13,7 +13,7 @@ import {
 
 const fixture = JSON.parse(readFileSync(resolve(import.meta.dirname, 'fixtures', 'typed-deliberation-client-result-v1.json'), 'utf8'))
 const facts = () => structuredClone(fixture.dispatchFacts)
-const profile = { profileId: 'p', agentId: 'agent-1', typedDeliberationEnabled: true, fastChatEnabled: true, appServerEnabled: true, chatEngine: 'app-server', chatSandbox: 'read-only', chatToolPolicy: 'read-only-constrained' }
+const profile = { profileId: 'p', agentId: 'agent-1', chatEngine: 'app-server', chatSandbox: 'read-only', chatToolPolicy: 'read-only-constrained' }
 const readyAdapter = () => ({ closed: false, readback: { initialize: { capabilities: {} }, schema: { measured: true, schemaContractId: 'codex-cli-0.153.4', cliVersion: '0.153.4', bundleSha256: 'b06f77062369d481a59cc70720c12b89cb9dd49c385863923262102d3ad6c978' } } })
 const message = typed => ({
   durable: true, route: 'CHAT', taskId: 'task-1', conversationId: 'conversation-1', conversationGeneration: '7', targetAgentId: 'agent-1',
@@ -64,7 +64,7 @@ test('proposal semantics bind operation and exact trusted source catalog without
 test('trusted typed dispatch is exact, bounded and bound to CHAT bounty task/conversation/agent', () => {
   assert.deepEqual(resolveTypedDeliberationRequest(profile, message(facts())), fixture.dispatchFacts)
   assert.equal(resolveTypedDeliberationRequest(profile, message(undefined)), null)
-  assert.throws(() => resolveTypedDeliberationRequest({ ...profile, typedDeliberationEnabled: false }, message(facts())), error => error.code === 'TYPED_DELIBERATION_DISABLED')
+  assert.deepEqual(resolveTypedDeliberationRequest({ ...profile, typedDeliberationEnabled: false }, message(facts())), fixture.dispatchFacts)
   for (const changed of [
     { route: 'INSPECT' }, { taskId: 'other' }, { conversationId: 'other' }, { conversationGeneration: '8' }, { targetAgentId: 'other' }
   ]) assert.throws(() => resolveTypedDeliberationRequest(profile, { ...message(facts()), ...changed }), error => error.code === 'TYPED_DELIBERATION_BINDING_INVALID')
@@ -79,8 +79,9 @@ test('trusted typed dispatch is exact, bounded and bound to CHAT bounty task/con
   const unknown = facts(); unknown.extra = true; assert.throws(() => validateTypedDeliberationFacts(unknown))
 })
 
-test('typed declaration is default-off, unavailable until exact measured live adapter, then READY', () => {
-  assert.equal(buildTypedDeliberationDeclaration({ ...profile, typedDeliberationEnabled: false }, readyAdapter()), null)
+test('typed declaration is built in for app-server, unavailable until measured live adapter, then READY', () => {
+  assert.equal(buildTypedDeliberationDeclaration({ ...profile, typedDeliberationEnabled: false }, readyAdapter()).state, 'READY')
+  assert.equal(buildTypedDeliberationDeclaration({ ...profile, chatEngine: 'legacy-codex' }, readyAdapter()), null)
   assert.equal(buildTypedDeliberationDeclaration(profile, null).state, 'UNAVAILABLE')
   assert.equal(buildTypedDeliberationDeclaration(profile, { ...readyAdapter(), closed: true }).state, 'UNAVAILABLE')
   assert.equal(buildTypedDeliberationDeclaration(profile, { ...readyAdapter(), readback: { initialize: {}, schema: { measured: false } } }).state, 'UNAVAILABLE')

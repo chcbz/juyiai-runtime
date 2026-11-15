@@ -3,6 +3,11 @@ import { lstatSync, readFileSync, realpathSync } from 'node:fs'
 import { isAbsolute, resolve, sep } from 'node:path'
 import { parseNativeApiOrigin } from './workspace-file-bridge.mjs'
 
+// Historical input compatibility only, not configurable feature gates.
+export const RETIRED_CHAT_SWITCHES = Object.freeze(['typedDeliberationEnabled', 'fastChatEnabled', 'appServerEnabled', 'trueDeltaEnabled'])
+export const withoutRetiredChatSwitches = profile => Object.fromEntries(
+  Object.entries(profile).filter(([key]) => !RETIRED_CHAT_SWITCHES.includes(key)))
+
 const fields = ['tenantId', 'clientId', 'ownerJiacn', 'agentId', 'generation', 'profileId']
 const exactKeys = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) &&
   Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key))
@@ -69,6 +74,7 @@ export const loadManagedChatScopes = path => {
 // Scope is the authorization boundary. No operator-template cwd is inherited: createProfileState
 // allocates a private CHAT directory from the full managed profile identity.
 export const applyManagedChatScope = (profile, source, scopes = emptyManagedChatScopes()) => {
+  profile = withoutRetiredChatSwitches(profile)
   const authorized = scopes.resolve(profile)
   if (!authorized) return profile
   const inspection = authorized.inspection
@@ -87,10 +93,6 @@ export const applyManagedChatScope = (profile, source, scopes = emptyManagedChat
     typedInspectionSupportedInputs: inspection.supportedInputs
   } : {}
   return { ...profile, ...inspectionControls,
-    fastChatEnabled: profile.fastChatEnabled ?? true,
-    appServerEnabled: profile.appServerEnabled ?? true,
-    typedDeliberationEnabled: profile.typedDeliberationEnabled ?? true,
-    trueDeltaEnabled: profile.trueDeltaEnabled ?? source.trueDeltaEnabled ?? false,
     chatEngine: profile.chatEngine ?? 'app-server',
     chatSandbox: profile.chatSandbox ?? 'read-only',
     chatToolPolicy: profile.chatToolPolicy ?? 'read-only-constrained',

@@ -780,7 +780,7 @@ test('only consumed materialsInput is published; duplicate inputCarriers and loc
   const unavailable = { declaration: () => null }; const ready = { declaration: () => declaration }
   assert.equal(Object.hasOwn(buildAgentRegistrationPayload(profile, null, false, null, unavailable), 'typedInspection'), false)
   assert.equal(Object.hasOwn(buildAgentPresencePayload(profile, 'online', { typedInspectionProfileRuntime: unavailable }), 'typedInspection'), false)
-  const payload = buildAgentRegistrationPayload({ ...profile, typedDeliberationEnabled: true }, null, true, null, ready)
+  const payload = buildAgentRegistrationPayload({ ...profile, chatEngine: 'app-server' }, null, true, null, ready)
   assert.deepEqual(payload.typedDeliberation.materialsInput, { schemaVersion: 1, supportedInputs: declaration.supportedInputs })
   assert.equal(Object.hasOwn(payload, 'inputCarriers'), false)
   assert.equal(JSON.stringify(payload).includes('enginePolicyDigest'), false)
@@ -801,17 +801,15 @@ test('typed inspection CA bundle path survives exact profile and fallback normal
 test('typed readiness uses live handshake and integrity, not selected CLI version or schema', () => {
   const legacy = CODEX_APP_SERVER_SCHEMA_CONTRACTS['codex-cli-0.153.4']; const native = CODEX_APP_SERVER_SCHEMA_CONTRACTS['codex-cli-0.159.2']
   const defaultProfile = normalizeProfile({ agentId: 'typed-default' })
-  assert.equal(defaultProfile.typedDeliberationEnabled, false)
+  assert.equal(Object.hasOwn(defaultProfile, 'typedDeliberationEnabled'), false)
   assert.equal(defaultProfile.appServerSchemaContractId, undefined)
   const defaultTypedProfile = normalizeProfile({
-    agentId: 'typed-default-ready', typedDeliberationEnabled: true, fastChatEnabled: true, appServerEnabled: true,
-    chatEngine: 'app-server', chatSandbox: 'read-only', chatToolPolicy: 'read-only-constrained'
+    agentId: 'typed-default-ready', chatEngine: 'app-server', chatSandbox: 'read-only', chatToolPolicy: 'read-only-constrained'
   })
   const adapter = contract => ({ closed: false, readback: { initialize: {}, schema: { ...contract, schemaContractId: contract.contractId, measured: true } } })
   assert.equal(buildAgentRegistrationPayload(defaultTypedProfile, null, true, adapter(legacy)).typedDeliberation.state, 'READY')
   const configured = normalizeProfile({
-    agentId: 'typed-agent', typedDeliberationEnabled: true, fastChatEnabled: true, appServerEnabled: true,
-    chatEngine: 'app-server', chatSandbox: 'read-only', chatToolPolicy: 'read-only-constrained',
+    agentId: 'typed-agent', chatEngine: 'app-server', chatSandbox: 'read-only', chatToolPolicy: 'read-only-constrained',
     appServerSchemaContractId: native.contractId
   })
   const liveNative = adapter(native)
@@ -837,8 +835,6 @@ test('typed readiness uses live handshake and integrity, not selected CLI versio
 test('capability contract advertises CHAT only after its read-only-constrained profile is configured', () => {
   const configured = {
     ...profile,
-    fastChatEnabled: true,
-    appServerEnabled: true,
     chatEngine: 'app-server',
     chatSandbox: 'read-only',
     chatToolPolicy: 'read-only-constrained',
@@ -863,8 +859,6 @@ test('capability contract advertises CHAT only after its read-only-constrained p
 test('capability contract refuses to advertise CHAT policy for a non-constrained Fast configuration', () => {
   const capabilities = buildAgentRegistrationPayload({
     ...profile,
-    fastChatEnabled: true,
-    appServerEnabled: true,
     chatEngine: 'app-server',
     chatSandbox: 'workspace-write',
     chatToolPolicy: 'read-only-constrained'
@@ -3771,7 +3765,7 @@ for (const startCase of ['transport', 'wrong-run', 'server-error', 'rejected']) 
   })
 }
 
-test('default-disabled modern durable CHAT is rejected without spawning the legacy runner', async () => {
+test('unsupported CHAT engine is rejected without spawning the legacy runner', async () => {
   const rootDir = temporaryDirectory(); const chatWorkdir = resolve(rootDir, 'empty-chat'); mkdirSync(chatWorkdir, { mode: 0o700 })
   const inbox = new PersistentCommandInbox({ rootDir, profile }); const chatInbox = new PersistentChatInbox({ rootDir, profile }); const chatAckOutbox = new ChatAckOutbox({ rootDir, profile })
   let legacySpawns = 0; const rejected = []
@@ -3785,7 +3779,7 @@ test('default-disabled modern durable CHAT is rejected without spawning the lega
   })
   processor.start(); const message = durableChat(91); await processor.handle(message); await processor.waitForIdle()
   assert.equal(legacySpawns, 0)
-  assert.ok(rejected.some(error => error.code === 'FAST_CHAT_FEATURE_DISABLED'))
+  assert.ok(rejected.some(error => error.code === 'FAST_CHAT_ENGINE_UNSUPPORTED'))
   const normalized = normalizeInboundMessage(message); const item = chatInbox.findByKey((await import('../chat-runtime.mjs')).durableChatKey(normalized))
   assert.equal(item.record.state, 'RECOVERY_REQUIRED')
 })
