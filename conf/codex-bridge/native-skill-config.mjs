@@ -22,8 +22,24 @@ export function nativeSkillOrigins(values) {
   })
   return Object.freeze([...new Set(origins)].sort())
 }
-export function loadNativeSkillConfiguration({ file, scope, command, entries }) {
-  if (command.toolPolicyRef !== NATIVE_SKILL_SCRIPT_POLICY || !entries.length || !file) return Object.freeze([])
+// Optional operator directory supports managed subjects without rewriting their
+// immutable hosting templates. Explicit per-profile files retain precedence.
+export function nativeSkillConfigurationPath(directory, scope) {
+  return resolve(directory, `${skillDigest(scopeKeys.map(key => scope[key]))}.json`)
+}
+export function loadNativeSkillConfiguration({ file, scope, command, entries, directory = process.env.CYF_NATIVE_SKILL_CONFIG_DIR }) {
+  if (command.toolPolicyRef !== NATIVE_SKILL_SCRIPT_POLICY || !entries.length) return Object.freeze([])
+  const derived = !file && Boolean(directory)
+  if (derived) {
+    try {
+      if (!isAbsolute(directory) || realpathSync(directory) !== resolve(directory)) fail('NATIVE_SKILL_CONFIG_UNSAFE')
+    } catch (error) {
+      if (typeof error?.code === 'string' && /^E[A-Z]+$/.test(error.code)) fail('NATIVE_SKILL_CONFIG_UNAVAILABLE')
+      throw error
+    }
+    file = nativeSkillConfigurationPath(directory, scope)
+  }
+  if (!file) return Object.freeze([])
   let config
   try {
     if (!isAbsolute(file) || realpathSync(file) !== resolve(file)) fail('NATIVE_SKILL_CONFIG_UNSAFE')
@@ -38,6 +54,7 @@ export function loadNativeSkillConfiguration({ file, scope, command, entries }) 
   } catch (error) {
     // A configured file can disappear or become unreadable during customer
     // maintenance. Scope that I/O failure to this execution, not the whole poll.
+    if (derived && error.code === 'ENOENT') return Object.freeze([])
     if (typeof error?.code === 'string' && /^E[A-Z]+$/.test(error.code)) fail('NATIVE_SKILL_CONFIG_UNAVAILABLE')
     throw error
   }

@@ -536,3 +536,16 @@ CYF任务先读`/home/isp/wsps/cyf/AGENTS.md`；本节不修改其他项目发�
 历史配置中的同名字段允许读取但忽略（包括false），不再写入生成的运行profile；升级不修改原始身份、历史状态或授权。
 是否READY仍取决于当前实测适配器/native Provider能力，缺Provider配置仍明确失败；关闭整个主体仍使用既有生命周期策略。
 v1注册报文保留三个Enabled同名的能力**结果**字段供旧消费者读取，不接受它们作为运行开关。
+
+### Managed-subject native skill configuration (2026-11-16 candidate)
+
+An operator may set `CYF_NATIVE_SKILL_CONFIG_DIR` to a canonical private directory.
+When no explicit profile `skillExecutionConfigFile` exists, native SCRIPT execution
+loads only `<sha256(JSON.stringify([tenantId,ownerJiacn,clientId,agentId]))>.json`
+from that directory, using the existing schemaVersion1/scope/installations schema
+and owner/0600/read-only delivery protections. Missing per-subject files mean no
+configuration; explicit profile files retain precedence and missing explicit files
+remain scoped errors. This provisions managed Agents without editing immutable
+hosting templates or journals. Only selected authorized installations receive
+configuration; it does not grant API authority, install skills or enable origins
+for other Agents. Credentials remain outside source and distributed packages.

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, rmSync, chmodSync, symlinkSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { tmpdir } from 'node:os'
-import { loadNativeSkillConfiguration, nativeSkillOrigins } from '../native-skill-config.mjs'
+import { loadNativeSkillConfiguration, nativeSkillOrigins, nativeSkillConfigurationPath } from '../native-skill-config.mjs'
 function fixture(t) {
   const root = mkdtempSync(resolve(tmpdir(), 'native-config-')); t.after(() => rmSync(root, { recursive: true, force: true }))
   const scope = { tenantId: 'tenant', ownerJiacn: 'owner', clientId: 'client', agentId: 'agent' }
@@ -67,4 +67,24 @@ test('hosted search is explicit, installation-bound and changes the pinned confi
   assert.deepEqual(loadNativeSkillConfiguration(f)[0], original)
   f.config.installations.installed1.webSearch = 'cached'; f.write()
   assert.throws(() => loadNativeSkillConfiguration(f), /WEB_SEARCH_INVALID/)
+})
+
+
+test('operator directory configures only an exact managed subject without modifying hosting facts', t => {
+  const f = fixture(t), file = nativeSkillConfigurationPath(f.root, f.scope)
+  writeFileSync(file, JSON.stringify(f.config), { mode: 0o600 })
+  const options = { ...f, file: undefined, directory: f.root }
+  assert.equal(loadNativeSkillConfiguration(options)[0].configuration.apiKey, 'synthetic-one')
+  assert.deepEqual(loadNativeSkillConfiguration({ ...options, scope: { ...f.scope, agentId: 'foreign' } }), [])
+  assert.deepEqual(loadNativeSkillConfiguration({ ...options, scope: { ...f.scope, ownerJiacn: 'foreign' } }), [])
+  assert.deepEqual(loadNativeSkillConfiguration({ ...options, scope: { ...f.scope, tenantId: 'foreign' } }), [])
+  assert.deepEqual(loadNativeSkillConfiguration({ ...options, scope: { ...f.scope, clientId: 'foreign' } }), [])
+  chmodSync(file, 0o644)
+  assert.throws(() => loadNativeSkillConfiguration(options), /UNSAFE/)
+})
+test('explicit profile config retains precedence and local-only work never reads directory', t => {
+  const f = fixture(t)
+  assert.equal(loadNativeSkillConfiguration({ ...f, directory: '/missing' })[0].configuration.apiKey, 'synthetic-one')
+  assert.deepEqual(loadNativeSkillConfiguration({ ...f, file: undefined, directory: '/missing', command: { toolPolicyRef: 'NATIVE_LOCAL_FILES_V1' } }), [])
+  assert.deepEqual(loadNativeSkillConfiguration({ ...f, file: undefined, directory: undefined }), [])
 })
