@@ -139,10 +139,10 @@ test('proxy missing for HTTPS rejected before dispatch', async t => {
 test('real fetch uses configured CONNECT proxy despite NO_PROXY, without paid request', async t => {
   const f = fixture(t); let connects = 0
   const proxy = createServer()
-  proxy.on('connect', (request, socket) => { connects++; assert.equal(request.url, 'speech.example.invalid:443'); socket.destroy() })
+  proxy.on('connect', (request, socket) => { connects++; assert.equal(request.url, 'speech.example.invalid:443'); socket.end('HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n') })
   await new Promise(resolve => proxy.listen(0, '127.0.0.1', resolve))
   try {
-    await assert.rejects(run(f.argv, { env: { HTTPS_PROXY: `http://127.0.0.1:${proxy.address().port}`, NO_PROXY: '*' } }), { code: 'AUDIO_OUTCOME_UNKNOWN' })
+    await assert.rejects(run(f.argv, { env: { HTTPS_PROXY: `http://127.0.0.1:${proxy.address().port}`, NO_PROXY: '*' }, fetchFn: (url, options) => fetch(url, { ...options, signal: AbortSignal.timeout(3000) }) }), { code: 'AUDIO_OUTCOME_UNKNOWN' })
     assert.ok(connects >= 1, 'must reach explicitly configured proxy')
   } finally { await new Promise(resolve => proxy.close(resolve)) }
 })
