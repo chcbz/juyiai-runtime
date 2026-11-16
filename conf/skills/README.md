@@ -20,3 +20,7 @@ Rebuild with `python3 package-archive-maintenance.py`; different bytes at a vers
 - The host executes the measured installed local script without Runtime credentials/provider keys. Backend job/position/resource grants own all write/publish decisions.
 - Preparation, reviewed package-catalog registration, installation receipt, runtime execution and publication are distinct gates. Tests use an isolated test-only approved row and no marketplace order.
 - Production registration must use the existing reviewed package/catalog workflow and content-addressed package store. No direct production SQL, credential or automatic activation is included here.
+
+## Audio transcription candidate (2026-11-16)
+
+`audio-transcription/` is an INSTRUCTION1.0.0 candidate with a dependency-free Node24.14+ multipart transcription helper, scoped configuration, source hashes, provider receipts/usage and durable no-auto-replay marker. See its [SKILL.md](audio-transcription/SKILL.md) and [configuration](audio-transcription/configuration.md). It requires an owner-authorized HTTP transcription provider and installed network/configuration; Realtime-only service is not sufficient. Existing document-workbench remains the document-output capability. Source/test/package preparation does not publish a marketplace product, purchase/install for 花荣, or prove real transcription. Task689 and prior unknown ASR effect are not replayed by this addition.
