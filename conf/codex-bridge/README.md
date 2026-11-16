@@ -277,3 +277,16 @@ catalog requests. Skill service environments and Runtime identity are separate.
 Operator provisioning, stopped cleanup and the offline one-time migration are
 specified in `../cyf-agent-runtime-v1/HOSTING-CONTROL.md`. No runtime legacy-env
 fallback or automatic credential rotation is implemented.
+
+
+### Material capability boundaries (2026-11-16 source change, not an installation claim)
+
+CHAT delivery validates the measured carrier contracts actually selected in the
+frozen manifest, not every unrelated format advertised at admission. Losing an
+unused audio/image format must not block a turn that only uses an unchanged file
+carrier. A missing/changed selected carrier still fails locally before delivery;
+identity, sandbox isolation, hashes and exact input receipts are unchanged.
+The carrier receipt proves delivery, not model comprehension. Unmatched files
+remain in the API-authorized source catalogue for model-selected native file
+execution; do not fabricate a preview carrier or infer that a model understands
+all files from a generic LOCAL_FILE transport declaration.

@@ -52,7 +52,7 @@ test('native CHAT passes a normalized JPEG path but binds the original receipt',
   const config={mediaKind:'image',mimeType:'image/jpeg',carrier:'LOCAL_IMAGE',carrierContractDigest:`sha256:${'a'.repeat(64)}`}
   const source={...config,sourceRefId:'source_1',sha256:hash(bytes),byteLength:String(bytes.length),bytes,path}
   const result=await prepareChatMaterials({profile:{},message:{},
-    materials:{authorizationId:'materials_test',manifestDigest:`sha256:${'b'.repeat(64)}`,manifest:{profile:{supportedInputs:[config]}}},
+    materials:{authorizationId:'materials_test',manifestDigest:`sha256:${'b'.repeat(64)}`,manifest:{profile:{supportedInputs:[config]},sources:[source]}},
     materializer:{materialize:async()=>({directory:dir,sources:[source]})},
     profileRuntime:{contractReadback:{measured:true,toolPolicy:'MANIFEST_READ_ONLY',recovery:'durable-inbox-turn-readback-v1',supportedInputs:[config]},mapInputPath:path=>path},
     adapters:{localImage:{supportedMimeTypes:['image/png'],toNativeInput:({path})=>({type:'localImage',path})}}})

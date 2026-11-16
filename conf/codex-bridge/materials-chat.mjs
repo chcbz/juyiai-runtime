@@ -70,8 +70,13 @@ export async function prepareChatMaterials({ profile, message, materials, materi
   const measured = profileRuntime?.contractReadback
   if (!materializer || measured?.measured !== true || !['STRICT_NO_TOOLS', 'MANIFEST_READ_ONLY'].includes(measured.toolPolicy)
       || measured.recovery !== 'durable-inbox-turn-readback-v1') fail('MATERIALS_CARRIER_UNAVAILABLE')
-  for (const input of materials.manifest.profile.supportedInputs) {
-    if (!measured.supportedInputs?.some(item => canonicalSha256(item) === canonicalSha256(input))) fail('MATERIALS_CARRIER_BINDING_CHANGED')
+  // Validate only carriers this turn actually uses. A refresh of an unrelated
+  // advertised format is not a reason to reject authorized material delivery.
+  // Selected carriers still require their measured isolation/adapter contract.
+  for (const source of materials.manifest.sources) {
+    if (!measured.supportedInputs?.some(item =>
+      (item.mimeType === source.mimeType || (item.mimeType === '*/*' && item.carrier === 'LOCAL_FILE'))
+      && item.carrier === source.carrier && item.carrierContractDigest === source.carrierContractDigest)) fail('MATERIALS_CARRIER_BINDING_CHANGED')
   }
   const materialized = await materializer.materialize({ message, typed: materials, contract: 'materials' })
   const sources = materialized.sources.map(source => {

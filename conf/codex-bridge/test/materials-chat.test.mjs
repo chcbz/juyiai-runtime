@@ -119,6 +119,13 @@ test('missing measured carrier and tool isolation fails before native turn, neve
   await assert.rejects(runFastChat(profile, c.message, c.options), /MATERIALS_CARRIER_BINDING_CHANGED/)
   assert.equal(c.starts, 0); assert.equal(c.fetched.length, 0)
 })
+test('changed selected carrier digest fails before download or native turn', async t => {
+  const c = context(t)
+  c.runtime.contractReadback.supportedInputs = c.runtime.contractReadback.supportedInputs.map(item =>
+    ({ ...item, carrierContractDigest: `sha256:${'0'.repeat(64)}` }))
+  await assert.rejects(runFastChat(profile, c.message, c.options), /MATERIALS_CARRIER_BINDING_CHANGED/)
+  assert.equal(c.starts, 0); assert.equal(c.fetched.length, 0)
+})
 test('completed material CHAT terminal readback is recovered without model execution or refetch', async t => {
   const c = context(t); await runFastChat(profile, c.message, c.options)
   let persisted
@@ -386,13 +393,14 @@ for (const fileTools of [false, true]) test(`production CHAT wiring retains one 
   assert.equal(buildAgentRegistrationPayload(selectedProfile, null, true, state.appServerAdapter).typedDeliberation.state, 'UNAVAILABLE')
 })
 
-test('generic file manifest keeps real MIME and prepares a path descriptor, not decoded content', async () => {
+test('generic file keeps real MIME and delivery when an unused advertised carrier disappears', async () => {
   const message = structuredClone(messageFixture()), data = Buffer.from([0xff, 0x00, 0x22])
   const original = message.contextSnapshot.facts.materialsInput.manifest.sources[0]
   const format = { mediaKind: 'file', mimeType: '*/*', carrier: 'LOCAL_FILE', carrierContractDigest: `sha256:${'d'.repeat(64)}` }
   const source = { ...original, mimeType: 'application/x-custom', carrier: 'LOCAL_FILE',
     carrierContractDigest: format.carrierContractDigest, byteLength: String(data.length), sha256: sha(data) }
-  const manifest = { schemaVersion: 1, profile: { schemaVersion: 1, supportedInputs: [format] }, sources: [source] }
+  const unused = { mediaKind: 'audio', mimeType: 'audio/wav', carrier: 'LOCAL_AUDIO', carrierContractDigest: `sha256:${'e'.repeat(64)}` }
+  const manifest = { schemaVersion: 1, profile: { schemaVersion: 1, supportedInputs: [format, unused] }, sources: [source] }
   const binding = Object.fromEntries(['tenantId','ownerJiacn','clientId','conversationId','conversationGeneration','taskId','requestId','turnId','targetAgentId'].map(key => [key, String(message[key])]))
   const manifestDigest = canonicalSha256({ domain: 'juyiting.materials-input', binding, manifest })
   message.contextSnapshot.facts.materialsInput = { schemaVersion: 1, manifestDigest, authorizationId: `materials_${manifestDigest.slice(7,47)}`, manifest }
