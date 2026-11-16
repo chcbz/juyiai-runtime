@@ -3096,11 +3096,12 @@ const nativeJsonFixture = (url, data, status = 200) => {
   Object.defineProperty(response, 'url', { value: String(url) })
   return response
 }
-test('workspace file runtime auth stays process-memory only and profile configuration rejects a supplied header', () => {
+test('native runtime auth is installation-derived in memory and profile configuration rejects a supplied header', () => {
   const source = readFileSync(new URL('../agent-client.mjs', import.meta.url), 'utf8')
   assert.match(source, /workspaceFileRuntimeAuthHeader must not be configured/)
-  assert.match(source, /const auth = state\.workspaceFileRuntimeAuthHeader \|\| ''/)
-  assert.match(source, /workspaceFileRuntimeAuthHeader: state\.workspaceFileRuntimeAuthHeader/)
+  assert.match(source, /state\.workspaceFileRuntimeAuthHeader = state\.runtimeTransport\.headers\(\)\.Authorization/)
+  assert.match(source, /state\.workspaceFileRuntimeAuthHeader = ''/)
+  assert.doesNotMatch(source, /runWorkspaceFileCommand|startWorkspaceFilePoller/)
   assert.doesNotMatch(source, /runtimeAuthHeader: profile\.workspaceFileRuntimeAuthHeader/)
 })
 
@@ -4624,6 +4625,14 @@ test('native poller resets local discovery on every authenticated start and reco
   } finally { stopNativeConversationPoller(state) }
 })
 
+
+const lifecycleAdapter = conversationKey => {
+  const adapter = Object.assign(new EventEmitter(), { closed: false, readback: { initialize: {}, schema: { measured: true } },
+    ...(conversationKey ? { typedInspectionEngineState: { conversationKey } } : {}),
+    shutdown: async () => { adapter.closed = true; adapter.emit('exit') }
+  })
+  return adapter
+}
 
 test('profile live owner retires bootstrap, joins shutdown and ignores stale exit without faking readiness', async () => {
   const state = {}, bootstrap = lifecycleAdapter(), warm = lifecycleAdapter('conversation')

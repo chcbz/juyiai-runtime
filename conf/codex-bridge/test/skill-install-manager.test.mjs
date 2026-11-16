@@ -1,3 +1,4 @@
+import { parseSkillManifest } from '../skill-manifest.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync } from 'node:fs'
@@ -441,17 +442,32 @@ test('executable malformed manifest, manifest identity and package-local script 
   })
 })
 
-test('real SE2 packages install without granting or probing legacy runner capabilities', async t => {
-  const inputs = JSON.parse(readFileSync(new URL('../toolchain/skill-packages-se2/release-inputs.json', import.meta.url)))
-  for (const item of inputs.packages) await t.test(item.skillKey, async t => {
-    const bytes = readFileSync(new URL(`../toolchain/skill-packages-se2/${item.packageFile}`, import.meta.url))
-    assert.equal(bytes.length, item.packageByteLength); assert.equal(hash(bytes), item.packageSha256)
+// The exported tree includes current package sources, not historical release ZIPs.
+// Test these exact tracked bytes/identities; W08 separately covers frozen archives.
+const sourceSe2Package = skillKey => {
+  const root = new URL(`../toolchain/skill-packages-se2/${skillKey}/`, import.meta.url)
+  const manifest = readFileSync(new URL('manifest.json', root))
+  const identity = JSON.parse(manifest.toString())
+  assert.equal(identity.skillKey, skillKey)
+  const parsed = parseSkillManifest(manifest.toString(), { skillKey, skillVersion: identity.skillVersion })
+  const skill = readFileSync(new URL('SKILL.md', root))
+  const bytes = zip([{ name: 'SKILL.md', data: skill }, { name: 'manifest.json', data: manifest }])
+  return { item: { ...identity, manifestSha256: parsed.manifestSha256 }, skill, manifest, bytes, packageSha256: hash(bytes) }
+}
+
+test('tracked SE2 source packages install without granting or probing legacy runner capabilities', async t => {
+  for (const skillKey of ['image-generate', 'image-edit', 'analysis', 'text-file']) await t.test(skillKey, async t => {
+    const { item, bytes, packageSha256, skill, manifest } = sourceSe2Package(skillKey)
     const f = setup(t), target = { skillInstallationId: `si_${item.skillKey}`, productVersionId: `spv_${item.skillKey}`, skillVersion: item.skillVersion,
-      packageSha256: item.packageSha256, manifestSha256: item.manifestSha256, byteLength: String(bytes.length), kind: 'EXECUTABLE' }
+      packageSha256, manifestSha256: item.manifestSha256, byteLength: String(bytes.length), kind: 'EXECUTABLE' }
     f.add({ target, bytes }); f.manager.verifyCandidate = () => assert.fail('installation must not probe a runner')
     const c = command(target, { skillKey: item.skillKey })
     assert.equal(outcome(await f.manager.handle(c)), 'PREPARED'); assert.equal(outcome(await f.manager.handle(activate(c))), 'APPLIED')
     const descriptor = f.manager.listInstalledSkills()[0]; assert.equal(descriptor.manifest.entrypoint, item.entrypoint)
+    assert.deepEqual(readFileSync(resolve(f.home, 'skills', item.skillKey, 'SKILL.md')), skill)
+    assert.deepEqual(readFileSync(resolve(f.home, 'skills', item.skillKey, 'manifest.json')), manifest)
+    assert.equal(descriptor.manifestSha256, item.manifestSha256)
+    assert.equal(descriptor.packageSha256, packageSha256)
     const registry = new SkillRegistry({ scope: binding.scope, loadInstalled: () => f.manager.listInstalledSkills(), runnerRegistry: new Map() })
     registry.setSession(binding.fence)
     assert.equal((await registry.refresh()).skills[0].readiness, 'DEPENDENCY_MISSING')
@@ -674,13 +690,9 @@ test('ordinary SKILL.md without metadata.version installs with approved external
 })
 
 test('K2 image package stays installed and discovery reports unavailable without a legacy runner', async t => {
-  const inputs = JSON.parse(readFileSync(new URL('../toolchain/skill-packages-se2/release-inputs.json', import.meta.url)))
-  const item = inputs.packages.find(row => row.skillKey === 'image-edit')
-  assert.ok(item)
-  const bytes = readFileSync(new URL(`../toolchain/skill-packages-se2/${item.packageFile}`, import.meta.url))
-  assert.equal(hash(bytes), item.packageSha256)
+  const { item, bytes, packageSha256 } = sourceSe2Package('image-edit')
   const target = { skillInstallationId: 'si_image_edit', productVersionId: 'spv_image_edit', skillVersion: item.skillVersion,
-    packageSha256: item.packageSha256, manifestSha256: item.manifestSha256, byteLength: String(bytes.length), kind: 'EXECUTABLE' }
+    packageSha256, manifestSha256: item.manifestSha256, byteLength: String(bytes.length), kind: 'EXECUTABLE' }
   const f = setup(t); f.add({ target, bytes }); f.manager.verifyCandidate = () => assert.fail('runner probe is not installation authorization')
   const prepare = command(target, { skillKey: item.skillKey })
   assert.equal(outcome(await f.manager.handle(prepare)), 'PREPARED')
