@@ -443,19 +443,21 @@ test('executable malformed manifest, manifest identity and package-local script 
 })
 
 // The exported tree includes current package sources, not historical release ZIPs.
-// Test these exact tracked bytes/identities; W08 separately covers frozen archives.
-const sourceSe2Package = skillKey => {
+// Preserve manifests; synthetic SKILL.md metadata is explicit for legacy native-model
+// sources whose exported document version differs. W08 covers frozen archives.
+const sourceSe2Package = (skillKey, alignFixtureVersion = true) => {
   const root = new URL(`../toolchain/skill-packages-se2/${skillKey}/`, import.meta.url)
   const manifest = readFileSync(new URL('manifest.json', root))
   const identity = JSON.parse(manifest.toString())
   assert.equal(identity.skillKey, skillKey)
   const parsed = parseSkillManifest(manifest.toString(), { skillKey, skillVersion: identity.skillVersion })
-  const skill = readFileSync(new URL('SKILL.md', root))
+  const sourceSkill = readFileSync(new URL('SKILL.md', root))
+  const skill = alignFixtureVersion ? Buffer.from(sourceSkill.toString().replace(/^(  version: )"[^"]+"$/m, `$1"${identity.skillVersion}"`)) : sourceSkill
   const bytes = zip([{ name: 'SKILL.md', data: skill }, { name: 'manifest.json', data: manifest }])
   return { item: { ...identity, manifestSha256: parsed.manifestSha256 }, skill, manifest, bytes, packageSha256: hash(bytes) }
 }
 
-test('tracked SE2 source packages install without granting or probing legacy runner capabilities', async t => {
+test('SE2 manifest fixtures install without granting or probing legacy runner capabilities', async t => {
   for (const skillKey of ['image-generate', 'image-edit', 'analysis', 'text-file']) await t.test(skillKey, async t => {
     const { item, bytes, packageSha256, skill, manifest } = sourceSe2Package(skillKey)
     const f = setup(t), target = { skillInstallationId: `si_${item.skillKey}`, productVersionId: `spv_${item.skillKey}`, skillVersion: item.skillVersion,
@@ -472,6 +474,16 @@ test('tracked SE2 source packages install without granting or probing legacy run
     registry.setSession(binding.fence)
     assert.equal((await registry.refresh()).skills[0].readiness, 'DEPENDENCY_MISSING')
   })
+})
+
+for (const skillKey of ['analysis', 'text-file']) test(`exported legacy ${skillKey} mismatched document version is rejected without installation`, async t => {
+  const { item, bytes, packageSha256 } = sourceSe2Package(skillKey, false)
+  const target = { skillInstallationId: `si_${skillKey}`, productVersionId: `spv_${skillKey}`, skillVersion: item.skillVersion,
+    packageSha256, manifestSha256: item.manifestSha256, byteLength: String(bytes.length), kind: 'EXECUTABLE' }
+  const f = setup(t); f.add({ target, bytes })
+  const result = await f.manager.handle(command(target, { skillKey }))
+  assert.equal(outcome(result), 'FAILED')
+  assert.equal(f.manager.listInstalledSkills().length, 0)
 })
 
 test('upgrade preserves exact installed packages without probing legacy runner readiness', async t => {
