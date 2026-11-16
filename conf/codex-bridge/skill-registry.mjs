@@ -1,5 +1,5 @@
 import { skillDigest } from './skill-executor.mjs'
-import { validateManagement, validateNativeTaskSkillBinding } from './skill-management-wire.mjs'
+import { validateManagement, validateExecutionBinding } from './skill-management-wire.mjs'
 const fail = code => { throw Object.assign(new Error(code), { code }) }
 const hash = value => typeof value === 'string' && /^[0-9a-f]{64}(?![\s\S])/.test(value)
 const exact = value => typeof value === 'string' && value.length > 0 && value === value.trim() && !/[\x00-\x1f\x7f]/u.test(value)
@@ -107,18 +107,18 @@ export class SkillRegistry {
   // Resolve only the API-authorized immutable package. Installation storage
   // verifies its tree/marker; readiness and tool authorization are separate.
   // Do not use this method to grant tool, network or Provider permissions.
-  async requireNativePackage(skill, { taskBinding } = {}) {
+  async requireNativePackage(skill, { executionBinding } = {}) {
     const fence = this.fence, epoch = this.epoch
-    if (!fence || !taskBinding || !object(skill)) fail('SKILL_EXECUTION_BINDING_CHANGED')
-    validateNativeTaskSkillBinding(taskBinding)
+    if (!fence || !executionBinding || !object(skill)) fail('SKILL_EXECUTION_BINDING_CHANGED')
+    validateExecutionBinding(executionBinding)
     const fields = ['skillKey', 'skillVersion', 'packageSha256', 'manifestSha256']
-    if (taskBinding.agentId !== this.scope.agentId || fields.some(key => taskBinding[key] !== skill[key])) fail('SKILL_EXECUTION_BINDING_CHANGED')
-    const rows = await this.loadRetained(taskBinding.skillInstallationId)
+    if (executionBinding.agentId !== this.scope.agentId || fields.some(key => executionBinding[key] !== skill[key])) fail('SKILL_EXECUTION_BINDING_CHANGED')
+    const rows = await this.loadRetained(executionBinding.skillInstallationId)
     if (!Array.isArray(rows)) fail('SKILL_EXECUTION_BINDING_CHANGED')
-    const matches = rows.filter(row => row.skillInstallationId === taskBinding.skillInstallationId)
+    const matches = rows.filter(row => row.skillInstallationId === executionBinding.skillInstallationId)
     if (matches.length !== 1) fail('SKILL_EXECUTION_BINDING_CHANGED')
     const row = matches[0]
-    if ([...fields, 'productVersionId', 'approvedPermissionsSha256'].some(key => row[key] !== taskBinding[key])
+    if ([...fields, 'productVersionId', 'approvedPermissionsSha256'].some(key => row[key] !== executionBinding[key])
         || !exact(row.packageRoot) || !hash(row.packageTreeDigest)
         || row.kind !== 'INSTRUCTION' || row.manifest !== null || row.manifestSha256 !== null
         || this.fence !== fence || this.epoch !== epoch) fail('SKILL_EXECUTION_BINDING_CHANGED')

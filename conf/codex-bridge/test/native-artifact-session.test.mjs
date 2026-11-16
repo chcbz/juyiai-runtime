@@ -8,7 +8,7 @@ import { SkillExecutionStore } from '../skill-execution-store.mjs'
 import { validateNativeOutputSnapshot } from '../native-output-format.mjs'
 function fixture(t) {
   const root = mkdtempSync(resolve(tmpdir(), 'cyf-native-artifacts-')); t.after(() => rmSync(root, { recursive: true, force: true }))
-  const command = { executionProtocolVersion: 5, executionId: 'execution1', snapshotDigest: 'a'.repeat(64), inputRefs: [], outputs: { dataSchema: null, mimeTypes: ['text/plain', 'text/html'], multiple: true, artifactsRequired: true } }
+  const command = { executionProtocolVersion: 6, executionId: 'execution1', snapshotDigest: 'a'.repeat(64), inputRefs: [], outputs: { dataSchema: null, mimeTypes: ['text/plain', 'text/html'], multiple: true, artifactsRequired: true } }
   const store = new SkillExecutionStore({ rootDirectory: root, scope: { agentId: 'agent1' }, command })
   const session = new NativeArtifactSession({ store, checkActive() {}, validateSnapshot: validateNativeOutputSnapshot })
   const binding = { executionId: command.executionId, threadId: 'thread1', turnId: 'turn1' }; session.bindTurn(binding)

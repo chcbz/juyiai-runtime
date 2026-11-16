@@ -6,7 +6,7 @@ import { parseStrictJson } from './api-envelope.mjs'
 import { validateMessage } from './message-envelope.mjs'
 
 const schema = JSON.parse(readFileSync(new URL('./schemas/management-contract-v1.schema.json', import.meta.url)))
-const nativeTaskSkillBindingSchema = JSON.parse(readFileSync(new URL('./schemas/native-task-skill-binding-v5.schema.json', import.meta.url)))
+const executionBindingSchema = JSON.parse(readFileSync(new URL('./schemas/execution-binding-v6.schema.json', import.meta.url)))
 // The Runtime installer/validator imports the transport for offline collation
 // before node_modules exists. Load the already-declared validator only when an
 // actual management DTO is consumed, not during stdlib-only payload preparation.
@@ -49,12 +49,12 @@ export function validateManagement(definition, value) {
   if (!validators.get(definition)(value)) fail()
   return value
 }
-// V5 only: syntax permits null; the authorized installed descriptor determines
+// V6 only: syntax permits null; the authorized installed descriptor determines
 // whether null is appropriate. This is not a tool authorization check.
-export function validateNativeTaskSkillBinding(value) {
+export function validateExecutionBinding(value) {
   managementCanonicalJson(value)
-  const engine = managementAjv(), key = nativeTaskSkillBindingSchema.$id
-  if (!validators.has(key)) validators.set(key, engine.compile(nativeTaskSkillBindingSchema))
+  const engine = managementAjv(), key = executionBindingSchema.$id
+  if (!validators.has(key)) validators.set(key, engine.compile(executionBindingSchema))
   if (!validators.get(key)(value)) fail()
   return value
 }

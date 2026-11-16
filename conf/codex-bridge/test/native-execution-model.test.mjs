@@ -23,7 +23,7 @@ test(withSkill ? 'real isolated model discovers and executes a fixed ordinary sk
   const root = mkdtempSync(resolve(tmpdir(), 'cyf-native-model-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
   const directory = name => { const path = resolve(root, name); mkdirSync(path, { mode: 0o700 }); return path }
-  const command = { executionProtocolVersion: 5, executionId: `probe-${randomUUID()}`, commandId: `command-${randomUUID()}`, messageId: randomUUID(), snapshotDigest: createHash('sha256').update(randomUUID()).digest('hex'),
+  const command = { executionProtocolVersion: 6, executionId: `probe-${randomUUID()}`, commandId: `command-${randomUUID()}`, messageId: randomUUID(), snapshotDigest: createHash('sha256').update(randomUUID()).digest('hex'),
     skills: [], inputRefs: ['input1'], parameters: {}, toolPolicyRef: 'NATIVE_LOCAL_FILES_V1',
     instruction: 'Use your shell tool to read /inputs/input1. Create /outputs/result.txt containing exactly the original input bytes, with no changes. Do not quote the contents in chat. Stage the real file with artifact_stage using mediaTypeHint text/plain and displayName result.txt. Call result_propose selecting that artifact, summary copied, data null. Then finish. Do not make network calls.',
     outputs: { dataSchema: null, mimeTypes: ['text/plain'], multiple: false, artifactsRequired: true } }

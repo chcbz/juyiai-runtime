@@ -55,7 +55,6 @@ import { skillDigest } from './skill-executor.mjs'
 import { SkillRegistry } from './skill-registry.mjs'
 import { ExecutionReportOutbox } from './report-outbox.mjs'
 import { RegistrationAckObserver, sendRegistrationWithAckObservation } from './registration-ack.mjs'
-import { WorkspaceFileBridge, WorkspaceFileBridgeError, parseWorkspaceFileCommand } from './workspace-file-bridge.mjs'
 import { buildNativeBountyExecutionDeclaration } from './native-bounty-capability.mjs'
 import {
   assertDistinctControlledImageLedgerRoots,
@@ -98,25 +97,6 @@ export const workspaceFileToolchain = () => Object.freeze({
   tool: WORKSPACE_FILE_DELIVERY_TOOL,
   ready: existsSync(WORKSPACE_FILE_TOOLCHAIN_PYTHON) && existsSync(WORKSPACE_FILE_DELIVERY_TOOL)
 })
-
-export const validateWorkspaceFileOutput = ({ contentType, path }) => {
-  const toolchain = workspaceFileToolchain()
-  if (!toolchain.ready) throw new Error('release-local delivery toolchain is unavailable')
-  const result = spawnSync(toolchain.python, [toolchain.tool, 'validate', '--mime', contentType, '--file', path], {
-    stdio: 'ignore', timeout: 30000
-  })
-  if (result.error || result.status !== 0 || result.signal) throw new Error('delivery output could not be reopened')
-}
-
-const workspaceFileToolchainEnvironment = () => {
-  const toolchain = workspaceFileToolchain()
-  return toolchain.ready ? {
-    CYF_WORKSPACE_FILE_TOOLCHAIN_PYTHON: toolchain.python,
-    CYF_WORKSPACE_FILE_DELIVERY_TOOL: toolchain.tool,
-    PATH: `${dirname(toolchain.python)}:${process.env.PATH || ''}`
-  } : {}
-}
-
 
 export const PROCESS_RUNTIME_INSTANCE_ID = randomUUID()
 export const PROTOCOL_VERSION = 1
@@ -4163,11 +4143,12 @@ export const buildAgentPresencePayload = (_profile, status, extra = {}) => ({
 
 // Task readiness uses the D06 task command contract only. Taskless SM-C1
 // management is declared by skillExecution and handled by its durable manager.
+const TASK_COMMAND_TYPES = Object.freeze(['TASK_INVITE', 'WORK_ITEM_EXECUTE', 'WORK_ITEM_RESUME', 'REQUEST_RESPOND', 'REVIEW_EXECUTE', 'CONTEXT_REFRESH'])
 export const runtimeReadyCommandTypes = state => {
   if (!state || state.disposed || state.processor.failClosedError) return []
   // WORK_ITEM_CANCEL has no independently verified exact command cancel adapter.
   return state.workspaceManager && state.commandAdapterReady
-    ? ['TASK_INVITE', 'WORK_ITEM_EXECUTE', 'WORK_ITEM_RESUME', 'REQUEST_RESPOND', 'REVIEW_EXECUTE', 'CONTEXT_REFRESH'] : []
+    ? [...TASK_COMMAND_TYPES] : []
 }
 
 export const buildAgentRegistrationPayload = (profile, nativeRuntime = null, online = false, appServerAdapter = null,
@@ -4392,6 +4373,10 @@ export class CodexSessionError extends Error {
     this.code = code
   }
 }
+
+// Shared executor event decoder, independent of the retired file-delivery lane.
+const isExactImageGenerationResult = event => event && event.type === 'image_generation_call'
+  && event.status === 'completed' && typeof event.result === 'string' && event.result.length > 0
 
 const safeCodexImageArgs = (imagePaths, codexWorkdir) => {
   if (!Array.isArray(imagePaths) || imagePaths.length === 0) return []
@@ -5085,208 +5070,6 @@ export const buildConfigurationReport = runtimeConfig => ({
 })
 
 
-const strictWorkspaceFileCommand = message => {
-  try { return parseWorkspaceFileCommand(message?.payload) } catch { return null }
-}
-
-/**
- * Makes the private file boundary explicit to the model. The browser's original instruction stays
- * intact, while paths are copied only from an already strict-validated manifest. This avoids the
- * previous implicit assumption that a model would guess both the input filename and the sole
- * uploadable output path.
- */
-const isImageContentType = value => value === 'image/png' || value === 'image/jpeg'
-const imageResultSignature = contentType => contentType === 'image/png'
-  ? Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
-  : Buffer.from([0xff, 0xd8, 0xff])
-
-const isExactImageGenerationResult = event => event && event.type === 'image_generation_call'
-  && event.status === 'completed' && typeof event.result === 'string' && event.result.length > 0
-
-const workspaceImageOutputs = command => command.outputs.filter(output => isImageContentType(output.contentType))
-
-export const materializeImageGenerationResult = ({ command, runDirectory, imageResults, validateOutput = validateWorkspaceFileOutput }) => {
-  const outputs = workspaceImageOutputs(command)
-  if (outputs.length !== 1) {
-    throw new AgentProtocolError('WORKSPACE_IMAGE_OUTPUT_AMBIGUOUS', 'image workspace delivery requires exactly one declared PNG or JPEG output')
-  }
-  const results = imageResults.filter(isExactImageGenerationResult)
-  if (results.length === 0) {
-    throw new AgentProtocolError('WORKSPACE_IMAGEGEN_RESULT_MISSING', 'Codex completed without one materializable built-in imagegen result')
-  }
-  if (results.length !== 1) {
-    throw new AgentProtocolError('WORKSPACE_IMAGEGEN_RESULT_AMBIGUOUS', 'Codex returned multiple built-in imagegen results for one declared output')
-  }
-
-  const output = outputs[0]
-  let bytes
-  try { bytes = Buffer.from(results[0].result, 'base64') } catch {
-    throw new AgentProtocolError('WORKSPACE_IMAGEGEN_RESULT_INVALID', 'built-in imagegen result could not be decoded')
-  }
-  const signature = imageResultSignature(output.contentType)
-  if (bytes.length < signature.length || !bytes.subarray(0, signature.length).equals(signature) || bytes.length > output.maxLength) {
-    throw new AgentProtocolError('WORKSPACE_IMAGEGEN_RESULT_INVALID', 'built-in imagegen result does not match the declared raster output')
-  }
-
-  const sourceDirectory = resolve(runDirectory, 'scratch', '.imagegen')
-  const sourcePath = resolve(sourceDirectory, `generated-${randomUUID()}${output.contentType === 'image/png' ? '.png' : '.jpg'}`)
-  const targetPath = resolve(runDirectory, ...output.relativePath.split('/'))
-  if (!targetPath.startsWith(`${resolve(runDirectory)}${sep}`) || !sourcePath.startsWith(`${resolve(runDirectory)}${sep}`)) {
-    throw new AgentProtocolError('WORKSPACE_IMAGEGEN_RESULT_INVALID', 'imagegen materialization escaped the private run directory')
-  }
-  mkdirSync(sourceDirectory, { recursive: true, mode: 0o700 })
-  try {
-    writeFileSync(sourcePath, bytes, { mode: 0o600, flag: 'wx' })
-    validateOutput(Object.freeze({ contentType: output.contentType, path: sourcePath, length: bytes.length }))
-    if (existsSync(targetPath)) {
-      const destination = lstatSync(targetPath)
-      if (!destination.isFile() || destination.isSymbolicLink()) {
-        throw new AgentProtocolError('WORKSPACE_IMAGE_OUTPUT_UNSAFE', 'declared image output is not a replaceable private regular file')
-      }
-      unlinkSync(targetPath)
-    }
-    mkdirSync(dirname(targetPath), { recursive: true, mode: 0o700 })
-    copyFileSync(sourcePath, targetPath, fsConstants.COPYFILE_EXCL)
-    chmodSync(targetPath, 0o600)
-    return Object.freeze({ relativePath: output.relativePath, length: bytes.length })
-  } catch (error) {
-    try { if (existsSync(sourcePath)) unlinkSync(sourcePath) } catch {}
-    if (error instanceof AgentProtocolError) throw error
-    throw new AgentProtocolError('WORKSPACE_IMAGEGEN_RESULT_INVALID', 'built-in imagegen result could not be validated and materialized')
-  }
-}
-
-const workspaceFileImageInputPaths = (command, runDirectory) => {
-  if (!command.outputs.some(output => isImageContentType(output.contentType))) return []
-  return command.inputs
-    .map(input => resolve(runDirectory, input.relativePath))
-    .filter(path => ['.png', '.jpg', '.jpeg'].includes(extname(path).toLowerCase()))
-}
-
-export const workspaceFilePrompt = (message, command) => {
-  const request = resolvePrompt(message).trim()
-  const inputs = command.inputs.map(item => `- ${item.relativePath} (read-only input)`).join('\n')
-  const outputs = command.outputs.map(item => `- ${item.relativePath} (${item.contentType}; required delivery)`).join('\n')
-  const imageDelivery = command.outputs.some(output => isImageContentType(output.contentType))
-  const formatGuidance = imageDelivery
-    ? 'For PNG or JPEG outputs, use the authenticated Codex imagegen capability for the actual generation or edit. Do not use deterministic overlays, templates, or placeholder drawings as a substitute. When an image input is attached, it is the edit target: preserve the user-requested invariants. Invoke the built-in imagegen capability exactly once for the one declared image output. Do not create a PNG/JPEG yourself: after a completed imagegen call, the runtime will materialize that exact generated raster into the declared output and validate it. If imagegen cannot complete the request, fail rather than fabricate a result.'
-    : 'For DOCX, XLSX, PPTX, or PDF outputs, first inspect every declared source input and perform the requested semantic change in that original document. A new “modification notes” page, a worksheet named “修改说明”, a title-only change, or an appended PDF note is not a completed edit. Use local content-aware document tooling or a purpose-built script to update the source content, preserve requested invariants, write only the declared output path, then run the release-local delivery tool validate command on that exact output. The helper’s create shortcut may initialize a brand-new file, but it is not an edit engine and must never be used to substitute a generic requirement summary for the requested document.'
-  const networkGuidance = imageDelivery
-    ? 'Use no ad-hoc network or API calls. The authenticated built-in imagegen capability is the only allowed image-generation path.'
-    : 'Do not use network access.'
-  return [
-    'You are completing one private, file-bound Agent delivery run.',
-    'User request:',
-    request || '(No user instruction was supplied; do not invent a deliverable.)',
-    '',
-    'Controlled file contract:',
-    'Inputs (do not modify):', inputs,
-    'Deliverables (create every declared path with the declared file type):', outputs,
-    'The release-local delivery tool is available as $CYF_WORKSPACE_FILE_DELIVERY_TOOL and its Python as $CYF_WORKSPACE_FILE_TOOLCHAIN_PYTHON.',
-    formatGuidance,
-    'The helper performs a real file-format reopen check. A PDF change must alter the requested original content; never append a change-note page or annotation-only page as a substitute. If required PDF reconstruction may change layout, say so before producing the output; do not claim pixel-identical layout.',
-    'Use scratch/ only for temporary unpacking, scripts, or intermediate files. Do not create files outside inputs/, outputs/, or scratch/.',
-    'Delivery execution authorization: creating and validating the declared output is permitted even when the request contains a generic ban on shell commands. Limit any local command to the release-local delivery tool, its pinned Python, or a short script stored in scratch/ that writes only a declared output. Do not run unrelated commands.',
-    `${networkGuidance} Do not read unrelated user or host files, and do not report success unless each declared deliverable exists at its exact path and reopens successfully.`,
-    'Preserve requested content and structure where feasible; output must remain in the declared file format.'
-  ].join('\n')
-}
-
-const workspaceFileFailure = (message, error) => ({
-  status: 'failed',
-  taskId: message.taskId || message.workItemId || message.commandId || '',
-  workItemId: message.workItemId || '',
-  commandId: message.commandId || '',
-  errorMessage: `${error.code || 'WORKSPACE_FILE_ERROR'}: ${error.message}`
-})
-
-export const runWorkspaceFileCommand = async ({
-  profile, message, workspaceFileBridge, workspaceFileRuntimeAuthHeader = '', runCodexFn = runCodex,
-  materializeImageFn = materializeImageGenerationResult, sendStatusFn = sendStatus
-}) => {
-  const command = strictWorkspaceFileCommand(message)
-  if (!command) return null
-  if (!workspaceFileBridge || !/^AgentRuntime rts1_[0-9a-f]{64}$/.test(workspaceFileRuntimeAuthHeader)) {
-    return workspaceFileFailure(message, new AgentProtocolError(
-      'WORKSPACE_FILE_RUNTIME_UNAVAILABLE',
-      'Strict workspace file command requires controlled runtime API origin, root, and AgentRuntime authorization configuration'
-    ))
-  }
-
-  const title = message.title || message.currentTaskTitle || 'Codex 执行任务'
-  let materialized = false; let cleanupProof; let terminalConfirmed = false
-  const imageResults = []
-  let result
-  sendStatusFn(profile, 'busy', { taskId: message.taskId || command.taskId, title })
-  try {
-    const materializedRun = await workspaceFileBridge.materializeInputs(message.payload, {
-      runtimeAuthHeader: workspaceFileRuntimeAuthHeader,
-      runtimeAgentId: profile.agentId,
-      runtimeInstanceId: profile?.runtimeInstanceId || PROCESS_RUNTIME_INSTANCE_ID
-    })
-    materialized = true; cleanupProof = materializedRun.cleanupProof
-    await workspaceFileBridge.startExecution(message.payload, {
-      commandId: message.commandId,
-      messageId: message.messageId,
-      runtimeAuthHeader: workspaceFileRuntimeAuthHeader,
-      runtimeAgentId: profile.agentId,
-      runtimeInstanceId: profile?.runtimeInstanceId || PROCESS_RUNTIME_INSTANCE_ID
-    })
-    const outcome = await runCodexFn(profile, {
-      ...message,
-      prompt: workspaceFilePrompt(message, command)
-    }, 'command', {
-      codexWorkdir: materializedRun.runDirectory,
-      requireWorkspace: false,
-      forceNewSession: true,
-      imagePaths: workspaceFileImageInputPaths(command, materializedRun.runDirectory),
-      onImageGenerationResult: event => imageResults.push(event),
-      env: workspaceFileToolchainEnvironment(),
-      sendLegacyFn: () => {},
-      sendStatusFn: () => {}
-    })
-    if (outcome?.status !== 'completed') {
-      result = outcome || workspaceFileFailure(message, new Error('Codex did not return an execution outcome'))
-    } else {
-      if (workspaceImageOutputs(command).length) {
-        materializeImageFn({ command, runDirectory: materializedRun.runDirectory, imageResults })
-      }
-      const committed = await workspaceFileBridge.uploadOutputsAndCommit(message.payload, {
-        runtimeAuthHeader: workspaceFileRuntimeAuthHeader,
-        runtimeAgentId: profile.agentId,
-        runtimeInstanceId: profile?.runtimeInstanceId || PROCESS_RUNTIME_INSTANCE_ID
-      })
-      terminalConfirmed = true
-      result = { ...outcome, workspaceFileManifestId: committed.manifestId }
-    }
-  } catch (error) {
-    result = workspaceFileFailure(message, error instanceof WorkspaceFileBridgeError || error instanceof AgentProtocolError
-      ? error
-      : new AgentProtocolError('WORKSPACE_FILE_ERROR', 'workspace file command failed'))
-    if (['START_OUTCOME_UNKNOWN', 'COMMIT_FAILED', 'UPLOAD_FAILED'].includes(error?.code)) result.status = 'recovery_required'
-  } finally {
-    if (materialized && result?.status === 'failed') {
-      const match = /^([A-Z][A-Z0-9_]{0,99}):/.exec(result.errorMessage || '')
-      try {
-        await workspaceFileBridge.reportFailure(message.payload, match?.[1] || 'CODEX_EXECUTION_FAILED', {
-          runtimeAuthHeader: workspaceFileRuntimeAuthHeader,
-          runtimeAgentId: profile.agentId,
-          runtimeInstanceId: profile?.runtimeInstanceId || PROCESS_RUNTIME_INSTANCE_ID
-        })
-        terminalConfirmed = true
-      } catch { result.status = 'recovery_required' }
-    }
-    if (profile.runtimeIdentity && terminalConfirmed && cleanupProof && result?.status !== 'recovery_required') result.workspaceCleanup = cleanupProof
-    if (materialized && !profile.runtimeIdentity && result?.status !== 'recovery_required') {
-      try { workspaceFileBridge.cleanup(message.payload) } catch (error) {
-        result = workspaceFileFailure(message, error)
-      }
-    }
-    sendStatusFn(profile, 'online')
-  }
-  return result
-}
-
 // E05 is the existing command-bound reassignment lane, not every TASK command.
 // Read the original codec payload so normalization cannot erase its lease binding.
 export const e05ReassignmentBinding = (profile, message) => {
@@ -5516,192 +5299,32 @@ const runE05Command = async ({ profile, message, binding, workspaceManager, runC
 }
 
 export const runManagedCommand = async ({
-  profile, message, skillInstallManager, workspaceManager, workspaceFileBridge, workspaceFileRuntimeAuthHeader = '', runCodexFn = runCodex,
-  materializeImageFn = materializeImageGenerationResult, sendLegacyFn = sendLegacy, sendStatusFn = sendStatus,
+  profile, message, skillInstallManager, workspaceManager, runCodexFn = runCodex,
   nativeFetch, apiOrigin, commandCheckpoint, now = Date.now, signal, sessionCurrent, onSkillInstallChanged = null
 }) => {
   if (isManagementMessage(message)) return skillInstallManager.handle(message)
+  const payload = message.rawPayload?.payload || message.payload
+  if ([message, message.rawPayload, payload].some(value => value && Object.hasOwn(value, 'executionProtocolVersion'))) {
+    throw new AgentProtocolError('UNSUPPORTED_EXECUTION_PROTOCOL', 'Native execution uses its authenticated inbox, not a task command wrapper')
+  }
   const binding = e05ReassignmentBinding(profile, message)
   if (binding) return runE05Command({ profile, message, binding, workspaceManager, runCodexFn,
     nativeFetch, apiOrigin, commandCheckpoint, now, signal, sessionCurrent })
-  const workspaceFileResult = await runWorkspaceFileCommand({
-    profile, message, workspaceFileBridge, workspaceFileRuntimeAuthHeader, runCodexFn, materializeImageFn, sendStatusFn
-  })
-  if (workspaceFileResult) {
-    // Private workspace runs have no public task projection. A successfully committed output
-    // manifest is their only completion fact; sending legacy task reports would target a fake task.
-    return workspaceFileResult
+  if (message.commandType === 'WORKSPACE_FILE_EXECUTE' || payload?.actionType === 'workspace_file_execute'
+      || payload && (Object.hasOwn(payload, 'inputManifest') || Object.hasOwn(payload, 'outputManifest'))) {
+    throw new AgentProtocolError('UNSUPPORTED_RETIRED_PROTOCOL', 'Workspace file execution is retired; use native conversation execution')
   }
   if (['SKILL_INSTALL', 'SKILL_SET_ENABLED', 'SKILL_RECONCILE'].includes(message.commandType)) throw new AgentProtocolError('SKILL_MANAGEMENT_SCHEMA_REQUIRED', 'Management requires SM-C1 command envelope')
+  // D06 task adapters are a separate explicit contract, not a fallback for a
+  // native inbox command (including unknown/retired versions in a task wrapper).
+  if (!TASK_COMMAND_TYPES.includes(message.commandType)) {
+    throw new AgentProtocolError('UNSUPPORTED_EXECUTION_PROTOCOL', 'Command is not an admitted task adapter; native execution uses its authenticated inbox')
+  }
   return runCodexFn(profile, message, 'command', { workspaceManager, requireWorkspace: true })
 }
 
-const WORKSPACE_FILE_QUEUE_PATH = '/internal/agent/tasks/workspace-executions/commands'
-
-const workspaceQueueTransportCode = error => {
-  if (error?.name === 'AbortError') return 'WORKSPACE_FILE_QUEUE_TRANSPORT_ABORTED'
-  // A fixed allow-list yields actionable diagnostics without serializing arbitrary error text,
-  // request headers, targets, or other transport-provided metadata.
-  const code = typeof error?.cause?.code === 'string' ? error.cause.code : ''
-  return new Set(['ECONNREFUSED', 'ECONNRESET', 'EHOSTUNREACH', 'ENETUNREACH', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET']).has(code)
-    ? `WORKSPACE_FILE_QUEUE_TRANSPORT_${code}`
-    : 'WORKSPACE_FILE_QUEUE_TRANSPORT'
-}
-
-const exactResponseUrl = (response, endpoint) => {
-  if (response?.redirected === true || typeof response?.url !== 'string' || !response.url) return false
-  try {
-    const observed = new URL(response.url)
-    return observed.origin === endpoint.origin && observed.pathname === endpoint.pathname
-      && !observed.search && !observed.hash && !observed.username && !observed.password
-  } catch {
-    return false
-  }
-}
-
-/**
- * Native clients pull only their own durable workspace-file commands. This deliberately uses the
- * existing persistent inbox so crashes/restarts retain the same dedupe and recovery semantics as
- * websocket-delivered commands.
- */
-export const pollWorkspaceFileCommands = async ({ profile, state, current = () => true, fetchFn = state?.runtimeTransport?.nativeFetch || globalThis.fetch } = {}) => {
-  if (!profile || !state?.workspaceFileBridge || !state?.processor) return { dispatched: 0, rejected: 0, received: 0, admitted: 0 }
-  const auth = state.workspaceFileRuntimeAuthHeader || ''
-  if (!/^AgentRuntime rts1_[0-9a-f]{64}$/.test(auth) || typeof fetchFn !== 'function') {
-    throw new AgentProtocolError('WORKSPACE_FILE_RUNTIME_UNAVAILABLE', 'workspace runtime polling is not configured')
-  }
-  const endpoint = new URL(WORKSPACE_FILE_QUEUE_PATH, state.workspaceFileBridge.apiOrigin)
-  const request = {
-    method: 'GET', redirect: 'error',
-    headers: {
-      Authorization: auth,
-      Accept: 'application/json',
-      'X-Agent-Id': profile.agentId,
-      'X-Agent-Runtime-Id': profile.runtimeInstanceId || PROCESS_RUNTIME_INSTANCE_ID
-    }
-  }
-  let response
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      response = await fetchFn(endpoint, request)
-      break
-    } catch (error) {
-      // A stale undici reusable socket can fail before this read-only GET is sent. Retry that
-      // exact transport condition once; never retry a write or broaden this to other failures.
-      if (attempt === 0 && error?.cause?.code === 'UND_ERR_SOCKET') continue
-      // Fetch errors intentionally stay opaque: transport details can contain request targets.
-      throw new AgentProtocolError(workspaceQueueTransportCode(error), 'workspace runtime command pickup failed')
-    }
-  }
-  if (!current()) {
-    try { await response?.body?.cancel?.() } catch { /* best-effort transport disposal */ }
-    return { dispatched: 0, rejected: 0, received: 0, admitted: 0 }
-  }
-  if (!response || !Number.isInteger(response.status)) {
-    throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_RESPONSE', 'workspace runtime command pickup returned no valid response')
-  }
-  if (response.status !== 200) {
-    throw new AgentProtocolError(`WORKSPACE_FILE_QUEUE_HTTP_${response.status}`, 'workspace runtime command pickup was rejected')
-  }
-  if (response.redirected === true) {
-    throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_REDIRECT', 'workspace runtime command pickup redirected')
-  }
-  if (!exactResponseUrl(response, endpoint)) {
-    throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_URL', 'workspace runtime command pickup returned an unexpected URL')
-  }
-  const contentType = response.headers?.get?.('content-type') || ''
-  if (contentType && !/^application\/json(?:\s*;|$)/i.test(contentType)) {
-    throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_CONTENT_TYPE', 'workspace runtime command pickup returned an invalid content type')
-  }
-  let body
-  try { body = await readNativeJson(response) } catch {
-    throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_JSON', 'workspace runtime command pickup returned invalid JSON')
-  }
-  if (!isObject(body) || Object.keys(body).some(key => key !== 'items') || !Array.isArray(body.items) || body.items.length > 16) {
-    throw new AgentProtocolError('WORKSPACE_FILE_QUEUE_ENVELOPE', 'workspace runtime command pickup returned an invalid envelope')
-  }
-  let dispatched = 0
-  let rejected = 0
-  let admitted = 0
-  for (const item of body.items) {
-    if (!current()) break // A stopped/replaced discovery pass cannot admit a late response.
-    try {
-      const privateCommand = fromAgentWire(JSON.stringify(item))
-      const normalized = normalizeInboundMessage(privateCommand)
-      if (normalized.messageType !== MESSAGE_TYPES.COMMAND_DISPATCH
-          || normalized.commandType !== 'WORKSPACE_FILE_EXECUTE'
-          || normalized.targetAgentId !== profile.agentId
-          || !strictWorkspaceFileCommand(normalized)) {
-        throw new AgentProtocolError('WORKSPACE_FILE_COMMAND_INVALID', 'workspace runtime command is not an authorized file execution command')
-      }
-      const result = await state.processor.handle(JSON.stringify(privateCommand))
-      if (result?.kind === 'rejected') throw result.error
-      dispatched += 1
-      if (result?.kind === 'command') admitted += 1
-    } catch (error) {
-      rejected += 1
-      state.processor.onReject?.(
-        error instanceof AgentProtocolError ? error : new AgentProtocolError('WORKSPACE_FILE_COMMAND_INVALID', `workspace runtime command is invalid (${['PROTOCOL_INVALID_MESSAGE', 'AGENT_MESSAGE_INVALID', 'PROTOCOL_INVALID_JSON'].includes(error?.code) ? error.code : 'DECODE_OR_VALIDATION'}; rootKeys=${isObject(item) ? Object.keys(item).length : -1}; versionType=${typeof item?.protocolVersion}; dataType=${isObject(item?.data) ? 'object' : typeof item?.data}; replyFields=${['correlationId', 'code', 'msg'].map(key => !hasOwn(item || {}, key) ? 'absent' : item[key] === null ? 'null' : typeof item[key]).join(',')}; eventTypeValid=${typeof item?.messageType === 'string' && /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+$/.test(item.messageType)})`),
-        item
-      )
-    }
-  }
-  return { dispatched, rejected, received: body.items.length, admitted }
-}
-
-export const stopWorkspaceFilePoller = state => {
-  if (!state) return
-  state.workspaceFileWakeup?.stop()
-  state.workspaceFileWakeup = null
-  // Stopping admission must not release an in-flight owner's guard.
-}
-
-export const startWorkspaceFilePoller = (profile, state) => {
-  stopWorkspaceFilePoller(state)
-  if (!state?.workspaceFileBridge || !/^AgentRuntime rts1_[0-9a-f]{64}$/.test(state.workspaceFileRuntimeAuthHeader || '')) return
-  let observedDrain = null
-  const current = () => state.workspaceFileWakeup === loop && state.ws?.readyState === WebSocketClient.OPEN && !state.processor.paused
-  const loop = new NativeConversationWakeup({
-    eventDriven: state.workspaceFileWorkNotifications === 1,
-    current,
-    // The existing processor owns inbox recovery and execution. Discovery never replays UNKNOWN.
-    nextRecoveryAt: () => Infinity,
-    poll: async () => {
-      if (state.workspaceFilePollInFlight) return { status: 'BUSY' }
-      state.workspaceFilePollInFlight = true
-      try {
-        const polling = pollWorkspaceFileCommands({ profile, state, current })
-        state.workspaceFilePollPromise = polling
-        return await polling
-      } finally { state.workspaceFilePollInFlight = false }
-    },
-    onReport: result => {
-      if (result.rejected) console.warn(`workspace command rejected | profile=${profile.profileId} | count=${result.rejected}`)
-      // HTTP admission is not a claim. A full page can be the same durable commands while
-      // execution is active: wait for that processor drain, not a zero-delay rediscovery loop.
-      const drain = state.processor.drainPromise
-      if (drain && drain !== observedDrain) {
-        observedDrain = drain
-        const settled = () => {
-          if (observedDrain === drain) observedDrain = null
-          if (current()) loop.wake()
-        }
-        void drain.then(settled, settled)
-      } else if (!drain && result.received === 16 && result.admitted > 0) {
-        // Fast completion may have already cleared drainPromise before the HTTP pass finishes.
-        loop.wake()
-      }
-    },
-    onError: error => {
-      console.warn(`workspace command poll unavailable | profile=${profile.profileId} | code=${error.code || 'WORKSPACE_FILE_QUEUE_UNAVAILABLE'}`)
-    }
-  })
-  state.workspaceFileWakeup = loop
-  void loop.start()
-}
-
 // Native discovery is event-driven only after the current registration ACK confirms support.
-// Recovery reads local pending records independently; file discovery has its own negotiated lane.
+// Recovery reads current native pending records independently.
 export const stopNativeConversationPoller = state => {
   if (!state) return
   state.conversationNativeWakeup?.stop()
@@ -5954,14 +5577,6 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
   const workspaceManager = workspacePolicy
     ? new GitWorkspaceManager({ policy: workspacePolicy, agentId: profile.agentId, role: profile.workspaceRole }).initialize()
     : null
-  const workspaceFileBridge = profile.workspaceFileApiOrigin && profile.workspaceFileRootDir
-    ? new WorkspaceFileBridge({
-      apiOrigin: profile.workspaceFileApiOrigin,
-      rootDir: profile.workspaceFileRootDir,
-      fetchFn: (url, options) => getProfileState(profile)?.runtimeTransport?.nativeFetch(url, options) || Promise.reject(new AgentProtocolError('RUNTIME_SESSION_REQUIRED', 'Native session required')),
-      validateOutput: validateWorkspaceFileOutput
-    })
-    : null
   const nativeFetch = profile.runtimeIdentity ? (url, options) => {
     const transport = getProfileState(profile)?.runtimeTransport
     if (!transport?.nativeFetch) return Promise.reject(new AgentProtocolError('RUNTIME_SESSION_REQUIRED', 'Current native session is required'))
@@ -6067,8 +5682,6 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
     })() : true,
     ws: null,
     heartbeatTimer: null,
-    workspaceFileWakeup: null,
-    workspaceFilePollInFlight: false,
     conversationNativePollTimer: null,
     conversationNativePollInFlight: false,
     reconnectTimer: null,
@@ -6099,7 +5712,6 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
     skillInstallManager,
     skillRegistry: null,
     workspaceManager,
-    workspaceFileBridge,
     conversationNativeLane,
     nativeBountyExecutionRuntime,
     controlledImageV3SourceRuntime,
@@ -6223,8 +5835,8 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
       const generation = profile.runtimeIdentity ? transport.headers()['X-Agent-Session-Generation'] : null
       const controller = new AbortController()
       state.e05CommandAbort = controller
-      return legacyExecutionGate.run(() => runManagedCommand({ profile, message, skillInstallManager, workspaceManager, workspaceFileBridge,
-        workspaceFileRuntimeAuthHeader: state.workspaceFileRuntimeAuthHeader, commandCheckpoint, apiOrigin: profile.runtimeApiOrigin,
+      return legacyExecutionGate.run(() => runManagedCommand({ profile, message, skillInstallManager, workspaceManager,
+        commandCheckpoint, apiOrigin: profile.runtimeApiOrigin,
         nativeFetch: transport?.nativeFetch, signal: controller.signal,
         onSkillInstallChanged: phase => { if (phase === 'changing') state.skillRegistry?.invalidate(); else void refreshMeasuredSkills(state) },
         sessionCurrent: () => state.runtimeTransport === transport && transport?.ready?.()
@@ -6319,10 +5931,6 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
       ? executionReportOutbox.acknowledgeReceipt(message)
       : skillInstallManager.acknowledgeResultReceipt(message),
     recoverCommandOutcome: message => skillInstallManager.reconcileCommandOutcome(message),
-    onCommandTerminalConfirmed: profile.runtimeIdentity ? (message, proof) => {
-      if (!strictWorkspaceFileCommand(message) || !workspaceFileBridge) throw new AgentProtocolError('RUNTIME_CLEANUP_CONTEXT_INVALID', 'Cleanup requires original workspace command')
-      return workspaceFileBridge.cleanupConfirmed(message.payload, proof)
-    } : null,
     onReject: (error, raw) => {
       console.warn(`protocol message rejected | profile=${profile.profileId} | code=${error.code} | ${error.message}`)
       sendProtocol(MESSAGE_TYPES.PROTOCOL_ERROR, {
@@ -6515,7 +6123,6 @@ const disposeProfileStateOnce = async (state, reason) => {
   state.executionReportReplayCancel?.(); state.executionReportReplayCancel = null
   clearReconnectState(state)
   clearInterval(state.heartbeatTimer)
-  stopWorkspaceFilePoller(state)
   stopNativeConversationPoller(state)
   state.registration.disconnect()
   state.workspaceFileRuntimeAuthHeader = ''
@@ -6533,7 +6140,7 @@ const disposeProfileStateOnce = async (state, reason) => {
   state.processor.stop()
   if (profile.runtimeIdentity) {
     // Keep host/Agent writer locks until every owned native operation actually ends.
-    await Promise.allSettled([state.workspaceFilePollPromise, state.conversationNativePollPromise].filter(Boolean))
+    await Promise.allSettled([state.conversationNativePollPromise].filter(Boolean))
     await state.processor.runtimeAckTail; await state.processor.waitForIdle()
   }
   if (getProfileState(profile) === state) profileStates.delete(profileStateKey(profile))
@@ -6705,8 +6312,6 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
         bindSkillSession: binding => bindMeasuredSkillSession(entry.state, binding),
         bindWorkNotifications: version => { entry.state.nativeWorkNotifications = version === 1 ? 1 : null },
         nativeWorkAvailable: () => { entry.state.conversationNativeWakeup?.wake() },
-        bindWorkspaceFileWorkNotifications: version => { entry.state.workspaceFileWorkNotifications = version === 1 ? 1 : null },
-        workspaceFileWorkAvailable: () => { entry.state.workspaceFileWakeup?.wake() },
         matchesSkillManagementAck: envelope => entry.state?.skillInstallManager.matchesDurableAckEnvelope(envelope) === true,
         matchesSkillInstallResult: envelope => entry.state?.skillInstallManager.matchesDurableResultEnvelope(envelope) === true,
         matchesSkillInstallReceipt: receipt => entry.state?.skillInstallManager.matchesDurableResultReceipt(receipt) === true,
@@ -6717,7 +6322,7 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
           try { state.ackOutbox.pendingEnvelopes(); return state.skillInstallManager.isHealthy() } catch { return false }
         },
         registrationPayload: () => ({ ...buildAgentRegistrationPayload(entry.profile, entry.state.nativeBountyExecutionRuntime,
-          true, entry.state.appServerAdapter, entry.state.typedInspectionProfileRuntime, entry.state.controlledImageV3SourceRuntime, entry.state.skillRegistry, entry.state.nativeExecutionProfileRuntime), nativeWorkNotifications: 1, workspaceFileWorkNotifications: 1 }),
+          true, entry.state.appServerAdapter, entry.state.typedInspectionProfileRuntime, entry.state.controlledImageV3SourceRuntime, entry.state.skillRegistry, entry.state.nativeExecutionProfileRuntime), nativeWorkNotifications: 1 }),
         readyCommandTypes: () => runtimeReadyCommandTypes(entry.state),
         skillManagementReady: () => Boolean(entry.state && !entry.closed && !entry.state.disposed && entry.state.skillInstallManager.isHealthy()),
         chatReady: () => Boolean(entry.state?.appServerAdapter && !entry.state.appServerAdapter.closed),
@@ -6743,13 +6348,12 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
           startBoundedSkillResultReplay({ manager: state.skillInstallManager, replayToken: skillReplayToken,
             isStable: () => state.runtimeTransport?.reportReady() && state.skillInstallManager.session === skillReplayToken })
           if (state.runtimeTransport.ready()) {
-            startWorkspaceFilePoller(entry.profile, state)
             startNativeConversationPoller(entry.profile, state)
             // New executions use the protocol5 native conversation poll, never an image lane.
           }
         },
-        suspendAdmission: () => { const state = entry.state; state.skillRegistry?.setSession(null); state.skillInstallManager?.bindSession(null); state.processor.pause(); stopWorkspaceFilePoller(state); stopNativeConversationPoller(state) },
-        disconnected: () => { const state = entry.state; state.skillRegistry?.setSession(null); state.skillInstallManager?.bindSession(null); state.e05CommandAbort?.abort(); state.processor.pause(); state.ws = null; stopWorkspaceFilePoller(state); stopNativeConversationPoller(state); state.workspaceFileRuntimeAuthHeader = '' },
+        suspendAdmission: () => { const state = entry.state; state.skillRegistry?.setSession(null); state.skillInstallManager?.bindSession(null); state.processor.pause(); stopNativeConversationPoller(state) },
+        disconnected: () => { const state = entry.state; state.skillRegistry?.setSession(null); state.skillInstallManager?.bindSession(null); state.e05CommandAbort?.abort(); state.processor.pause(); state.ws = null; stopNativeConversationPoller(state); state.workspaceFileRuntimeAuthHeader = '' },
         ready: () => Boolean(!entry.closed && entry.state && !entry.state.disposed && !entry.state.processor.failClosedError && entry.state.runtimeTransport?.ready?.()),
         pause: async () => { entry.state?.e05CommandAbort?.abort(); entry.state?.processor.pause(); if (entry.state) { entry.state.skillRegistry?.setSession(null); entry.state.skillInstallManager?.bindSession(null); entry.state.runtimeTransport = null; entry.state.workspaceFileRuntimeAuthHeader = '' } },
         close: () => closeEntry(entry),

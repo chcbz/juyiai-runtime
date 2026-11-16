@@ -1,12 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, readFileSync, symlinkSync, writeFileSync, mkdirSync, chmodSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync, symlinkSync, writeFileSync, mkdirSync, chmodSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { SkillExecutionStore, SkillEffects } from '../skill-execution-store.mjs'
 import { skillHash } from '../skill-executor.mjs'
-const command = { executionId: 'pwe_1', snapshotDigest: 'a'.repeat(64), inputRefs: [] }
-const descriptor = { manifest: { outputs: { dataSchema: null, mimeTypes: ['text/plain'], multiple: false, artifactsRequired: true } } }
+const command = { executionProtocolVersion: 6, outputs: { dataSchema: null, mimeTypes: ['text/plain'], multiple: false, artifactsRequired: true }, executionId: 'pwe_1', snapshotDigest: 'a'.repeat(64), inputRefs: [] }
 const setup = t => {
   const rootDirectory = mkdtempSync(resolve(tmpdir(), 'skill-store-')); t.after(() => rmSync(rootDirectory, { recursive: true, force: true }))
   const options = { rootDirectory, scope: { ownerJiacn: 'owner', agentId: 'agent', tenantId: 'tenant', clientId: 'client' }, command }
@@ -18,11 +17,12 @@ const effect = (store, overrides = {}) => new SkillEffects({ store, bindingRevis
 test('result bytes and immutable manifest persist across reconstruction; mismatch/empty fake files rejected', t => {
   const { store, options } = setup(t)
   const bytes = Buffer.from('实际文本内容')
-  const result = { data: null, artifacts: [{ outputId: 'output_1', contentMimeType: 'text/plain', bytes }], inputReceipts: [] }
-  const manifest = store.persistResult(descriptor, result)
+  store.writeBlob('output_1', bytes)
+  const result = { data: null, artifacts: [{ outputId: 'output_1', contentMimeType: 'text/plain', sha256: skillHash(bytes), byteLength: String(bytes.length) }], inputReceipts: [], effectDependencies: [] }
+  const manifest = store.persistNativeResult(result)
   assert.equal(manifest.result.artifacts[0].sha256, skillHash(bytes))
   assert.deepEqual(new SkillExecutionStore(options).loadResult(), manifest)
-  assert.throws(() => store.persistResult(descriptor, { ...result, artifacts: [] }), /ARTIFACTS_INVALID/)
+  assert.throws(() => store.persistNativeResult({ ...result, artifacts: [] }), /ARTIFACTS_INVALID/)
   assert.throws(() => new SkillExecutionStore({ ...options, command: { ...command, snapshotDigest: 'b'.repeat(64) } }), /IDENTITY_CONFLICT/)
   writeFileSync(resolve(store.directory, 'outputs/output_1'), '篡改', { mode: 0o600 })
   assert.throws(() => store.loadResult(), /BYTES_CHANGED/)
@@ -86,25 +86,27 @@ test('all frozen inputs require exact host-delivered receipts with real matching
   const { options } = setup(t)
   const store = new SkillExecutionStore({ ...options, command: { ...command, executionId: 'pwe_materials', inputRefs: ['input_1'] } })
   store.write('inputs-snapshot', { inputs: [{ inputRef: 'input_1', sha256: 'a'.repeat(64) }] })
-  const result = { data: null, artifacts: [{ outputId: 'output_1', contentMimeType: 'text/plain', bytes: Buffer.from('真实正文') }], inputReceipts: [] }
-  assert.throws(() => store.persistResult(descriptor, result), /INPUT_RECEIPT_INVALID/)
+  const bytes = Buffer.from('真实正文')
+  store.writeBlob('output_1', bytes)
+  const result = { data: null, artifacts: [{ outputId: 'output_1', contentMimeType: 'text/plain', sha256: skillHash(bytes), byteLength: String(bytes.length) }], inputReceipts: [], effectDependencies: [] }
+  assert.throws(() => store.persistNativeResult(result), /INPUT_RECEIPT_INVALID/)
   const receipt = { inputRef: 'input_1', sha256: 'a'.repeat(64), carrier: 'native-text', delivery: 'DELIVERED' }
   for (const patch of [{ sha256: 'b'.repeat(64) }, { carrier: 'imaginary-vision' }, { understood: true }, { delivery: 'ASSUMED' }])
-    assert.throws(() => store.persistResult(descriptor, { ...result, inputReceipts: [{ ...receipt, ...patch }] }), /INPUT_RECEIPT_INVALID/)
-  assert.deepEqual(store.persistResult(descriptor, { ...result, inputReceipts: [receipt] }).result.inputReceipts, [receipt])
+    assert.throws(() => store.persistNativeResult({ ...result, inputReceipts: [{ ...receipt, ...patch }] }), /INPUT_RECEIPT_INVALID/)
+  assert.deepEqual(store.persistNativeResult({ ...result, inputReceipts: [receipt] }).result.inputReceipts, [receipt])
 })
 test('result data is schema-validated JSON, including scalar/array/null without reparsing a string', t => {
   const { options } = setup(t)
   for (const [index, data] of ['actual result string', [1, 'x'], null].entries()) {
-    const store = new SkillExecutionStore({ ...options, command: { ...command, executionId: `pwe_data_${index}` } })
-    const spec = { manifest: { outputs: { dataSchema: { $schema: 'https://json-schema.org/draft/2020-12/schema', type: ['string', 'array', 'null'] }, mimeTypes: [], multiple: false, artifactsRequired: false } } }
-    assert.deepEqual(store.persistResult(spec, { data, artifacts: [], inputReceipts: [] }).result.data, data)
+    const outputs = { dataSchema: { $schema: 'https://json-schema.org/draft/2020-12/schema', type: ['string', 'array', 'null'] }, mimeTypes: [], multiple: false, artifactsRequired: false }
+    const store = new SkillExecutionStore({ ...options, command: { ...command, outputs, executionId: `pwe_data_${index}` } })
+    assert.deepEqual(store.persistNativeResult({ data, artifacts: [], inputReceipts: [], effectDependencies: [] }).result.data, data)
   }
 })
 
 test('native inputs stream into immutable files, including empty bytes, and verified cache avoids downloading again', async t => {
   const { options } = setup(t)
-  const store = new SkillExecutionStore({ ...options, command: { ...command, executionId: 'native_inputs', executionProtocolVersion: 5, inputRefs: ['input1', 'empty'] } })
+  const store = new SkillExecutionStore({ ...options, command: { ...command, executionId: 'native_inputs', executionProtocolVersion: 6, inputRefs: ['input1', 'empty'] } })
   let downloads = 0
   const input = { inputRef: 'input1', sha256: skillHash('original'), byteLength: '8', contentMimeType: 'text/plain' }
   const open = async function * () { downloads++; yield Buffer.from('ori'); yield Buffer.from('ginal') }
@@ -119,7 +121,7 @@ test('native inputs stream into immutable files, including empty bytes, and veri
 })
 test('interrupted, oversized or corrupt native input downloads never publish partial files', async t => {
   const { options } = setup(t)
-  const store = new SkillExecutionStore({ ...options, command: { ...command, executionId: 'native_inputs', executionProtocolVersion: 5, inputRefs: ['input1'] } })
+  const store = new SkillExecutionStore({ ...options, command: { ...command, executionId: 'native_inputs', executionProtocolVersion: 6, inputRefs: ['input1'] } })
   const input = { inputRef: 'input1', sha256: skillHash('ok'), byteLength: '2' }
   for (const source of [async function * () { yield Buffer.from('o'); throw new Error('connection lost') }, async function * () { yield Buffer.from('oversize') }, async function * () { yield Buffer.from('xx') }]) {
     await assert.rejects(store.materializeInput(input, source, () => {}))
@@ -127,4 +129,14 @@ test('interrupted, oversized or corrupt native input downloads never publish par
   }
   const actual = await store.materializeInput(input, async function * () { yield Buffer.from('ok') }, () => {})
   assert.equal(readFileSync(actual.path, 'utf8'), 'ok')
+})
+
+test('retired execution protocols cannot create or mutate checkpoint directories', t => {
+  const { options } = setup(t)
+  for (const executionProtocolVersion of [undefined, 1, 2, 3, 4, 5, 7, '6']) {
+    const rootDirectory = resolve(options.rootDirectory, `retired-${executionProtocolVersion}`)
+    assert.throws(() => new SkillExecutionStore({ ...options, rootDirectory, command: { ...command, executionProtocolVersion } }), /SKILL_STORE_CONFIG_INVALID/)
+    assert.equal(existsSync(rootDirectory), false)
+  }
+  assert.equal(SkillExecutionStore.prototype.persistResult, undefined)
 })

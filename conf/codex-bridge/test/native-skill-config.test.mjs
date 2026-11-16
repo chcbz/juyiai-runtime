@@ -8,7 +8,7 @@ function fixture(t) {
   const root = mkdtempSync(resolve(tmpdir(), 'native-config-')); t.after(() => rmSync(root, { recursive: true, force: true }))
   const scope = { tenantId: 'tenant', ownerJiacn: 'owner', clientId: 'client', agentId: 'agent' }
   const descriptor = { skillInstallationId: 'installed1', skillKey: 'test-skill', packageSha256: 'a'.repeat(64) }
-  const command = { toolPolicyRef: 'NATIVE_SKILL_SCRIPT_V1', skills: [{ skill: { key: descriptor.skillKey, packageSha256: descriptor.packageSha256 }, taskSkillBinding: { skillInstallationId: 'installed1' } }] }
+  const command = { toolPolicyRef: 'NATIVE_SKILL_SCRIPT_V1', skills: [{ skill: { key: descriptor.skillKey, packageSha256: descriptor.packageSha256 }, executionBinding: { skillInstallationId: 'installed1' } }] }
   const config = { schemaVersion: 1, scope, installations: {
     installed1: { configuration: { apiKey: 'synthetic-one' }, networkOrigins: ['https://example.invalid'] },
     installed2: { configuration: { apiKey: 'synthetic-foreign' }, networkOrigins: ['https://other.invalid'] }

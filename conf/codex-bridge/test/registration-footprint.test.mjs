@@ -10,7 +10,7 @@ import { SkillRegistry } from '../skill-registry.mjs'
 const digest = 'a'.repeat(64)
 const scope = { tenantId: '1', clientId: 'client', ownerJiacn: 'owner', agentId: 'agent' }
 const fence = { installationId: 'installation', hostId: 'host', runtimeInstanceId: 'runtime', sessionGeneration: '1' }
-const nativeExecution = { schemaVersion: 1, executionProtocolVersion: 5, toolPolicyRef: 'NATIVE_LOCAL_FILES_V1',
+const nativeExecution = { schemaVersion: 1, executionProtocolVersion: 6, toolPolicyRef: 'NATIVE_LOCAL_FILES_V1',
   outputMimeTypes: ['text/plain', 'text/markdown', 'text/html', 'application/json', 'image/png'], supportedToolPolicyRefs: ['NATIVE_SKILL_SCRIPT_V1'] }
 const inputs = count => Array.from({ length: count }, (_, i) => ({ mediaKind: 'file', mimeType: `application/x-fixture-${i}`,
   carrier: 'PARSED_TEXT', carrierContractDigest: `sha256:${digest}` }))

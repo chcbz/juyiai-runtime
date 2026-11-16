@@ -49,10 +49,10 @@ test('stdin/stdout peer runs real Node install/upgrade/policy, retains old task 
   assert.equal(resultFor(await p.receive(upgrade), upgrade).data.evidence.outcome, 'PREPARED')
   assert.equal(catalog(await p.receive(activate(upgrade))).skillExecution.skills[0].skillInstallationId, second.target.skillInstallationId)
   const disabled = await p.receive(policy(second.target, 3, false)); assert.equal(catalog(disabled).skillExecution.skills[0].enabled, false)
-  const taskSkillBinding = { executionId: 'old_execution', taskGrantId: 'old_grant', taskGrantVersion: '1', agentId: binding.scope.agentId,
+  const executionBinding = { executionId: 'old_execution', scopeSha256: 'a'.repeat(64), grantRevision: '1', agentId: binding.scope.agentId,
     skillKey: prepare.data.skillKey, ...Object.fromEntries(['skillInstallationId', 'productVersionId', 'skillVersion', 'packageSha256', 'manifestSha256'].map(key => [key, first.target[key]])),
     approvedPermissionsSha256: prepare.data.approvedPermissionsSha256 }
-  const old = await p.send({ op: 'resolveNativeTask', taskSkillBinding }); assert.equal(old[0].value.skillInstallationId, first.target.skillInstallationId)
+  const old = await p.send({ op: 'resolveNativeTask', executionBinding }); assert.equal(old[0].value.skillInstallationId, first.target.skillInstallationId)
   assert.equal(old[0].value.approvedPermissionsSha256, prepare.data.approvedPermissionsSha256)
   await p.send({ op: 'restart', fence: { ...binding.fence, runtimeInstanceId: 'boot_after_java_restart', sessionGeneration: '2' } })
   const replay = await p.send({ op: 'replay' }), originalBytes = applied.find(row => row.kind === 'result' && fromAgentWire(Buffer.from(row.wireBase64, 'base64').toString()).messageId === fact.messageId).wireBase64

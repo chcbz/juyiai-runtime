@@ -47,13 +47,13 @@ test('explicit native provider is normalized without mixing partial overrides wi
 
 test('absent/failed materials do not suppress native measurement; startup single-flights the same owner', async () => {
   const wait = gate(); let initialized = 0, measured = 0, published = 0
-  const runtime = { async measureNativeExecution() { measured++; await wait.promise; return { executionProtocolVersion: 5 } } }
+  const runtime = { async measureNativeExecution() { measured++; await wait.promise; return { executionProtocolVersion: 6 } } }
   const state = { profile, typedInspectionProfileRuntime: null, typedInspectionProfileFailure: new Error('materials failed'), nativeExecutionProfileRuntime: runtime }
   const options = { initializeToolchain: async owner => { assert.equal(owner, runtime); initialized++ }, publish: (_, current) => { assert.equal(current.nativeExecutionProfileRuntime, runtime); published++ } }
   const first = ensureNativeExecutionProfile(state, options)
   assert.equal(ensureNativeExecutionProfile(state, options), first)
   wait.resolve()
-  assert.deepEqual(await first, { executionProtocolVersion: 5 })
+  assert.deepEqual(await first, { executionProtocolVersion: 6 })
   assert.equal(initialized, 1); assert.equal(measured, 1); assert.equal(published, 1)
 })
 
@@ -82,7 +82,7 @@ test('disposed native owner withdraws cached declaration and settles in-flight m
   Object.assign(runtime, { _measureNativeExecution: () => wait.promise, activeAdapters: new Map() })
   const pending = runtime.measureNativeExecution()
   const closed = runtime.dispose()
-  wait.resolve({ executionProtocolVersion: 5 })
+  wait.resolve({ executionProtocolVersion: 6 })
   await closed
   assert.equal(await pending, null)
   assert.equal(runtime.nativeExecutionDeclaration(), null)

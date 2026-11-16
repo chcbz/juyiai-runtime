@@ -1,7 +1,7 @@
 import { IMAGE_INPUT_MIMES } from './image-input.mjs'
 import { lstatSync, readFileSync, realpathSync } from 'node:fs'
 import { isAbsolute, resolve, sep } from 'node:path'
-import { parseNativeApiOrigin } from './workspace-file-bridge.mjs'
+import { parseNativeApiOrigin } from './native-api-origin.mjs'
 
 // Historical input compatibility only, not configurable feature gates.
 export const RETIRED_CHAT_SWITCHES = Object.freeze(['typedDeliberationEnabled', 'fastChatEnabled', 'appServerEnabled', 'trueDeltaEnabled'])

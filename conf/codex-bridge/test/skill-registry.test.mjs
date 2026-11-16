@@ -148,7 +148,7 @@ test('session generation rejects old numeric, noncanonical and overflowing fence
 
 test('native package lookup binds retained identity without probing runners or granting tool capability', async () => {
   const row = { ...installed(), kind: 'INSTRUCTION', manifest: null, manifestSha256: null, packageTreeDigest: 'd'.repeat(64), approvedPermissionsSha256: 'e'.repeat(64) }
-  const taskBinding = { executionId: 'execution', taskGrantId: 'grant', taskGrantVersion: '1', agentId: scope.agentId,
+  const executionBinding = { executionId: 'execution', scopeSha256: 'a'.repeat(64), grantRevision: '1', agentId: scope.agentId,
     skillKey: row.skillKey, skillInstallationId: row.skillInstallationId, productVersionId: row.productVersionId,
     skillVersion: row.skillVersion, packageSha256: row.packageSha256, manifestSha256: row.manifestSha256,
     approvedPermissionsSha256: row.approvedPermissionsSha256 }
@@ -156,27 +156,27 @@ test('native package lookup binds retained identity without probing runners or g
     runnerRegistry: new Map([['provider-operation', { run: () => assert.fail('run'), probe: () => assert.fail('probe') }]]),
     resolveBinding: () => assert.fail('package lookup must not resolve provider') })
   const skill = Object.fromEntries(['skillKey', 'skillVersion', 'packageSha256', 'manifestSha256'].map(key => [key, row[key]]))
-  const entry = await registry.requireNativePackage(skill, { taskBinding })
+  const entry = await registry.requireNativePackage(skill, { executionBinding })
   assert.equal(entry.descriptor.packageTreeDigest, row.packageTreeDigest)
   assert.equal(Object.hasOwn(entry, 'item'), false)
   for (const [key, value] of [['agentId', 'another'], ['approvedPermissionsSha256', 'f'.repeat(64)], ['productVersionId', 'other'], ['skillVersion', '2.0.0']]) {
-    await assert.rejects(registry.requireNativePackage(skill, { taskBinding: { ...taskBinding, [key]: value } }), /SKILL_EXECUTION_BINDING_CHANGED/)
+    await assert.rejects(registry.requireNativePackage(skill, { executionBinding: { ...executionBinding, [key]: value } }), /SKILL_EXECUTION_BINDING_CHANGED/)
   }
   registry.loadRetained = async () => [{ ...row, skillKey: 'wrong' }]
-  await assert.rejects(registry.requireNativePackage(skill, { taskBinding }), /SKILL_EXECUTION_BINDING_CHANGED/)
+  await assert.rejects(registry.requireNativePackage(skill, { executionBinding }), /SKILL_EXECUTION_BINDING_CHANGED/)
   registry.loadRetained = async () => [row, row]
-  await assert.rejects(registry.requireNativePackage(skill, { taskBinding }), /SKILL_EXECUTION_BINDING_CHANGED/)
+  await assert.rejects(registry.requireNativePackage(skill, { executionBinding }), /SKILL_EXECUTION_BINDING_CHANGED/)
 })
 
 test('native package lookup rejects a late retained response after session change', async () => {
   const row = { ...installed(), kind: 'INSTRUCTION', manifest: null, manifestSha256: null, packageTreeDigest: 'd'.repeat(64), approvedPermissionsSha256: 'e'.repeat(64) }
-  const taskBinding = { executionId: 'execution', taskGrantId: 'grant', taskGrantVersion: '1', agentId: scope.agentId,
+  const executionBinding = { executionId: 'execution', scopeSha256: 'a'.repeat(64), grantRevision: '1', agentId: scope.agentId,
     skillKey: row.skillKey, skillInstallationId: row.skillInstallationId, productVersionId: row.productVersionId,
     skillVersion: row.skillVersion, packageSha256: row.packageSha256, manifestSha256: row.manifestSha256,
     approvedPermissionsSha256: row.approvedPermissionsSha256 }
   let resolve
   const registry = create({ loadRetained: () => new Promise(done => { resolve = done }) })
-  const pending = registry.requireNativePackage(taskBinding, { taskBinding })
+  const pending = registry.requireNativePackage(executionBinding, { executionBinding })
   registry.setSession(null); resolve([row])
   await assert.rejects(pending, /SKILL_EXECUTION_BINDING_CHANGED/)
 })
@@ -198,20 +198,20 @@ test('native binding resolves null-manifest instruction and forbids executable d
     packageSha256: hash, packageTreeDigest: 'd'.repeat(64), approvedPermissionsSha256: 'e'.repeat(64), packageRoot: '/fixture/instruction',
     manifestSha256: null, kind: 'INSTRUCTION', enabled: true, policyRevision: '1', manifest: null }
   let rows = [instruction]
-  const taskBinding = { executionId: 'execution', taskGrantId: 'grant', taskGrantVersion: '1', agentId: scope.agentId,
+  const executionBinding = { executionId: 'execution', scopeSha256: 'a'.repeat(64), grantRevision: '1', agentId: scope.agentId,
     skillKey: instruction.skillKey, skillInstallationId: instruction.skillInstallationId, productVersionId: instruction.productVersionId,
     skillVersion: instruction.skillVersion, packageSha256: instruction.packageSha256, manifestSha256: null,
     approvedPermissionsSha256: instruction.approvedPermissionsSha256 }
   const registry = create({ loadRetained: () => rows, runnerRegistry: new Map(), resolveBinding: () => assert.fail('no provider binding') })
-  const entry = await registry.requireNativePackage(taskBinding, { taskBinding })
+  const entry = await registry.requireNativePackage(executionBinding, { executionBinding })
   assert.equal(entry.descriptor.kind, 'INSTRUCTION'); assert.equal(entry.descriptor.manifestSha256, null)
   assert.equal(entry.descriptor.packageTreeDigest, instruction.packageTreeDigest)
   rows = [{ ...instruction, kind: 'EXECUTABLE', manifest: { skillKey: instruction.skillKey, skillVersion: instruction.skillVersion, manifestSha256: null } }]
-  await assert.rejects(registry.requireNativePackage(taskBinding, { taskBinding }), /SKILL_EXECUTION_BINDING_CHANGED/)
+  await assert.rejects(registry.requireNativePackage(executionBinding, { executionBinding }), /SKILL_EXECUTION_BINDING_CHANGED/)
   rows = [{ ...instruction, kind: 'EXECUTABLE', manifestSha256: 'f'.repeat(64), manifest: { skillKey: instruction.skillKey, skillVersion: instruction.skillVersion, manifestSha256: 'f'.repeat(64) } }]
-  await assert.rejects(registry.requireNativePackage(taskBinding, { taskBinding }), /SKILL_EXECUTION_BINDING_CHANGED/)
+  await assert.rejects(registry.requireNativePackage(executionBinding, { executionBinding }), /SKILL_EXECUTION_BINDING_CHANGED/)
   rows = [{ ...instruction, manifest: { skillKey: instruction.skillKey } }]
-  await assert.rejects(registry.requireNativePackage(taskBinding, { taskBinding }), /SKILL_EXECUTION_BINDING_CHANGED/)
+  await assert.rejects(registry.requireNativePackage(executionBinding, { executionBinding }), /SKILL_EXECUTION_BINDING_CHANGED/)
 })
 
  test('disabled ordinary package is advertised as disabled and cannot pass legacy lookup', async () => {

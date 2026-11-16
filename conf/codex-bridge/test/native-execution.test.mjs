@@ -8,7 +8,7 @@ import { runNativeExecution } from '../native-execution.mjs'
 // Engine transport double: proves owner orchestration/recovery, not a model run.
 function fixture(t) {
   const root = mkdtempSync(resolve(tmpdir(), 'native-owner-')); t.after(() => rmSync(root, { recursive: true, force: true }))
-  const command = { executionProtocolVersion: 5, executionId: 'execution1', commandId: 'cmd1', messageId: 'message1', snapshotDigest: 'a'.repeat(64), skills: [], inputRefs: [], instruction: 'create text', parameters: {}, toolPolicyRef: 'NATIVE_LOCAL_FILES_V1', outputs: { dataSchema: null, mimeTypes: ['text/plain'], multiple: false, artifactsRequired: true } }
+  const command = { executionProtocolVersion: 6, executionId: 'execution1', commandId: 'cmd1', messageId: 'message1', snapshotDigest: 'a'.repeat(64), skills: [], inputRefs: [], instruction: 'create text', parameters: {}, toolPolicyRef: 'NATIVE_LOCAL_FILES_V1', outputs: { dataSchema: null, mimeTypes: ['text/plain'], multiple: false, artifactsRequired: true } }
   const store = new SkillExecutionStore({ rootDirectory: root, scope: { agentId: 'agent1' }, command })
   const events = []; let policy; let mode = 'success'; let runs = 0
   const adapter = {

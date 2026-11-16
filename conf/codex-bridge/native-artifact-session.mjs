@@ -18,7 +18,7 @@ export const nativeArtifactTools = Object.freeze([
 export class NativeArtifactSession {
   constructor({ store, checkActive, validateSnapshot }) {
     this.store = store; this.command = store.command; this.checkActive = checkActive; this.validateSnapshot = validateSnapshot
-    if (this.command.executionProtocolVersion !== 5 || typeof checkActive !== 'function' || typeof validateSnapshot !== 'function') fail('NATIVE_ARTIFACT_SESSION_INVALID')
+    if (this.command.executionProtocolVersion !== 6 || typeof checkActive !== 'function' || typeof validateSnapshot !== 'function') fail('NATIVE_ARTIFACT_SESSION_INVALID')
   }
   policy() {
     // Advertise the execution's actual data contract, not an unconstrained value

@@ -1656,16 +1656,16 @@ test('skill receipt bypass never bypasses the manager transaction tail', { timeo
 });
 
 
-test('workspace hints negotiate independently and never enter command ingress', async t => {
+test('retired workspace hints stay disabled even if server advertises the old capability', async t => {
   const c = await channelFixture(t, { workspaceFileWorkNotifications: 1 }); await c.executors[0].activate();
   const socket = c.sockets[0], state = c.states()[0], registration = socket.sent[0];
-  assert.equal(state.workNotificationVersion, null); assert.equal(state.fileWorkNotificationVersion, 1);
+  assert.equal(state.workNotificationVersion, null); assert.equal(state.fileWorkNotificationVersion, undefined);
   const hint = nativeWorkHint(registration); hint.data.lane = 'WORKSPACE_FILE';
   socket.receive(hint); socket.receive(nativeWorkHint(registration));
   socket.receive({ ...hint, data: { ...hint.data, sessionGeneration: '999' } });
   socket.receive({ ...hint, data: { ...hint.data, notificationVersion: 2 } });
   await c.tick();
-  assert.equal(state.fileWorkHints, 1); assert.equal(state.workHints, undefined); assert.deepEqual(state.accepted, []);
+  assert.equal(state.fileWorkHints, undefined); assert.equal(state.workHints, undefined); assert.deepEqual(state.accepted, []);
 });
 
 test('native-only ACK does not enable file discovery notifications', async t => {
@@ -1673,10 +1673,10 @@ test('native-only ACK does not enable file discovery notifications', async t => 
   const socket = c.sockets[0], state = c.states()[0];
   const hint = nativeWorkHint(socket.sent[0]); hint.data.lane = 'WORKSPACE_FILE';
   socket.receive(hint); await c.tick();
-  assert.equal(state.fileWorkNotificationVersion, null); assert.equal(state.fileWorkHints, undefined);
+  assert.equal(state.fileWorkNotificationVersion, undefined); assert.equal(state.fileWorkHints, undefined);
 });
 
-test('API shared file work fixture preserves the existing wire envelope and proof', async () => {
+test('retired file work fixture can be decoded without granting execution authority', async () => {
   const wire = JSON.parse(await readFile(new URL('./fixtures/workspace-file-work-hint-v1.json', import.meta.url), 'utf8'));
   const frame = fromAgentWire(JSON.stringify(wire));
   assert.equal(frame.messageType, 'runtime.work.available'); assert.equal(frame.lane, 'WORKSPACE_FILE');

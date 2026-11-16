@@ -6,7 +6,6 @@ import { isAbsolute, resolve } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { parseSkillJson, validateSkillData } from './skill-manifest.mjs'
 import { skillCanonicalJson, skillDigest, skillHash, skillId, skillSha } from './skill-executor.mjs'
-import { validateNativeConversationOutput } from './conversation-native.mjs'
 const fail = code => { throw Object.assign(new Error(code), { code }) }
 const privateDirectory = path => {
   const stat = lstatSync(path)
@@ -61,12 +60,12 @@ export function validateSkillInputReceipts(receipts, inputRefs, frozenInputs = n
 
 export class SkillExecutionStore {
   constructor({ rootDirectory, scope, command }) {
-    if (!isAbsolute(rootDirectory || '') || !scope || !skillId(command?.executionId)) fail('SKILL_STORE_CONFIG_INVALID')
+    if (!isAbsolute(rootDirectory || '') || !scope || !skillId(command?.executionId) || command.executionProtocolVersion !== 6) fail('SKILL_STORE_CONFIG_INVALID')
     this.scopeDigest = skillDigest(scope); this.commandDigest = skillDigest(command)
     this.command = command; this.directory = resolve(rootDirectory, this.scopeDigest, command.executionId)
     mkdirSync(this.directory, { recursive: true, mode: 0o700 })
     for (const path of [resolve(rootDirectory), resolve(rootDirectory, this.scopeDigest), this.directory]) privateDirectory(path)
-    for (const name of ['inputs', 'outputs', 'scratch', ...(command.executionProtocolVersion === 5 ? ['drafts'] : [])]) {
+    for (const name of ['inputs', 'outputs', 'scratch', 'drafts']) {
       mkdirSync(resolve(this.directory, name), { recursive: true, mode: 0o700 }); privateDirectory(resolve(this.directory, name))
     }
     const previous = this.read('identity')
@@ -137,13 +136,12 @@ export class SkillExecutionStore {
     if (result.schemaVersion !== 1 || result.executionId !== this.command.executionId || result.snapshotDigest !== this.command.snapshotDigest
         || !result.result || !Array.isArray(result.result.artifacts) || !Array.isArray(result.result.inputReceipts)) fail('SKILL_RESULT_BINDING_INVALID')
     for (const artifact of result.result.artifacts) {
-      if (this.command.executionProtocolVersion === 5) this.verifyBlob(artifact.outputId, artifact)
-      else this.readBlob(artifact.outputId, artifact)
+      this.verifyBlob(artifact.outputId, artifact)
     }
     return result
   }
   persistNativeResult(result) {
-    if (this.command.executionProtocolVersion !== 5 || !result || !Array.isArray(result.artifacts)) fail('SKILL_RESULT_INVALID')
+    if (this.command.executionProtocolVersion !== 6 || !result || !Array.isArray(result.artifacts)) fail('SKILL_RESULT_INVALID')
     const outputs = this.command.outputs
     if (outputs.artifactsRequired && !result.artifacts.length || !outputs.multiple && result.artifacts.length > 1) fail('SKILL_RESULT_ARTIFACTS_INVALID')
     if (!outputs.dataSchema && result.data !== null) fail('SKILL_RESULT_DATA_INVALID')
@@ -161,29 +159,7 @@ export class SkillExecutionStore {
     if (!previous) this.write('result', manifest)
     return manifest
   }
-  persistResult(descriptor, result) {
-    if (!result || !Array.isArray(result.artifacts) || !Array.isArray(result.inputReceipts)) fail('SKILL_RESULT_INVALID')
-    const outputs = descriptor.manifest.outputs
-    if ((outputs.artifactsRequired && result.artifacts.length === 0) || (!outputs.multiple && result.artifacts.length > 1)) fail('SKILL_RESULT_ARTIFACTS_INVALID')
-    const data = result.data ?? null
-    if (!outputs.dataSchema && data !== null) fail('SKILL_RESULT_DATA_INVALID')
-    if (outputs.dataSchema) validateSkillData(outputs.dataSchema, data)
-    const ids = new Set()
-    const artifacts = result.artifacts.map(artifact => {
-      if (!skillId(artifact?.outputId) || ids.has(artifact.outputId) || !outputs.mimeTypes.includes(artifact.contentMimeType)
-          || !validateNativeConversationOutput(artifact.contentMimeType, artifact.bytes)) fail('SKILL_RESULT_ARTIFACTS_INVALID')
-      ids.add(artifact.outputId)
-      this.writeBlob(artifact.outputId, artifact.bytes)
-      return { outputId: artifact.outputId, contentMimeType: artifact.contentMimeType, sha256: skillHash(artifact.bytes), byteLength: String(artifact.bytes.length) }
-    })
-    validateSkillInputReceipts(result.inputReceipts, this.command.inputRefs, this.read('inputs-snapshot')?.inputs || null, descriptor.manifest.runner)
-    const manifest = { schemaVersion: 1, executionId: this.command.executionId, snapshotDigest: this.command.snapshotDigest,
-      result: { data, artifacts, inputReceipts: result.inputReceipts } }
-    const previous = this.loadResult()
-    if (previous && skillDigest(previous) !== skillDigest(manifest)) fail('SKILL_RESULT_CONFLICT')
-    if (!previous) this.write('result', manifest)
-    return manifest
-  }
+
 }
 
 export class SkillEffects {

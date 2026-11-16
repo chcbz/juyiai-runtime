@@ -138,12 +138,14 @@ const e05InternalScope = (endpoint, options) => {
 export const skillConversationHttpScope = (endpoint, options = {}) => {
   const decoded = (() => { try { return decodeURIComponent(endpoint.pathname) } catch { return null } })()
   if (decoded === null) return false
-  if (!/^\/internal\/agent\/tasks\/(?:conversation-executions|[^/]+\/runs\/[^/]+\/conversation)(?:\/|$)/.test(decoded)) return true
-  if (endpoint.search || endpoint.pathname !== decoded) return false
+  // Retired task-addressed execution routes must not pass as unrelated APIs.
+  if (/^\/internal\/agent\/tasks\/(?:conversation-executions|[^/]+\/runs\/[^/]+\/conversation)(?:\/|$)/.test(decoded)) return false
+  if (!/^\/internal\/agent\/executions(?:\/|$)/.test(decoded)) return true
+  if (endpoint.href.includes('?') || endpoint.hash || endpoint.pathname !== decoded) return false
   const method = (options.method || 'GET').toUpperCase()
-  if (endpoint.pathname === '/internal/agent/tasks/conversation-executions/commands') return method === 'GET' && options.body == null
+  if (endpoint.pathname === '/internal/agent/executions/commands') return method === 'GET' && options.body == null
   const id = '[A-Za-z0-9][A-Za-z0-9._:-]{0,99}'
-  return method === 'POST' && new RegExp(`^/internal/agent/tasks/${id}/runs/${id}/conversation/(?:lease(?:/renew)?|inputs(?:/${id}/content)?|effects/${id}/(?:start|result)|resume|outputs/${id}/content|result-commits/${id}|failure|usage|provider-usage)$`).test(endpoint.pathname)
+  return method === 'POST' && new RegExp(`^/internal/agent/executions/${id}/runs/${id}/(?:lease(?:/renew)?|inputs(?:/${id}/content)?|effects/${id}/(?:start|result)|resume|outputs/${id}/content|result-commits/${id}|failure|usage|provider-usage)$`).test(endpoint.pathname)
 }
 
 export const skillManagementResultHttpScope = (endpoint, options = {}) => {

@@ -66,17 +66,8 @@ export function fromAgentWire(text) {
       if (Object.hasOwn(data, key)) data[key] = String(data[key])
     }
   }
-  // Public decimal strings are projected back only at the private legacy file bridge.
-  if (message.messageType === 'command.dispatch' && data.commandType === 'WORKSPACE_FILE_EXECUTE') {
-    if (!object(data.payload) || !Array.isArray(data.payload.inputManifest) || !Array.isArray(data.payload.outputManifest)) invalid()
-    const length = (value, positive) => {
-      if (!decimal(value) || BigInt(value) > BigInt(Number.MAX_SAFE_INTEGER) || (positive && value === '0')) invalid()
-      return Number(value)
-    }
-    data.payload = { ...data.payload,
-      inputManifest: data.payload.inputManifest.map(input => ({ ...input, length: length(input.length, false) })),
-      outputManifest: data.payload.outputManifest.map(output => ({ ...output, maxLength: length(output.maxLength, true) })) }
-  }
+  // Retired commands have no decoder/executor; never adapt them into another lane.
+  if (message.messageType === 'command.dispatch' && data.commandType === 'WORKSPACE_FILE_EXECUTE') invalid()
   data.messageId = message.messageId
   if (message.correlationId !== undefined) {
     data.correlationId = message.correlationId

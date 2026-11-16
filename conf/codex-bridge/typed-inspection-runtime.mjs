@@ -1,7 +1,7 @@
 import { IMAGE_INPUT_MIMES, normalizeImageInput, IMAGE_TRANSFORM_ID } from './image-input.mjs'
 import { prepareImageDerivative } from './image-input-file.mjs'
 import { nativeSessionHeaders } from './conversation-native.mjs'
-import { parseNativeApiOrigin } from './workspace-file-bridge.mjs'
+import { parseNativeApiOrigin } from './native-api-origin.mjs'
 import { ACTION_OUTCOME_SCHEMA, ACTION_OUTCOME_INSTRUCTIONS, validateActionFacts, validateActionOutcome } from './juyiting-action-outcome.mjs'
 import { createHash } from 'node:crypto'
 import {

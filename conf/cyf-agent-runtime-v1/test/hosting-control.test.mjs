@@ -795,7 +795,7 @@ test('explicit managed native config is accepted but preparation is not executio
   const subject = Object.values(f.control().state.subjects)[0];
   const agent = f.control().subjectAgent(subject);
   const profile = normalizeProfile(runtimeInstallationProfile(agent, 'https://api.example.test'), {}, 0, { isolated: true });
-  const native = { schemaVersion: 1, executionProtocolVersion: 5, toolPolicyRef: 'NATIVE_LOCAL_FILES_V1', outputMimeTypes: ['text/plain'] };
+  const native = { schemaVersion: 1, executionProtocolVersion: 6, toolPolicyRef: 'NATIVE_LOCAL_FILES_V1', outputMimeTypes: ['text/plain'] };
   const payload = buildAgentRegistrationPayload(profile, null, true,
     { readback: { initialize: {}, schema: { measured: true } } }, null, null, null, { nativeExecutionDeclaration: () => native });
   assert.equal(payload.typedDeliberation.state, 'READY');

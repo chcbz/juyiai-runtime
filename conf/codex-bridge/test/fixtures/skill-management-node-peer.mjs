@@ -120,8 +120,8 @@ for await (const line of createInterface({ input: process.stdin, crlfDelay: Infi
         }
         case 'resolveNativeTask':
         case 'resolveTask': {
-          const b = input.taskSkillBinding, entry = input.op === 'resolveNativeTask'
-            ? await registry.requireNativePackage(b, { taskBinding: b })
+          const b = input.op === 'resolveNativeTask' ? input.executionBinding : input.taskSkillBinding, entry = input.op === 'resolveNativeTask'
+            ? await registry.requireNativePackage(b, { executionBinding: b })
             : await registry.requireExact(b, { taskBinding: b, allowUnavailable: true })
           const row = entry.descriptor
           output({ kind: 'taskPackage', value: Object.fromEntries(['skillInstallationId', 'productVersionId', 'skillKey', 'skillVersion',

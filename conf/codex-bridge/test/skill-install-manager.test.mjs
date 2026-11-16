@@ -663,14 +663,14 @@ test('ordinary SKILL.md without metadata.version installs with approved external
   const registry = new SkillRegistry({ scope: binding.scope, loadInstalled: () => f.manager.listInstalledSkills(),
     loadRetained: id => f.manager.listInstalledSkills({ includeRetained: true, skillInstallationId: id }), runnerRegistry: new Map() })
   registry.setSession(binding.fence)
-  const taskBinding = { executionId: 'execution', taskGrantId: 'grant', taskGrantVersion: '1', agentId: binding.scope.agentId,
+  const executionBinding = { executionId: 'execution', scopeSha256: 'a'.repeat(64), grantRevision: '1', agentId: binding.scope.agentId,
     skillKey: descriptor.skillKey, skillInstallationId: descriptor.skillInstallationId, productVersionId: descriptor.productVersionId,
     skillVersion: descriptor.skillVersion, packageSha256: descriptor.packageSha256, manifestSha256: null,
     approvedPermissionsSha256: descriptor.approvedPermissionsSha256 }
-  const fixed = await registry.requireNativePackage(taskBinding, { taskBinding })
+  const fixed = await registry.requireNativePackage(executionBinding, { executionBinding })
   assert.equal(fixed.descriptor.packageTreeDigest, descriptor.packageTreeDigest)
   assert.equal(fixed.descriptor.packageRoot, descriptor.packageRoot)
-  await assert.rejects(registry.requireNativePackage(taskBinding, { taskBinding: { ...taskBinding, approvedPermissionsSha256: 'f'.repeat(64) } }), /SKILL_EXECUTION_BINDING_CHANGED/)
+  await assert.rejects(registry.requireNativePackage(executionBinding, { executionBinding: { ...executionBinding, approvedPermissionsSha256: 'f'.repeat(64) } }), /SKILL_EXECUTION_BINDING_CHANGED/)
 })
 
 test('K2 image package stays installed and discovery reports unavailable without a legacy runner', async t => {
@@ -690,11 +690,11 @@ test('K2 image package stays installed and discovery reports unavailable without
     loadRetained: id => f.manager.listInstalledSkills({ includeRetained: true, skillInstallationId: id }), runnerRegistry: new Map() })
   registry.setSession(binding.fence)
   assert.equal((await registry.refresh()).skills[0].readiness, 'DEPENDENCY_MISSING')
-  const taskBinding = { executionId: 'execution', taskGrantId: 'grant', taskGrantVersion: '1', agentId: binding.scope.agentId,
+  const executionBinding = { executionId: 'execution', scopeSha256: 'a'.repeat(64), grantRevision: '1', agentId: binding.scope.agentId,
     skillKey: descriptor.skillKey, skillInstallationId: descriptor.skillInstallationId, productVersionId: descriptor.productVersionId,
     skillVersion: descriptor.skillVersion, packageSha256: descriptor.packageSha256, manifestSha256: descriptor.manifestSha256,
     approvedPermissionsSha256: descriptor.approvedPermissionsSha256 }
-  await assert.rejects(registry.requireNativePackage(taskBinding, { taskBinding }), /SKILL_EXECUTION_BINDING_CHANGED/)
+  await assert.rejects(registry.requireNativePackage(executionBinding, { executionBinding }), /SKILL_EXECUTION_BINDING_CHANGED/)
 })
 
 for (const skillKey of ['native-image', 'image-generate', 'image-edit']) test(`${skillKey} standalone files install as ordinary INSTRUCTION without a runner manifest or credentials`, async t => {

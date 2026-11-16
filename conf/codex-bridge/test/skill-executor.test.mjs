@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { parseSkillCommand, executeSkill } from '../skill-executor.mjs'
-const command = () => ({ executionProtocolVersion: 5, executionId: 'execution1', taskId: 'task1', runId: 'run1', conversationId: 'conversation1', conversationGeneration: '1', commandId: 'command1', messageId: 'message1', skills: [], snapshotDigest: 'a'.repeat(64), parameters: {}, instruction: 'read and write', inputRefs: [], outputs: { dataSchema: null, mimeTypes: ['text/plain'], multiple: false, artifactsRequired: false }, toolPolicyRef: 'NATIVE_LOCAL_FILES_V1' })
+const command = () => ({ executionProtocolVersion: 6, executionId: 'execution1', runId: 'run1', scope: { kind: 'TASK', taskId: 'task1', conversationId: 'conversation1', conversationGeneration: '1' }, commandId: 'command1', messageId: 'message1', skills: [], snapshotDigest: 'a'.repeat(64), parameters: {}, instruction: 'read and write', inputRefs: [], outputs: { dataSchema: null, mimeTypes: ['text/plain'], multiple: false, artifactsRequired: false }, toolPolicyRef: 'NATIVE_LOCAL_FILES_V1' })
 const fixture = () => {
   const c = command(); const events = []
   const manifest = { schemaVersion: 1, executionId: c.executionId, snapshotDigest: c.snapshotDigest, result: { data: null, artifacts: [], inputReceipts: [], effectDependencies: [] } }
@@ -62,16 +62,16 @@ test('API optional dataSchema omission normalizes to null without inventing outp
 
 const addInstruction = f => {
   const skill = { key: 'guide', version: '1.0.0', packageSha256: 'b'.repeat(64), manifestSha256: null }
-  const taskSkillBinding = { executionId: f.c.executionId, taskGrantId: 'grant1', taskGrantVersion: '1', agentId: 'agent1', skillKey: skill.key,
+  const executionBinding = { executionId: f.c.executionId, scopeSha256: skillDigest(f.c.scope), grantRevision: '1', agentId: 'agent1', skillKey: skill.key,
     skillInstallationId: 'installation1', productVersionId: 'product1', skillVersion: skill.version, packageSha256: skill.packageSha256,
     manifestSha256: null, approvedPermissionsSha256: 'c'.repeat(64) }
-  f.c.skills = [{ skill, taskSkillBinding }]
-  return taskSkillBinding
+  f.c.skills = [{ skill, executionBinding }]
+  return executionBinding
 }
 test('native execution binds an ordinary instruction package without old runner readiness', async () => {
   const f = fixture(); const binding = addInstruction(f)
   f.ctx.registry.requireNativePackage = async (skill, options) => {
-    assert.equal(skill.manifestSha256, null); assert.deepEqual(options.taskBinding, binding)
+    assert.equal(skill.manifestSha256, null); assert.deepEqual(options.executionBinding, binding)
     f.events.push('package'); return { descriptor: { kind: 'INSTRUCTION', manifest: null } }
   }
   f.ctx.runNative = async ({ entries }) => {
@@ -99,4 +99,29 @@ test('script policy requires a real bound skill and preserves the policy in the 
   assert.throws(() => parseSkillCommand(f.c), /SKILL_COMMAND_INVALID/)
   addInstruction(f)
   assert.equal(parseSkillCommand(f.c).toolPolicyRef, 'NATIVE_SKILL_SCRIPT_V1')
+})
+
+test('PRIVATE and TASK scopes share admission and executor, never infer a hidden task', async () => {
+  for (const kind of ['PRIVATE', 'TASK']) {
+    const f = fixture()
+    f.c.scope = { ...f.c.scope, kind, taskId: kind === 'PRIVATE' ? null : 'task1' }
+    addInstruction(f)
+    f.ctx.registry.requireNativePackage = async () => ({ descriptor: { kind: 'INSTRUCTION' } })
+    await executeSkill(f.c, f.ctx)
+    assert.deepEqual(f.events, ['claim', 'native', 'commit', 'receipt'])
+    const wrong = structuredClone(f.c); wrong.scope.conversationGeneration = '2'
+    assert.throws(() => parseSkillCommand(wrong), /SKILL_COMMAND_INVALID/)
+  }
+})
+test('scope identity rejects incomplete, ambiguous and overflowing authority before claim', () => {
+  const c = command()
+  for (const patch of [{ kind: 'PRIVATE' }, { kind: 'TASK', taskId: null }, { kind: 'OTHER' },
+    { conversationId: null }, { conversationGeneration: '0' }, { conversationGeneration: 1 },
+    { conversationGeneration: '9223372036854775808' }, { grantId: 'invented' }]) {
+    assert.throws(() => parseSkillCommand({ ...c, scope: { ...c.scope, ...patch } }), /SKILL_COMMAND_INVALID/)
+  }
+  for (const version of [1, 2, 3, 4, 5, 7, '6', null])
+    assert.throws(() => parseSkillCommand({ ...c, executionProtocolVersion: version }), /SKILL_COMMAND_INVALID/)
+  for (const field of ['taskId', 'conversationId', 'conversationGeneration'])
+    assert.throws(() => parseSkillCommand({ ...c, [field]: c.scope[field] }), /SKILL_COMMAND_INVALID/)
 })

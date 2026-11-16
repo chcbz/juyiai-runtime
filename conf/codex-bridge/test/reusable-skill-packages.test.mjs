@@ -9,7 +9,7 @@ import { zip, hash, binding, profile, headers, command, activate } from './fixtu
 
 for (const skillKey of ['document-workbench', 'browser-workbench', 'image-understanding', 'web-research', 'skill-management', 'text-file', 'analysis']) {
   test(`${skillKey}: same ordinary package installs independently for two agents and resolves only its authorized binding`, async t => {
-    const version = ['text-file', 'analysis'].includes(skillKey) ? '1.1.0' : '1.0.0'
+    const version = skillKey === 'document-workbench' ? '1.0.1' : ['text-file', 'analysis'].includes(skillKey) ? '1.1.0' : '1.0.0'
     const source = new URL(`../../skills/${skillKey}/`, import.meta.url), entries = []
     const collect = (prefix = '') => {
       for (const entry of readdirSync(new URL(prefix || './', source), { withFileTypes: true })) {
@@ -48,16 +48,16 @@ for (const skillKey of ['document-workbench', 'browser-workbench', 'image-unders
         loadRetained: id => manager.listInstalledSkills({ includeRetained: true, skillInstallationId: id }) })
       registry.setSession(session.fence)
       const row = manager.listInstalledSkills()[0]
-      const taskBinding = { executionId: `execution_${agentId}`, taskGrantId: `grant_${agentId}`, taskGrantVersion: '1', agentId, skillKey,
+      const executionBinding = { executionId: `execution_${agentId}`, scopeSha256: 'a'.repeat(64), grantRevision: '1', agentId, skillKey,
         skillInstallationId: target.skillInstallationId, productVersionId: target.productVersionId, skillVersion: target.skillVersion,
         packageSha256: target.packageSha256, manifestSha256: null, approvedPermissionsSha256: row.approvedPermissionsSha256 }
-      const resolved = await registry.requireNativePackage(row, { taskBinding })
+      const resolved = await registry.requireNativePackage(row, { executionBinding })
       assert.equal(resolved.descriptor.skillInstallationId, target.skillInstallationId)
-      installed.push({ registry, row, taskBinding })
+      installed.push({ registry, row, executionBinding })
     }
     assert.notEqual(installed[0].row.packageRoot, installed[1].row.packageRoot)
     assert.equal(installed[0].row.packageSha256, installed[1].row.packageSha256)
-    await assert.rejects(installed[1].registry.requireNativePackage(installed[0].row, { taskBinding: installed[0].taskBinding }),
+    await assert.rejects(installed[1].registry.requireNativePackage(installed[0].row, { executionBinding: installed[0].executionBinding }),
       { code: 'SKILL_EXECUTION_BINDING_CHANGED' })
     console.log(`${skillKey}: ${bytes.length} fixture ZIP bytes; two temporary agents; no production installation or model call`)
   })

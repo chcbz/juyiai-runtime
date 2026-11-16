@@ -1,13 +1,13 @@
 import { SkillUsageDelivery } from './skill-usage-delivery.mjs'
-/** Protocol5 shares the existing conversation inbox/session/lease/output transport.
- * This lane never consumes or resumes v1/v2/v3/v4 commands or grants authority from model prose. */
+/** Protocol6 shares the existing conversation inbox/session/lease/output transport.
+ * This lane never consumes or resumes v1/v2/v3/v4/v5 commands or grants authority from model prose. */
 import { openAsBlob } from 'node:fs'
 import { resolve } from 'node:path'
 import { executeSkill, parseSkillCommand, skillDigest, skillId, skillSha } from './skill-executor.mjs'
 import { SkillExecutionStore, validateSkillInputReceipts } from './skill-execution-store.mjs'
 import { nativePositiveLong } from './conversation-native.mjs'
 import { parseSkillJson, validateSkillData } from './skill-manifest.mjs'
-const BASE = '/internal/agent/tasks'
+const BASE = '/internal/agent/executions'
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const fail = (code, cause = null) => { throw Object.assign(new Error(code), { code, ...(cause ? { cause } : {}) }) }
 const fenceValid = value => object(value) && nativePositiveLong(value.version) && /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(value.token || '')
@@ -40,13 +40,13 @@ const deferredRecoveryCodes = new Set(['SKILL_RESULT_UNKNOWN', 'SKILL_TRANSPORT_
   'SKILL_API_RESPONSE_UNCONFIRMED', 'TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT',
   'NATIVE_EXECUTION_ADAPTER_BINDING_CONFLICT', 'NATIVE_EXECUTION_RECOVERY_ENVIRONMENT_CHANGED'])
 const engineTerminalCodes = new Set(['NATIVE_EXECUTION_TURN_FAILED', 'NATIVE_EXECUTION_TURN_INTERRUPTED'])
-const sourceKinds = new Set(['TASK_LINKED_WORKSPACE_VERSION', 'CURRENT_CONVERSATION_ASSET', 'EXECUTION_RESULT', 'FORMAL_ARTIFACT'])
+const sourceKinds = new Set(['WORKSPACE_VERSION', 'TASK_LINKED_WORKSPACE_VERSION', 'CURRENT_CONVERSATION_ASSET', 'EXECUTION_RESULT', 'FORMAL_ARTIFACT'])
 const byteLength = value => {
   if (typeof value !== 'string' || !/^(?:0|[1-9][0-9]*)$/.test(value) || BigInt(value) > BigInt(Number.MAX_SAFE_INTEGER)) fail('SKILL_INPUT_SNAPSHOT_INVALID')
   return value
 }
 export function parseSkillInputSnapshot(snapshot, command, fence) {
-  if (!object(snapshot) || snapshot.schemaVersion !== 5 || !nativePositiveLong(snapshot.leaseVersion) || snapshot.executionId !== command.executionId || snapshot.leaseVersion !== fence.version
+  if (!object(snapshot) || snapshot.schemaVersion !== 6 || !nativePositiveLong(snapshot.leaseVersion) || snapshot.executionId !== command.executionId || snapshot.leaseVersion !== fence.version
       || snapshot.snapshotSha256 !== command.snapshotDigest || !Array.isArray(snapshot.inputs) || snapshot.inputs.length !== command.inputRefs.length
       || snapshot.noReferencedMaterials !== (snapshot.inputs.length === 0)) fail('SKILL_INPUT_SNAPSHOT_INVALID')
   const seen = new Set()
@@ -118,14 +118,14 @@ export class SkillConversationLane extends SkillUsageDelivery {
     this.active = true
     try {
       this.discoveryHasMore = false
-      const page = discover ? await this.request(`${BASE}/conversation-executions/commands`, 'GET') : { items: [] }
+      const page = discover ? await this.request(`${BASE}/commands`, 'GET') : { items: [] }
       if (!object(page) || !Array.isArray(page.items) || page.items.length > 16) fail('SKILL_INBOX_INVALID')
       const commands = new Map(this.pendingCommands().map(command => [command.executionId, command]))
       const inboxErrors = []
       for (const raw of page.items) {
         let command
         try { command = skillCommandFromWire(raw) } catch (error) {
-          // A queued pre-cutover command must neither execute nor starve v5
+          // A queued pre-cutover command must neither execute nor starve v6
           // work. Only attribute errors with an unambiguous execution identity.
           if (error?.code !== 'SKILL_COMMAND_INVALID' || !skillId(raw?.executionId)) throw error
           if (commands.has(raw.executionId)) fail('SKILL_STORE_IDENTITY_CONFLICT')
@@ -172,7 +172,7 @@ export class SkillConversationLane extends SkillUsageDelivery {
     } finally { this.active = false }
   }
   async process(command) {
-    const path = `${BASE}/${command.taskId}/runs/${command.runId}/conversation`
+    const path = `${BASE}/${command.executionId}/runs/${command.runId}`
     const store = new SkillExecutionStore({ rootDirectory: this.root, scope: { ...this.scope, apiOrigin: this.origin }, command })
     this.pendingExecutionIds?.add(command.executionId)
     const executionAbort = new AbortController()
@@ -305,7 +305,7 @@ export class SkillConversationLane extends SkillUsageDelivery {
       // authorized lease, never reuse a previous runtime instance's fence.
       checkLease()
       const receipt = await this.request(`${path}/failure`, 'POST', { fence: terminal.fence, code: terminal.code })
-      if (!object(receipt) || receipt.executionId !== command.executionId || receipt.taskId !== command.taskId
+      if (!object(receipt) || receipt.executionId !== command.executionId || skillDigest(receipt.scope ?? null) !== skillDigest(command.scope)
           || receipt.runId !== command.runId || receipt.targetAgentId !== this.agentId
           || !['FAILED', 'QUEUED'].includes(receipt.state)) fail('SKILL_FAILURE_UNCONFIRMED')
       if (receipt.state === 'QUEUED') fail('SKILL_RESULT_UNKNOWN') // unresolved registered effects remain unknown

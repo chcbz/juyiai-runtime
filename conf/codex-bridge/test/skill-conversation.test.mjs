@@ -14,7 +14,7 @@ const partial = async (promise, code, processed = 0, executionId = 'pwe_1') => {
   return report
 }
 const scope = { tenantId: 'tenant', clientId: 'client', ownerJiacn: 'owner', agentId: 'agent' }
-const command = () => ({ executionProtocolVersion: 5, executionId: 'pwe_1', taskId: 'task', runId: 'run', conversationId: 'conversation', conversationGeneration: '1', commandId: 'cmd', messageId: 'msg',
+const command = () => ({ executionProtocolVersion: 6, executionId: 'pwe_1', runId: 'run', scope: { kind: 'TASK', taskId: 'task', conversationId: 'conversation', conversationGeneration: '1' }, commandId: 'cmd', messageId: 'msg',
   skills: [], toolPolicyRef: 'NATIVE_LOCAL_FILES_V1',
   snapshotDigest: 'c'.repeat(64), parameters: {}, instruction: '分析资料', inputRefs: [], outputs: { dataSchema: { $schema: 'https://json-schema.org/draft/2020-12/schema', type: 'object', properties: { summary: { type: 'string' } }, required: ['summary'], additionalProperties: false }, mimeTypes: ['text/plain'], multiple: false, artifactsRequired: false } })
 const wireCommand = ({ snapshotDigest, ...command }) => ({ ...command, snapshotSha256: snapshotDigest })
@@ -45,7 +45,7 @@ const fixture = (t, displayName) => {
     if (url.pathname.endsWith('/commands')) return response(url, { items: inboxEmpty ? [] : [wireCommand(c)] })
     if (url.pathname.endsWith('/lease') || url.pathname.endsWith('/lease/renew')) return response(url, lease())
     if (url.pathname.endsWith('/resume')) return response(url, { lease: lease(), resultManifest: serverManifest, phase: serverManifest ? 'ARCHIVING' : 'RUNNING', allowedWork: serverManifest ? ['STAGE_OUTPUTS', 'COMMIT_RESULT', 'PROJECT_RESULT'] : ['EXECUTE'] })
-    if (url.pathname.endsWith('/inputs')) return response(url, { schemaVersion: 5, executionId: c.executionId, leaseVersion: '9007199254740993', snapshotSha256: c.snapshotDigest, noReferencedMaterials: true, inputs: [] })
+    if (url.pathname.endsWith('/inputs')) return response(url, { schemaVersion: 6, executionId: c.executionId, leaseVersion: '9007199254740993', snapshotSha256: c.snapshotDigest, noReferencedMaterials: true, inputs: [] })
     if (/\/outputs\/[^/]+\/content$/.test(url.pathname)) {
       uploadedNames.push(body.get('file').name)
       const bytes = Buffer.from(await body.get('file').arrayBuffer()); assert.equal(body.get('sha256'), skillHash(bytes)); assert.equal(body.get('byteLength'), String(bytes.length)); assert.equal(body.has('length'), false)
@@ -91,11 +91,11 @@ test('native UNKNOWN is returned without falsely committing or claiming completi
 test('exact native conversation routes reject legacy writes, wildcard routes and encoded aliases', () => {
   const url = path => new URL(path, 'https://api.example.test')
   for (const path of ['effects/generate/start', 'effects/generate/result', 'resume', 'result-commits/manifest_1', 'inputs/input_1/content'])
-    assert.equal(skillConversationHttpScope(url(`/internal/agent/tasks/t/runs/r/conversation/${path}`), { method: 'POST' }), true, path)
+    assert.equal(skillConversationHttpScope(url(`/internal/agent/executions/e/runs/r/${path}`), { method: 'POST' }), true, path)
   for (const path of ['provider-start', 'controlled-image-v3-start', 'output-commits/manifest1', 'effects/generate/delete', 'anything', 'inputs/%69nput_1/content'])
-    assert.equal(skillConversationHttpScope(url(`/internal/agent/tasks/t/runs/r/conversation/${path}`), { method: 'POST' }), false, path)
-  assert.equal(skillConversationHttpScope(url('/internal/agent/tasks/conversation-executions/controlled-image-v3-commands'), { method: 'GET' }), false)
-  assert.equal(skillConversationHttpScope(url('/internal/agent/tasks/conversation-executions/commands?token=x'), { method: 'GET' }), false)
+    assert.equal(skillConversationHttpScope(url(`/internal/agent/executions/e/runs/r/${path}`), { method: 'POST' }), false, path)
+  assert.equal(skillConversationHttpScope(url('/internal/agent/executions/controlled-image-v3-commands'), { method: 'GET' }), false)
+  assert.equal(skillConversationHttpScope(url('/internal/agent/executions/commands?token=x'), { method: 'GET' }), false)
 })
 
 test('committed server envelope resumes without local blob/staging or a runnable dependency', async t => {
@@ -121,7 +121,7 @@ test('syntactically valid but incorrect result digest is not a commit receipt', 
 test('frozen §6 source kinds/identities and safe Java lengths preserve MIME/hash; absence is explicit', () => {
   const c = command(); c.inputRefs = ['input_1']
   const input = { inputRef: 'input_1', sourceKind: 'TASK_LINKED_WORKSPACE_VERSION', sourceIdentity: { fileId: 'f', version: 1, purpose: 'INPUT' }, contentMimeType: 'text/plain', byteLength: '4', sha256: 'a'.repeat(64) }
-  const envelope = { schemaVersion: 5, executionId: c.executionId, leaseVersion: '9007199254740993', snapshotSha256: c.snapshotDigest, noReferencedMaterials: false, inputs: [input] }
+  const envelope = { schemaVersion: 6, executionId: c.executionId, leaseVersion: '9007199254740993', snapshotSha256: c.snapshotDigest, noReferencedMaterials: false, inputs: [input] }
   assert.deepEqual(parseSkillInputSnapshot(envelope, c, { version: '9007199254740993' })[0], { ...input, byteLength: '4' })
   for (const patch of [{ sourceKind: 'URL' }, { byteLength: Number.MAX_SAFE_INTEGER + 1 }, { byteLength: '-1' }, { sourceIdentity: null }])
     assert.throws(() => parseSkillInputSnapshot({ ...envelope, inputs: [{ ...input, ...patch }] }, c, { version: '9007199254740993' }), /SNAPSHOT_INVALID/)
@@ -312,7 +312,7 @@ for (const code of ['NATIVE_EXECUTION_TURN_FAILED', 'NATIVE_EXECUTION_TURN_INTER
         if (!url.pathname.endsWith('/failure')) return f.options.fetchFn(url, opts)
         reports++; const body = JSON.parse(opts.body)
         assert.equal(body.code, code); assert.equal(body.fence.version, '9007199254740993')
-        return response(url, { executionId: f.c.executionId, taskId: f.c.taskId, runId: f.c.runId, targetAgentId: 'agent', state: 'FAILED', failureCode: 'AGENT_DELIVERY_FAILED' })
+        return response(url, { executionId: f.c.executionId, scope: f.c.scope, runId: f.c.runId, targetAgentId: 'agent', state: 'FAILED', failureCode: 'AGENT_DELIVERY_FAILED' })
       } }
     const lane = new SkillConversationLane(options)
     assert.equal((await lane.poll()).status, 'PROGRESSED')
@@ -330,7 +330,7 @@ test('unreported terminal resumes its authorized lease and reports only the orig
       if (!url.pathname.endsWith('/failure')) return f.options.fetchFn(url, opts)
       sent.push(JSON.parse(opts.body))
       if (sent.length === 1) throw new Error('reply lost after commit')
-      return response(url, { executionId: f.c.executionId, taskId: f.c.taskId, runId: f.c.runId, targetAgentId: 'agent', state: 'FAILED', failureCode: 'AGENT_DELIVERY_FAILED' })
+      return response(url, { executionId: f.c.executionId, scope: f.c.scope, runId: f.c.runId, targetAgentId: 'agent', state: 'FAILED', failureCode: 'AGENT_DELIVERY_FAILED' })
     } }
   await partial(new SkillConversationLane(options).poll(), 'SKILL_TRANSPORT_UNKNOWN')
   await new SkillConversationLane(options).poll()
@@ -343,7 +343,7 @@ test('known engine failure with server unresolved effects stays UNKNOWN and neve
   const f = fixture(t); let runs = 0
   const options = { ...f.options, runNative: async () => { runs++; throw Object.assign(new Error('failed'), { code: 'NATIVE_EXECUTION_TURN_FAILED' }) },
     fetchFn: async (url, opts) => url.pathname.endsWith('/failure')
-      ? response(url, { executionId: f.c.executionId, taskId: f.c.taskId, runId: f.c.runId, targetAgentId: 'agent', state: 'QUEUED', failureCode: null })
+      ? response(url, { executionId: f.c.executionId, scope: f.c.scope, runId: f.c.runId, targetAgentId: 'agent', state: 'QUEUED', failureCode: null })
       : f.options.fetchFn(url, opts) }
   await partial(new SkillConversationLane(options).poll(), 'SKILL_RESULT_UNKNOWN')
   await partial(new SkillConversationLane(options).poll(), 'SKILL_RESULT_UNKNOWN')
@@ -365,7 +365,7 @@ test('failure receipt must match the execution and agent before cleanup or termi
     runNative: async () => { throw Object.assign(new Error('failed'), { code: 'NATIVE_EXECUTION_TURN_FAILED' }) },
     onFailed: async () => { cleaned = true },
     fetchFn: async (url, opts) => url.pathname.endsWith('/failure')
-      ? response(url, { executionId: 'foreign', taskId: f.c.taskId, runId: f.c.runId, targetAgentId: 'agent', state: 'FAILED', failureCode: 'AGENT_DELIVERY_FAILED' })
+      ? response(url, { executionId: 'foreign', scope: f.c.scope, runId: f.c.runId, targetAgentId: 'agent', state: 'FAILED', failureCode: 'AGENT_DELIVERY_FAILED' })
       : f.options.fetchFn(url, opts) })
   await partial(lane.poll(), 'SKILL_FAILURE_UNCONFIRMED')
   assert.equal(cleaned, false); assert.equal(lane.pendingCommands().length, 1)
@@ -407,7 +407,7 @@ test('expired old lease is replaced before reporting persisted engine terminal w
         reports.push(JSON.parse(opts.body))
         if (reports.length === 1) throw new Error('connection lost before server received fact')
         assert.deepEqual(reports[1], { fence: nextFence, code: 'NATIVE_EXECUTION_TURN_INTERRUPTED' })
-        return response(url, { executionId: f.c.executionId, taskId: f.c.taskId, runId: f.c.runId, targetAgentId: 'agent', state: 'FAILED', failureCode: 'AGENT_DELIVERY_FAILED' })
+        return response(url, { executionId: f.c.executionId, scope: f.c.scope, runId: f.c.runId, targetAgentId: 'agent', state: 'FAILED', failureCode: 'AGENT_DELIVERY_FAILED' })
       }
       return f.options.fetchFn(url, opts)
     } }
@@ -446,7 +446,7 @@ test('authoritative unresolved terminal remains UNKNOWN under renewed fence with
       if (url.pathname.endsWith('/resume')) return response(url, { phase: 'RESULT_UNKNOWN', allowedWork: ['QUERY_EFFECT'], resultManifest: null,
         turnFailureCode: 'NATIVE_EXECUTION_TURN_FAILED', effects: {}, lease: { executionId: f.c.executionId,
           version: '9007199254740994', token: '00000000-0000-0000-0000-000000000002', expiresAt: Date.now() + 600000 } })
-      if (url.pathname.endsWith('/failure')) { reports++; return response(url, { executionId: f.c.executionId, taskId: f.c.taskId,
+      if (url.pathname.endsWith('/failure')) { reports++; return response(url, { executionId: f.c.executionId, scope: f.c.scope,
         runId: f.c.runId, targetAgentId: 'agent', state: 'QUEUED', failureCode: null }) }
       return f.options.fetchFn(url, opts)
     } }
@@ -594,7 +594,7 @@ test('business failure recovery does not copy source-owned usage or replay the n
         assert.deepEqual(Object.keys(body).sort(), ['code', 'fence'])
         if (reports === 1) throw new Error('lost transport response')
         assert.deepEqual(body.fence, nextFence)
-        return response(url, { executionId: f.c.executionId, taskId: f.c.taskId, runId: f.c.runId, targetAgentId: 'agent', state: 'FAILED', failureCode: 'AGENT_DELIVERY_FAILED' })
+        return response(url, { executionId: f.c.executionId, scope: f.c.scope, runId: f.c.runId, targetAgentId: 'agent', state: 'FAILED', failureCode: 'AGENT_DELIVERY_FAILED' })
       }
       return f.options.fetchFn(url, opts)
     } }
@@ -642,7 +642,7 @@ test('completed business receipt does not hide pending cost evidence; lost ack r
 })
 
 test('cost route is native POST-only and rejects query or encoded path aliases', () => {
-  const url = new URL('https://api.example.test/internal/agent/tasks/task/runs/run/conversation/usage')
+  const url = new URL('https://api.example.test/internal/agent/executions/pwe_1/runs/run/usage')
   assert.equal(skillConversationHttpScope(url, { method: 'POST' }), true)
   assert.equal(skillConversationHttpScope(url, { method: 'GET' }), false)
   url.search = '?owner=other'; assert.equal(skillConversationHttpScope(url, { method: 'POST' }), false)
@@ -668,7 +668,7 @@ test('provider child calls use authenticated cost route and survive ACK loss wit
   assert.equal(restarted.nextRecoveryAt(),Infinity)
 })
 for(const path of ['usage','provider-usage']) test(`cost ${path} route permits only native POST without aliases`,()=>{
- const url=new URL(`https://api.example.test/internal/agent/tasks/task/runs/run/conversation/${path}`)
+ const url=new URL(`https://api.example.test/internal/agent/executions/pwe_1/runs/run/${path}`)
  assert.equal(skillConversationHttpScope(url,{method:'POST'}),true)
  assert.equal(skillConversationHttpScope(url,{method:'GET'}),false)
  url.search='?owner=another';assert.equal(skillConversationHttpScope(url,{method:'POST'}),false)
@@ -686,7 +686,7 @@ for (const terminal of [false, true]) test(`stopped source-only flush preserves 
   if (terminal) provider.complete({ usage: { output_tokens: 9 } })
   const { registry, runners, runNative, ...options } = f.options
   const delivery = new SkillUsageDelivery({ ...options, fetchFn: async (url, opts) => {
-    assert.match(url.pathname, /^\/internal\/agent\/tasks\/task\/runs\/run\/conversation\/(usage|provider-usage)$/)
+    assert.match(url.pathname, /^\/internal\/agent\/executions\/pwe_1\/runs\/run\/(usage|provider-usage)$/)
     assert.equal(opts.method, 'POST')
     const payload = JSON.parse(opts.body); calls.push(payload)
     return response(url, { executionId: f.c.executionId, attemptId: 'b'.repeat(64), revision: (payload.phase || payload.observation.phase) === 'STARTED' ? '1' : '2', status: 'PENDING_USAGE', costYuan: null })
@@ -744,4 +744,61 @@ test('stopped flush cannot confirm unreadable historical commands or inconsisten
   const result = await delivery.flush()
   assert.equal(result.confirmed, false); assert.equal(result.errors[0].code, 'NATIVE_USAGE_SOURCE_MISSING')
   assert.equal(f.modelCalls(), 0)
+})
+
+test('retired routes and encoded aliases never fall through to unrelated internal APIs', () => {
+  for (const path of ['/internal/agent/tasks/conversation-executions/commands',
+    '/internal/agent/tasks/t/runs/r/conversation/lease',
+    '/internal/agent/tasks/t/runs/r/conversation/provider-usage',
+    '/internal/agent/executions/e/runs/r/%6cease',
+    '/internal/agent/executions/e/runs/r/usage?',
+    '/internal/agent/executions/e/runs/r/usage#fragment']) {
+    for (const method of ['GET', 'POST'])
+      assert.equal(skillConversationHttpScope(new URL(path, 'https://api.example.test'), { method }), false, path)
+  }
+  assert.equal(skillConversationHttpScope(new URL('https://api.example.test/internal/agent/executions/commands')), true)
+})
+
+test('private execution uses the same inbox, lease, input and result transport without a task', async t => {
+  const f = fixture(t)
+  f.c.scope = { ...f.c.scope, kind: 'PRIVATE', taskId: null }
+  assert.equal((await f.lane.poll()).processed, 1)
+  assert.equal(f.modelCalls(), 1)
+  assert.ok(f.calls.length > 2)
+  assert.ok(f.calls.every(path => path === '/internal/agent/executions/commands' || path.startsWith(`/internal/agent/executions/${f.c.executionId}/runs/${f.c.runId}/`)))
+  assert.equal((await f.lane.poll()).processed, 1)
+  assert.equal(f.modelCalls(), 1, 'same result recovery must not invoke the model again')
+})
+
+test('private fixed workspace inputs use v6 snapshots and reject retired snapshot envelopes', () => {
+  const c = command(); c.scope = { ...c.scope, kind: 'PRIVATE', taskId: null }; c.inputRefs = ['input1']
+  const input = { inputRef: 'input1', sourceKind: 'WORKSPACE_VERSION', sourceIdentity: { fileId: 'file1', version: '3' },
+    contentMimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', byteLength: '12', sha256: 'a'.repeat(64) }
+  const snapshot = { schemaVersion: 6, executionId: c.executionId, leaseVersion: '1', snapshotSha256: c.snapshotDigest,
+    noReferencedMaterials: false, inputs: [input] }
+  assert.deepEqual(parseSkillInputSnapshot(snapshot, c, { version: '1' }), [input])
+  assert.throws(() => parseSkillInputSnapshot({ ...snapshot, schemaVersion: 5 }, c, { version: '1' }), /SKILL_INPUT_SNAPSHOT_INVALID/)
+  assert.throws(() => parseSkillInputSnapshot({ ...snapshot, snapshotSha256: 'b'.repeat(64) }, c, { version: '1' }), /SKILL_INPUT_SNAPSHOT_INVALID/)
+})
+
+test('terminal receipt from another conversation scope cannot confirm private failure', async t => {
+  const f = fixture(t)
+  f.c.scope = { ...f.c.scope, kind: 'PRIVATE', taskId: null }
+  f.lane.runNative = async () => { throw Object.assign(new Error('terminal'), { code: 'NATIVE_EXECUTION_TURN_FAILED' }) }
+  const fetch = f.lane.fetch
+  f.lane.fetch = async (url, opts) => url.pathname.endsWith('/failure')
+    ? response(url, { executionId: f.c.executionId, scope: { ...f.c.scope, conversationId: 'foreign' },
+      runId: f.c.runId, targetAgentId: 'agent', state: 'FAILED', failureCode: 'AGENT_DELIVERY_FAILED' })
+    : fetch(url, opts)
+  await partial(f.lane.poll(), 'SKILL_FAILURE_UNCONFIRMED')
+})
+
+test('shared API6 fixture decodes exact scope and keeps result schema2 canonical bytes', () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/native-execution-v6-local-files.json', import.meta.url)))
+  const wire = fixture.commandResponse.data.items[0]
+  const command = skillCommandFromWire(wire)
+  assert.deepEqual(command.scope, { kind: 'TASK', conversationId: '42', conversationGeneration: '1', taskId: 'task' })
+  for (const field of ['taskId', 'conversationId', 'conversationGeneration', 'snapshotSha256']) assert.equal(Object.hasOwn(command, field), false)
+  assert.equal(skillCanonicalJson(fixture.resultPreimage), fixture.canonicalPreimage)
+  assert.equal(skillDigest(fixture.resultPreimage), fixture.resultSha256)
 })

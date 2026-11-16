@@ -220,13 +220,27 @@ Only a proven RECEIVED, never-started command may resume execution. Legacy
 schema1 journals are retained, not decoded or automatically replayed.
 
 The registry publishes its schema2 subobject via authenticated registration and
-`refreshCapabilities`, not presence. Existing protocol4 execution commands carry
-the contract's `taskSkillBinding`: execution/grant/Agent and exact immutable
-installation/product/package/manifest/permission references. Execution and
-committed-result recovery resolve that retained installation, not current;
-new management fencing/policy cannot revoke an already admitted old task. The
-original execution snapshot digest algorithm/content is unchanged. Real new
-admission, grant and economic authorization remain API responsibilities.
+`refreshCapabilities`, not presence. Native execution uses protocol6 only, with
+an explicit PRIVATE or TASK conversation scope. Each selected skill carries an
+`executionBinding`: execution ID, canonical scope hash, grant revision, Agent and
+exact immutable installation/product/package/manifest/permission references.
+The separate SM-C1 management binding definition is unchanged. Result recovery
+resolves the retained installation, never a newer package selected by name.
+Protocols1–5 are historical read-only, not executable or automatically replayed.
+
+The sole native queue is `/internal/agent/executions/commands`; lease, input,
+output, effect, recovery and usage paths are below
+`/internal/agent/executions/{executionId}/runs/{runId}`. Both scopes use the same
+executor and checkpoint store. API retains business authorization; the Runtime
+does not create a task for PRIVATE or grant tools from model prose. The generic
+D06 adapter is restricted to its declared task command types and does not accept
+native protocol payloads as a fallback. This does not retire SM-C1 or E05.
+
+Implementation status (2026-11-17): Runtime source and focused diagnostics only;
+matching API admission/DTO/routes and database migration are not yet complete.
+Do not install this Runtime alone against API5. Coordinated deployment must
+first drain accepted5 executions, projections and outstanding usage; changing
+the declaration or schema files is not a cutover or production acceptance.
 
 This source change does not install, migrate live state, change credentials or
 systemd. CYF's fixed program directory is `app/`, not releases/current; any future

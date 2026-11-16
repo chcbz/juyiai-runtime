@@ -90,7 +90,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
       let socket = null; let observer = null; let abort = null; let loop = null; let channelConfirmed = false;
       let admitted = true; let activation = null; let resolveActivated; let rejectActivated; let closed = null;
       let lastPresenceSentAt = null; let lastPresenceAckAt = null; let channelState = 'initializing'; let lastFailure = null;
-      let nativeWorkEnabled = false; let fileWorkEnabled = false;
+      let nativeWorkEnabled = false;
       let registrationEpoch = 0;
       let managementSession = null; // Confirmed session authority survives catalog-only re-registration.
       const inFlightSkillReceipts = new Set();
@@ -126,7 +126,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
         // Initial registration/disconnect/rejection still withdraw authority; health
         // and actual executor capabilities remain part of ready() while ACK is pending.
         registrationEpoch++; observer.begin(envelope.messageId); channelConfirmed = retainConfirmed;
-        if (!channelConfirmed) { nativeWorkEnabled = false; fileWorkEnabled = false; registeredAt = null; serviceReadyAt = null; }
+        if (!channelConfirmed) { nativeWorkEnabled = false; registeredAt = null; serviceReadyAt = null; }
         if (!send(envelope)) observer.sendFailed(envelope.messageId);
         return true;
       };
@@ -204,9 +204,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
               }
               channelConfirmed = true; managementSession = session; registeredAt = Date.now(); serviceReadyAt = ready() ? registeredAt : null;
               nativeWorkEnabled = payload.nativeWorkNotifications === 1;
-              fileWorkEnabled = payload.workspaceFileWorkNotifications === 1;
               executor.bindWorkNotifications?.(nativeWorkEnabled ? 1 : null);
-              executor.bindWorkspaceFileWorkNotifications?.(fileWorkEnabled ? 1 : null);
               // The first ACK supplies owner scope. If it starts a catalog measurement,
               // activation waits for the follow-up catalog registration ACK; otherwise the
               // shared host could freeze INITIALIZED while re-registration is in flight.
@@ -241,15 +239,13 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
             }
             // This is a lossy scheduling hint, never an executable command or durable ACK.
             if (frame.messageType === 'runtime.work.available') {
-              if (frame.notificationVersion !== 1 || !['NATIVE_CONVERSATION', 'WORKSPACE_FILE'].includes(frame.lane)
-                  || (frame.lane === 'WORKSPACE_FILE' ? !fileWorkEnabled : !nativeWorkEnabled)
+              if (frame.notificationVersion !== 1 || frame.lane !== 'NATIVE_CONVERSATION' || !nativeWorkEnabled
                   || frame.agentId !== session.canonicalAgentId
                   || ['installationId', 'tenantId', 'clientId', 'hostId', 'runtimeInstanceId', 'sessionGeneration']
                     .some(key => frame[key] !== session[key])) {
                 logger('runtime-frame-rejected', { code: 'RUNTIME_WORK_HINT_INVALID' }); return;
               }
-              if (frame.lane === 'WORKSPACE_FILE') executor.workspaceFileWorkAvailable?.();
-              else executor.nativeWorkAvailable?.();
+              executor.nativeWorkAvailable?.();
               return;
             }
             // AgentWebSocketHandler.updateAgentStatus sends copyTrace(presence)
@@ -458,7 +454,7 @@ export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   "skill-registry.mjs",
   "skill-management-wire.mjs",
   "schemas/management-contract-v1.schema.json",
-  "schemas/native-task-skill-binding-v5.schema.json",
+  "schemas/execution-binding-v6.schema.json",
   "schemas/skill-manifest-v1.schema.json",
   "toolchain/delivery_tool.py",
   "toolchain/document_probe.py",
@@ -479,7 +475,7 @@ export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   "model-auth.mjs",
   "native-execution-runtime.mjs",
   "typed-inspection-runtime.mjs",
-  "workspace-file-bridge.mjs",
+  "native-api-origin.mjs",
   "workspace-manager.mjs",
   "workspace-policies.example.json"
 ]);

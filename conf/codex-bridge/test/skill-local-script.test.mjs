@@ -8,7 +8,7 @@ import { resolve } from 'node:path'
 import { createLocalScriptRunner } from '../skill-runners/local-script.mjs'
 import { skillHash } from '../skill-executor.mjs'
 import { skillPackageTreeDigest } from '../skill-manifest.mjs'
-import { SkillEffects, SkillExecutionStore, SKILL_INPUT_CARRIERS } from '../skill-execution-store.mjs'
+import { SkillEffects, SkillExecutionStore, SKILL_INPUT_CARRIERS, validateSkillInputReceipts } from '../skill-execution-store.mjs'
 const fixture = (t, body) => {
   const root = mkdtempSync(resolve(tmpdir(), 'skill-local-fixture-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
@@ -17,7 +17,7 @@ const fixture = (t, body) => {
   const bytes = Buffer.from('真实受权输入 abc\n'), inputPath = resolve(root, 'inputs/input_1')
   writeFileSync(inputPath, bytes, { mode: 0o400 })
   writeFileSync(resolve(root, 'private-home/auth.json'), 'host-token-must-not-be-visible', { mode: 0o600 })
-  const command = { executionId: 'pwe_local', snapshotDigest: 'a'.repeat(64), inputRefs: ['input_1'] }
+  const command = { executionProtocolVersion: 6, outputs: { dataSchema: { $schema: 'https://json-schema.org/draft/2020-12/schema', type: 'object' }, mimeTypes: ['text/plain'], multiple: true, artifactsRequired: false }, executionId: 'pwe_local', snapshotDigest: 'a'.repeat(64), inputRefs: ['input_1'] }
   const descriptor = { packageRoot: resolve(root, 'package'), manifest: { entrypoint: 'main.mjs',
     outputs: { dataSchema: { $schema: 'https://json-schema.org/draft/2020-12/schema', type: 'object' }, mimeTypes: ['text/plain'], multiple: false, artifactsRequired: false } } }
   const input = { inputRef: 'input_1', path: inputPath, contentMimeType: 'text/plain', bytes, byteLength: String(bytes.length), sha256: skillHash(bytes) }
@@ -126,7 +126,7 @@ test('zero-material local script persists a real result envelope without invente
   if (!await measured(t, runner, f.context)) return
   f.request.inputs = []; f.request.command.inputRefs = []
   const result = await runner.run(f.request), store = new SkillExecutionStore({ rootDirectory: resolve(f.root, 'store'), scope: { agentId: 'agent' }, command: f.request.command })
-  const persisted = store.persistResult(f.request.descriptor, result)
+  const persisted = store.persistNativeResult({ ...result, effectDependencies: [] })
   assert.deepEqual(persisted.result.inputReceipts, []); assert.deepEqual(persisted.result.data, { answer: '真实无资料脚本结果' }); assert.deepEqual(store.loadResult(), persisted)
 })
 
@@ -141,18 +141,20 @@ test('declared local input capability cannot be READY until the shared receipt c
 })
 
 
-test('local-file receipt and genuine bytes close durable result persistence/reconstruction and cannot masquerade as native input', async t => {
+test('host-bound local-file receipts persist and reconstruction rejects a forged input digest', async t => {
   const f = fixture(t, `import fs from 'node:fs';${readRequest}console.log(JSON.stringify({data:{source:fs.readFileSync(request.inputs[0].path,'utf8')},artifacts:[]}));`), runner = createLocalScriptRunner()
   if (!await measured(t, runner, { ...f.context, inputMimeTypes: ['text/plain'] })) return
   f.request.descriptor.manifest.runner = 'local-script'
   const result = await runner.run(f.request)
   const options = { rootDirectory: resolve(f.root, 'store'), scope: { agentId: 'agent' }, command: f.request.command }, store = new SkillExecutionStore(options)
   store.write('inputs-snapshot', { inputs: [{ inputRef: f.input.inputRef, sha256: f.input.sha256, byteLength: f.input.byteLength }] })
-  const persisted = store.persistResult(f.request.descriptor, result)
-  assert.equal(persisted.result.inputReceipts[0].carrier, 'local-file'); assert.deepEqual(new SkillExecutionStore(options).loadResult(), persisted)
+  validateSkillInputReceipts(result.inputReceipts, f.request.command.inputRefs, [f.input], 'local-script')
+  assert.equal(result.inputReceipts[0].carrier, 'local-file')
+  const persisted = store.persistNativeResult({ ...result, effectDependencies: [] })
+  assert.deepEqual(new SkillExecutionStore(options).loadResult(), persisted)
   for (const runner of ['native-model', 'provider-operation', undefined])
-    assert.throws(() => store.persistResult({ ...f.request.descriptor, manifest: { ...f.request.descriptor.manifest, runner } }, result), /SKILL_RESULT_INPUT_RECEIPT_INVALID/)
-  assert.throws(() => store.persistResult(f.request.descriptor, { ...result, inputReceipts: [{ ...result.inputReceipts[0], sha256: '0'.repeat(64) }] }), /SKILL_RESULT_INPUT_RECEIPT_INVALID/)
+    assert.throws(() => validateSkillInputReceipts(result.inputReceipts, f.request.command.inputRefs, [f.input], runner), /SKILL_RESULT_INPUT_RECEIPT_INVALID/)
+  assert.throws(() => store.persistNativeResult({ ...result, effectDependencies: [], inputReceipts: [{ ...result.inputReceipts[0], sha256: '0'.repeat(64) }] }), /SKILL_RESULT_INPUT_RECEIPT_INVALID/)
 })
 
 test('ZIP-verified package dependency replacement after real probe prevents effect registration/process launch', async t => {

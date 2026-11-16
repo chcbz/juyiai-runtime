@@ -6,7 +6,7 @@ import { isAbsolute, resolve } from 'node:path'
 import { parseSkillCommand, skillDigest, skillId } from './skill-executor.mjs'
 import { SkillExecutionStore } from './skill-execution-store.mjs'
 import { nativeSessionHeaders } from './conversation-native.mjs'
-const BASE = '/internal/agent/tasks'
+const BASE = '/internal/agent/executions'
 const fail = (code, cause = null) => { throw Object.assign(new Error(code), { code, ...(cause ? { cause } : {}) }) }
 const originOf = value => {
   let url; try { url = new URL(value) } catch { fail('SKILL_API_ORIGIN_INVALID') }
@@ -107,7 +107,7 @@ export class SkillUsageDelivery {
       const retry = this.usageRetries.get(command.executionId)
       if (retry && this.now() < retry.nextAt) continue
       try {
-        const receipt = await this.request(`${BASE}/${command.taskId}/runs/${command.runId}/conversation/${item.endpoint || 'usage'}`, 'POST', item.payload)
+        const receipt = await this.request(`${BASE}/${command.executionId}/runs/${command.runId}/${item.endpoint || 'usage'}`, 'POST', item.payload)
         acknowledgeNativeUsage(store, item, receipt)
         this.usageRetries.delete(command.executionId)
       } catch (error) {

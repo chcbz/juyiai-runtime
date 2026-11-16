@@ -61,7 +61,7 @@ export function loadNativeSkillConfiguration({ file, scope, command, entries, di
   if (!object(config) || config.schemaVersion !== 1 || !object(config.scope) || !object(config.installations)
       || scopeKeys.some(key => typeof scope?.[key] !== 'string' || config.scope[key] !== scope[key])) fail('NATIVE_SKILL_CONFIG_SCOPE_MISMATCH')
   const selected = entries.flatMap(({ descriptor }) => {
-    const commandSkill = command.skills.find(item => item.taskSkillBinding.skillInstallationId === descriptor.skillInstallationId)
+    const commandSkill = command.skills.find(item => item.executionBinding.skillInstallationId === descriptor.skillInstallationId)
     if (!commandSkill || commandSkill.skill.key !== descriptor.skillKey || commandSkill.skill.packageSha256 !== descriptor.packageSha256) fail('NATIVE_SKILL_CONFIG_BINDING_INVALID')
     const entry = config.installations[descriptor.skillInstallationId]
     if (entry === undefined) return []
