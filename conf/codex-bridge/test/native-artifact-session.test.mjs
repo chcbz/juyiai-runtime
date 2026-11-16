@@ -100,7 +100,7 @@ test('async format parsing rechecks authority before publication, without recapt
 test('zero-file structured reply uses the advertised proposal contract and preserves exact data', async t => {
   const f = fixture(t)
   f.store.command.outputs.artifactsRequired = false
-  f.store.command.outputs.dataSchema = { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'], additionalProperties: false }
+  f.store.command.outputs.dataSchema = { $schema: 'https://json-schema.org/draft/2020-12/schema', type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'], additionalProperties: false }
   const tool = f.session.policy().tools.find(tool => tool.name === 'result_propose')
   assert.match(tool.description, /every successful turn, including pure-text answers/)
   assert.match(tool.description, /zero files use artifactRefs: \[\]/)
