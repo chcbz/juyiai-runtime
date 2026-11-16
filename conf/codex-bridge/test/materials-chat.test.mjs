@@ -176,7 +176,7 @@ test('public materials transport allows only exact GET content route, no aliases
 
 test('native local-file capability is a separate online declaration and requires the execution transport', () => {
   const adapter = { closed: false, readback: { schema: { ...schema, measured: true, schemaContractId: schema.contractId } } }
-  const declaration = { schemaVersion: 1, executionProtocolVersion: 5, toolPolicyRef: 'NATIVE_LOCAL_FILES_V1', outputMimeTypes: ['text/plain', 'text/markdown', 'text/html', 'application/json'] }
+  const declaration = { schemaVersion: 1, executionProtocolVersion: 6, toolPolicyRef: 'NATIVE_LOCAL_FILES_V1', outputMimeTypes: ['text/plain', 'text/markdown', 'text/html', 'application/json'] }
   const runtime = { declaration: () => ({ supportedInputs: formats }) }
   const native = { nativeExecutionDeclaration: () => declaration }
   const readyProfile = { ...profile, workspaceFileApiOrigin: 'https://platform.example', workspaceFileRootDir: '/synthetic/private-root' }
@@ -193,7 +193,7 @@ test('native local-file capability is a separate online declaration and requires
 
 test('native-only measured readiness refreshes registration without claiming read-only carriers', () => {
   let refreshed = 0, statuses = 0
-  const state = { disposed: false, typedInspectionProfileRuntime: null, nativeExecutionProfileRuntime: { nativeExecutionDeclaration: () => ({ executionProtocolVersion: 5 }) },
+  const state = { disposed: false, typedInspectionProfileRuntime: null, nativeExecutionProfileRuntime: { nativeExecutionDeclaration: () => ({ executionProtocolVersion: 6 }) },
     runtimeTransport: { refreshCapabilities: () => { refreshed++; return true } } }
   const p = { ...profile, runtimeIdentity: {} }
   assert.equal(publishTypedInspectionReadiness(p, state, { sendStatusFn: () => { statuses++; return true }, busyFn: () => false }), true)

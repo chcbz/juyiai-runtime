@@ -68,7 +68,7 @@ const fixture = (t, displayName) => {
     loseCommit: () => { loseCommit = true }, loseStage: () => { loseStage = true }, emptyInbox: () => { inboxEmpty = true }, corruptDigest: () => { corruptDigest = true },
     serverManifest: () => serverManifest }
 }
-test('protocol5 empty-skill transport commits data without legacy effects or output-commit', async t => {
+test('protocol6 empty-skill transport commits data without legacy effects or output-commit', async t => {
   const f = fixture(t); assert.deepEqual(await f.lane.poll(), { status: 'PROGRESSED', processed: 1, deferred: 0, executionErrors: [] }); assert.equal(f.modelCalls(), 1)
   assert.ok(f.calls.some(path => path.includes('/result-commits/'))); assert.ok(!f.calls.some(path => /consent|provider-start|output-commits/.test(path)))
   assert.equal(f.effects.size, 0)
