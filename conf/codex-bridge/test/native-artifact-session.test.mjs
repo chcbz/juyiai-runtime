@@ -95,3 +95,22 @@ test('async format parsing rechecks authority before publication, without recapt
   assert.equal(f.store.loadResult(), null)
   assert.equal(f.store.read('native-selection'), null)
 })
+
+// NF-1: the same generic result contract supports no-file answers; no PRIVATE/Agent branch.
+test('zero-file structured reply uses the advertised proposal contract and preserves exact data', async t => {
+  const f = fixture(t)
+  f.store.command.outputs.artifactsRequired = false
+  f.store.command.outputs.dataSchema = { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'], additionalProperties: false }
+  const tool = f.session.policy().tools.find(tool => tool.name === 'result_propose')
+  assert.match(tool.description, /every successful turn, including pure-text answers/)
+  assert.match(tool.description, /zero files use artifactRefs: \[\]/)
+  assert.throws(() => f.session.finalize({ ...f.terminal, content: 'only prose' }, []), /NATIVE_PROPOSAL_REQUIRED/)
+  await assert.rejects(() => f.call('result_propose', { summary: 'answer', artifactRefs: [], data: null }, 'bad-data'), /PROPOSAL_INVALID/)
+  const args = { summary: 'reply only', artifactRefs: [], data: { answer: 'NATIVE6_TEXT_OK' } }
+  const first = await f.call('result_propose', args, 'no-file-reply')
+  assert.deepEqual(await f.call('result_propose', args, 'no-file-reply'), first)
+  const result = f.session.finalize(f.terminal, [])
+  assert.deepEqual(result.result.data, args.data)
+  assert.deepEqual(result.result.artifacts, [])
+  assert.deepEqual(result.result.inputReceipts, [])
+})
