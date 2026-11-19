@@ -393,7 +393,7 @@ test('real native capability declaration measures shell and provider TLS without
     assert.equal(runtime.nativeExecutionDeclaration(), null)
     const declaration = await runtime.measureNativeExecution()
     if (!declaration) console.log('native declaration failure:', JSON.stringify(runtime.nativeExecutionMeasurementFailure))
-    assert.deepEqual(declaration, { schemaVersion: 1, executionProtocolVersion: 6, toolPolicyRef: 'NATIVE_LOCAL_FILES_V1',
+    assert.deepEqual(declaration, { schemaVersion: 1, executionProtocolVersion: 6, privateBusinessToolsVersion: 1, toolPolicyRef: 'NATIVE_LOCAL_FILES_V1',
       outputMimeTypes: ['text/plain', 'text/markdown', 'text/html', 'application/json'] })
     assert.equal(runtime.nativeExecutionDeclaration(), declaration)
     assert.equal(runtime.activeAdapters.size, 0)
