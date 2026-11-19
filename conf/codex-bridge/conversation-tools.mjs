@@ -9,6 +9,8 @@ const id = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,
  * installation integrity belongs to the existing manager, and no token enters model context. */
 export async function prepareConversationTools({ message, apiOrigin, nativeFetch, loadInstalled, current,
   readInstructions = row => readFileSync(resolve(row.packageRoot, 'SKILL.md'), { encoding: 'utf8', flag: constants.O_RDONLY | constants.O_NOFOLLOW }) }) {
+  // The API catalog is private-turn only; a task dispatch always gets an empty catalog.
+  if (message.conversationScopeType === 'bounty') return null
   if (!(message.durable || message.ackRequired && message.deliverySemantics === 'AT_LEAST_ONCE_DURABLE_DEDUPE_REQUIRED') || !id(message.requestId) || !id(message.turnId) || !id(message.messageId) || !id(message.dispatchId)) return null
   const origin = new URL(apiOrigin).origin
   const path = `/internal/agent/chat/requests/${message.requestId}/turns/${message.turnId}/tools`

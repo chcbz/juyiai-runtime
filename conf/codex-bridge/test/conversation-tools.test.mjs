@@ -18,6 +18,15 @@ function fixture() {
 }
 const invoke = session => session.binding.callTool({ bindingId: 'dispatch1', messageId: 'message1', tool: tool.name, arguments: { title: '名称' } })
 
+test('task CHAT skips the private catalog; private and legacy unscoped dispatches still consult the API', async () => {
+  for (const scope of ['bounty', 'private', undefined]) {
+    const f = fixture()
+    const session = await prepareConversationTools({ ...f.options, message: { ...message, conversationScopeType: scope } })
+    assert.equal(session !== null, scope !== 'bounty')
+    assert.equal(f.calls.length, scope === 'bounty' ? 0 : 1)
+  }
+})
+
 test('generic installed skill and API catalog provide bounded conversation callbacks, not a skill-name branch', async () => {
   const f = fixture(); const session = await prepareConversationTools(f.options)
   assert.match(session.instructions, /some-position-skill@1.0.0/)

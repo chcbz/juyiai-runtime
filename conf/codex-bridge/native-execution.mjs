@@ -27,15 +27,19 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
     if (signal?.aborted) fail('SKILL_LEASE_UNCERTAIN')
     checkActive()
     const local = session.policy()
-    const business = command.privateTools?.tools ?? []
-    const names = new Set(business.map(tool => tool.name))
-    if (business.length && (typeof callPrivateTool !== 'function' || local.tools.some(t => names.has(t.name)))) fail('SKILL_PRIVATE_CATALOG_INVALID')
-    const nativeExecution = { ...local, networkAccess, tools: [...local.tools, ...business], callTool(ctx) {
-      if (!names.has(ctx.tool)) return local.callTool(ctx)
-      session.requireBoundTurn(ctx)
-      if (store.read('result') || store.read('native-terminal')) fail('NATIVE_RESULT_ALREADY_FROZEN')
-      return callPrivateTool(ctx)
-    } }
+    const business = command.privateTools?.tools
+    const nativeExecution = { ...local, networkAccess }
+    if (business?.length) {
+      const names = new Set(business.map(tool => tool.name))
+      if (typeof callPrivateTool !== 'function' || local.tools.some(t => names.has(t.name))) fail('SKILL_PRIVATE_CATALOG_INVALID')
+      nativeExecution.tools = [...local.tools, ...business]
+      nativeExecution.callTool = ctx => {
+        if (!names.has(ctx.tool)) return local.callTool(ctx)
+        session.requireBoundTurn(ctx)
+        if (store.read('result') || store.read('native-terminal')) fail('NATIVE_RESULT_ALREADY_FROZEN')
+        return callPrivateTool(ctx)
+      }
+    }
     const adapter = await profileRuntime.openNativeExecutionAdapter(resolve(store.directory, 'inputs'), requestKey, binding, {
       scratchDirectory: resolve(store.directory, 'scratch'), draftsDirectory: resolve(store.directory, 'drafts'),
       skills: entries.map(entry => ({ skillKey: entry.descriptor.skillKey, packageRoot: entry.descriptor.packageRoot, packageTreeDigest: entry.descriptor.packageTreeDigest })),
