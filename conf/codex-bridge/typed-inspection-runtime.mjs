@@ -1,3 +1,4 @@
+import { ChatMaterialByteCache } from './chat-material-byte-cache.mjs'
 import { IMAGE_INPUT_MIMES, normalizeImageInput, IMAGE_TRANSFORM_ID } from './image-input.mjs'
 import { prepareImageDerivative } from './image-input-file.mjs'
 import { nativeSessionHeaders } from './conversation-native.mjs'
@@ -237,9 +238,13 @@ export const BUILTIN_TYPED_INSPECTION_DECODERS = freeze({
 
 
 export class TypedInspectionMaterializer {
-  constructor({ apiOrigin, rootDir, fetchFn = globalThis.fetch, getRuntimeHeaders, agentId, runtimeInstanceId, parsers = {}, decoders = BUILTIN_TYPED_INSPECTION_DECODERS, forbidden = [] }) {
+  constructor({ apiOrigin, rootDir, cacheDir, fetchFn = globalThis.fetch, getRuntimeHeaders, agentId, runtimeInstanceId, parsers = {}, decoders = BUILTIN_TYPED_INSPECTION_DECODERS, forbidden = [] }) {
     this.origin = fixedOrigin(apiOrigin); this.root = ensurePrivateRoot(rootDir)
     for (const candidate of forbidden.filter(value => value && existsSync(resolve(value)))) if (overlap(this.root, realpathSync(resolve(candidate)))) fail('TYPED_INSPECTION_PRIVATE_DIRECTORY_OVERLAP')
+    if (cacheDir && ![this.root,...forbidden.filter(Boolean)].some(path => overlap(resolve(cacheDir),resolve(path)) ||
+        (existsSync(path) && overlap(resolve(cacheDir),realpathSync(path))))) {
+      try { this.cache = new ChatMaterialByteCache(ensurePrivateRoot(cacheDir)) } catch { /* proceed without caching */ }
+    }
     if (typeof fetchFn !== 'function' || typeof getRuntimeHeaders !== 'function' || !nonblank(agentId) || !nonblank(runtimeInstanceId) || !object(parsers) || !object(decoders)) fail('TYPED_INSPECTION_MATERIALIZER_CONFIG_INVALID')
     this.fetchFn = fetchFn; this.getRuntimeHeaders = getRuntimeHeaders; this.agentId = agentId; this.runtimeInstanceId = runtimeInstanceId; this.parsers = parsers; this.decoders = decoders
   }
@@ -261,6 +266,7 @@ export class TypedInspectionMaterializer {
     if (existsSync(finalDirectory)) fail('TYPED_INSPECTION_REQUEST_DIRECTORY_EXISTS')
     const temporary = resolve(this.root, `.${directoryKey}.${process.pid}.${Date.now()}.tmp`)
     mkdirSync(temporary, { mode: 0o700 }); chmodSync(temporary, 0o700); directoryFsync(this.root)
+    const cache = contract === 'materials' ? this.cache : null
     const materialized = []
     try {
       for (let index = 0; index < typed.manifest.sources.length; index++) {
@@ -269,22 +275,34 @@ export class TypedInspectionMaterializer {
         const path = contract === 'materials' ? expectedPath.replace('/inspection/', '/materials/') : expectedPath
         if (contract === 'materials' && source.downloadUrl !== path) fail('MATERIALS_TRANSPORT_INVALID')
         const expectedUrl = `${this.origin}${path}`
-        const response = await this.fetchFn(expectedUrl, {
+        const key = cache?.key(message,this.agentId,this.runtimeInstanceId,source.sha256)
+        const tag = `"${source.sha256}"`
+        const fetchSource = conditional => this.fetchFn(expectedUrl, {
           method: 'GET', redirect: 'manual', headers: {
-            ...proof(), Accept: source.mimeType, [contract === 'materials' ? 'X-Materials-Manifest-Digest' : 'X-Inspection-Manifest-Digest']: typed.manifestDigest
+            ...proof(), ...(conditional ? { 'If-None-Match': tag } : {}), Accept: source.mimeType, [contract === 'materials' ? 'X-Materials-Manifest-Digest' : 'X-Inspection-Manifest-Digest']: typed.manifestDigest
           }
         })
-        if (!response || response.status !== 200) {
-          const code = response?.status >= 300 && response?.status < 400 ? 'TYPED_INSPECTION_REDIRECT_FORBIDDEN' : 'TYPED_INSPECTION_CONTENT_FETCH_FAILED'
-          // Status only: never log credentials, response bytes or peer error text.
-          throw Object.assign(new Error(`${code}: HTTP ${Number.isInteger(response?.status) ? response.status : 'UNAVAILABLE'}`), { code, httpStatus: response?.status || null })
+        const conditional = !!cache && await cache.has(key)
+        let response = await fetchSource(conditional), bytes
+        if (conditional && response?.status === 304) {
+          if (response.redirected || response.url !== expectedUrl || header(response.headers, 'etag') !== tag) fail('MATERIALS_REVALIDATION_INVALID')
+          bytes = await cache.read(key,source)
+          if (!bytes) response = await fetchSource(false)
         }
-        if (response.redirected === true || response.url !== expectedUrl) fail('TYPED_INSPECTION_RESPONSE_URL_MISMATCH')
-        if ((header(response.headers, 'content-type') || '').trim().toLowerCase() !== source.mimeType.toLowerCase()) fail('TYPED_INSPECTION_CONTENT_TYPE_MISMATCH')
-        if ((header(response.headers, 'content-length') || '').trim() !== source.byteLength) fail('TYPED_INSPECTION_CONTENT_LENGTH_MISMATCH')
-        const bytes = await responseBytes(response)
-        if (String(bytes.length) !== source.byteLength) fail('TYPED_INSPECTION_CONTENT_LENGTH_MISMATCH')
-        if (sha256(bytes) !== source.sha256) fail('TYPED_INSPECTION_CONTENT_DIGEST_MISMATCH')
+        if (!bytes) {
+          if (!response || response.status !== 200) {
+            const code = response?.status >= 300 && response?.status < 400 ? 'TYPED_INSPECTION_REDIRECT_FORBIDDEN' : 'TYPED_INSPECTION_CONTENT_FETCH_FAILED'
+            // Status only: never log credentials, response bytes or peer error text.
+            throw Object.assign(new Error(`${code}: HTTP ${Number.isInteger(response?.status) ? response.status : 'UNAVAILABLE'}`), { code, httpStatus: response?.status || null })
+          }
+          if (response.redirected === true || response.url !== expectedUrl) fail('TYPED_INSPECTION_RESPONSE_URL_MISMATCH')
+          if ((header(response.headers, 'content-type') || '').trim().toLowerCase() !== source.mimeType.toLowerCase()) fail('TYPED_INSPECTION_CONTENT_TYPE_MISMATCH')
+          if ((header(response.headers, 'content-length') || '').trim() !== source.byteLength) fail('TYPED_INSPECTION_CONTENT_LENGTH_MISMATCH')
+          bytes = await responseBytes(response)
+          if (String(bytes.length) !== source.byteLength) fail('TYPED_INSPECTION_CONTENT_LENGTH_MISMATCH')
+          if (sha256(bytes) !== source.sha256) fail('TYPED_INSPECTION_CONTENT_DIGEST_MISMATCH')
+          if (cache) await cache.put(key,bytes)
+        }
         const extension = source.carrier === 'LOCAL_FILE' ? (LOCAL_FILE_EXTENSIONS.get(source.mimeType.toLowerCase()) || 'input') : 'input'
         const fileName = `${String(index).padStart(4, '0')}-${sha256(Buffer.from(source.sourceRefId)).slice(0, 24)}.${extension}`
         const output = resolve(temporary, fileName)
@@ -318,7 +336,7 @@ export class TypedInspectionMaterializer {
     } catch (error) {
       try { rmSync(temporary, { recursive: true, force: true }); directoryFsync(this.root) } catch {}
       throw error
-    }
+    } finally { await cache?.prune() }
   }
 }
 

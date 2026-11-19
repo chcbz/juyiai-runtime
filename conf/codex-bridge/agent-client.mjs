@@ -5615,6 +5615,7 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
     ? new TypedInspectionMaterializer({
       apiOrigin: profile.workspaceFileApiOrigin,
       rootDir: resolve(profile.typedInspectionRootDir, safeProfileDirectory(profile)),
+      cacheDir: resolve(profile.typedInspectionRootDir, `${safeProfileDirectory(profile)}.material-bytes`),
       fetchFn: nativeFetch,
       getRuntimeHeaders: () => getProfileState(profile)?.runtimeTransport?.headers(),
       agentId: profile.agentId,
