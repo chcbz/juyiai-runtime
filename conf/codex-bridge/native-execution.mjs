@@ -8,7 +8,7 @@ const fail = code => { throw Object.assign(new Error(code), { code }) }
 export const nativeExecutionRequestBinding = command => ({ schemaVersion: 1,
   requestKey: `native:${command.executionId}:${command.snapshotDigest}`, authorizationId: command.executionId,
   manifestDigest: `sha256:${command.snapshotDigest}`, requestId: command.commandId, turnId: command.messageId, inputPolicyDigest: command.toolPolicyRef })
-export async function runNativeExecution({ command, inputs, entries, store, checkActive, signal, profileRuntime, model, effort, skillConfiguration = [] }) {
+export async function runNativeExecution({ command, inputs, entries, store, checkActive, signal, profileRuntime, model, effort, skillConfiguration = [], callPrivateTool }) {
   if (!profileRuntime?.openNativeExecutionAdapter) fail('NATIVE_EXECUTION_PROFILE_UNAVAILABLE')
   if (skillConfiguration.length && command.toolPolicyRef !== NATIVE_SKILL_SCRIPT_POLICY) fail('NATIVE_SKILL_CONFIG_POLICY_MISMATCH')
   const networkAccess = skillConfiguration.some(item => item.networkOrigins.length > 0)
@@ -26,10 +26,20 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
   try {
     if (signal?.aborted) fail('SKILL_LEASE_UNCERTAIN')
     checkActive()
+    const local = session.policy()
+    const business = command.privateTools?.tools ?? []
+    const names = new Set(business.map(tool => tool.name))
+    if (business.length && (typeof callPrivateTool !== 'function' || local.tools.some(t => names.has(t.name)))) fail('SKILL_PRIVATE_CATALOG_INVALID')
+    const nativeExecution = { ...local, networkAccess, tools: [...local.tools, ...business], callTool(ctx) {
+      if (!names.has(ctx.tool)) return local.callTool(ctx)
+      session.requireBoundTurn(ctx)
+      if (store.read('result') || store.read('native-terminal')) fail('NATIVE_RESULT_ALREADY_FROZEN')
+      return callPrivateTool(ctx)
+    } }
     const adapter = await profileRuntime.openNativeExecutionAdapter(resolve(store.directory, 'inputs'), requestKey, binding, {
       scratchDirectory: resolve(store.directory, 'scratch'), draftsDirectory: resolve(store.directory, 'drafts'),
       skills: entries.map(entry => ({ skillKey: entry.descriptor.skillKey, packageRoot: entry.descriptor.packageRoot, packageTreeDigest: entry.descriptor.packageTreeDigest })),
-      skillConfiguration, nativeExecution: { ...session.policy(), networkAccess }, requireExistingState: Boolean(existing)
+      skillConfiguration, nativeExecution, requireExistingState: Boolean(existing)
     })
     if (signal?.aborted) fail('SKILL_LEASE_UNCERTAIN')
     checkActive()

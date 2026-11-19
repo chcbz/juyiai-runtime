@@ -88,6 +88,15 @@ test('native UNKNOWN is returned without falsely committing or claiming completi
   const f = fixture(t); f.effects.set('native-model', { status: 'START_RECORDED' })
   await partial(f.lane.poll(), 'SKILL_RESULT_UNKNOWN'); assert.equal(f.modelCalls(), 0)
 })
+test('private business tool dispatch and receipt have distinct native transport contracts', () => {
+  const url = new URL('https://api.example.test/internal/agent/executions/e/runs/r/tool-calls/call_1')
+  assert.equal(skillConversationHttpScope(url, {method: 'POST', headers: {'Idempotency-Key':'call_1'}}), true)
+  assert.equal(skillConversationHttpScope(url, {method: 'GET'}), true)
+  for (const options of [{method:'PUT'}, {method:'POST'}, {method:'POST',headers:{'Idempotency-Key':'call_2'}}, {method:'GET',body:'{}'}])
+    assert.equal(skillConversationHttpScope(url, options), false)
+  for (const suffix of ['?actor=other', '/extra', '%2falias'])
+    assert.equal(skillConversationHttpScope(new URL(url.href+suffix), {method:'GET'}), false)
+})
 test('exact native conversation routes reject legacy writes, wildcard routes and encoded aliases', () => {
   const url = path => new URL(path, 'https://api.example.test')
   for (const path of ['effects/generate/start', 'effects/generate/result', 'resume', 'result-commits/manifest_1', 'inputs/input_1/content'])
@@ -801,4 +810,41 @@ test('shared API6 fixture decodes exact scope and keeps result schema2 canonical
   for (const field of ['taskId', 'conversationId', 'conversationGeneration', 'snapshotSha256']) assert.equal(Object.hasOwn(command, field), false)
   assert.equal(skillCanonicalJson(fixture.resultPreimage), fixture.canonicalPreimage)
   assert.equal(skillDigest(fixture.resultPreimage), fixture.resultSha256)
+})
+
+function privateCatalog(names) {
+  const tools = names.map(name => ({type:'function',name,description:'fixture',inputSchema:{type:'object'}}))
+  return {version:1,tools,catalogSha256:skillDigest({version:1,tools})}
+}
+test('private catalog is bound to scope, ordered schemas and digest', () => {
+  const c=command(); c.privateTools=privateCatalog(['fixture_read'])
+  assert.throws(()=>skillCommandFromWire(wireCommand(c)),/PRIVATE_CATALOG_INVALID/)
+  c.scope={...c.scope,kind:'PRIVATE',taskId:null}
+  assert.deepEqual(skillCommandFromWire(wireCommand(c)).privateTools,c.privateTools)
+  c.privateTools.tools[0].description='altered'
+  assert.throws(()=>skillCommandFromWire(wireCommand(c)),/PRIVATE_CATALOG_INVALID/)
+  for(const names of [[],['result_propose'],['b','a'],['a','a']]) {
+    c.privateTools=privateCatalog(names)
+    assert.throws(()=>skillCommandFromWire(wireCommand(c)),/PRIVATE_CATALOG_INVALID/)
+  }
+})
+test('lost private write response reads the original call receipt without resending POST',async t=>{
+  const f=fixture(t); f.c.scope={...f.c.scope,kind:'PRIVATE',taskId:null}; f.c.privateTools=privateCatalog(['fixture_write'])
+  const methods=[]; let requestId
+  const lane=new SkillConversationLane({...f.options,fetchFn:async(url,opts)=>{
+    if(!url.pathname.endsWith('/tool-calls/call1')) return f.options.fetchFn(url,opts)
+    methods.push(opts.method)
+    if(opts.method==='POST') {
+      assert.equal(opts.headers['Idempotency-Key'],'call1'); requestId=opts.headers['X-Request-Id'];assert.ok(requestId)
+      assert.equal(JSON.parse(opts.body).catalogSha256,f.c.privateTools.catalogSha256)
+      throw new Error('committed but connection lost')
+    }
+    assert.equal(opts.body,undefined);assert.equal(opts.headers['X-Request-Id'],requestId)
+    const res=new Response(JSON.stringify({protocolVersion:1,requestId,code:'E0',msg:'ok',data:{committed:true}}),{headers:{'X-Request-Id':requestId,'content-type':'application/json'}})
+    Object.defineProperty(res,'url',{value:url.href});return res
+  },runNative:async req=>{
+    const ctx={executionId:f.c.executionId,threadId:'thread1',turnId:'turn1',callId:'call1',tool:'fixture_write',arguments:{}}
+    assert.deepEqual(await req.callPrivateTool(ctx),{committed:true});return f.options.runNative(req)
+  }})
+  const report=await lane.poll();assert.deepEqual(methods,['POST','GET']);assert.equal(report.processed,1)
 })

@@ -29,13 +29,14 @@ export class SkillUsageDelivery {
     this.pendingUsage = []; this.usageRetries = new Map()
   }
   headers() { return nativeSessionHeaders(this.auth(), this.agentId, this.instanceId) }
-  async request(path, method, body, statuses = [200]) {
+  async request(path, method, body, statuses = [200], call = null) {
     const endpoint = new URL(path, `${this.origin}/`)
     if (endpoint.origin !== this.origin || endpoint.pathname !== path || endpoint.search || endpoint.hash) fail('SKILL_API_PATH_INVALID')
     const proof = this.headers(), headers = { ...proof, Accept: 'application/json' }
+    if (call) { headers['X-Request-Id'] = call.requestId; if (method === 'POST') headers['Idempotency-Key'] = call.callId }
     if (body !== undefined && !(body instanceof FormData)) headers['Content-Type'] = 'application/json'
     let response
-    try { response = await this.fetch(endpoint, { method, redirect: 'error', headers,
+    try { response = await this.fetch(endpoint, { method, redirect: 'error', headers, ...(call ? {signal:call.signal} : {}),
       ...(body === undefined ? {} : { body: body instanceof FormData ? body : JSON.stringify(body) }) }) }
     catch (cause) { fail('SKILL_TRANSPORT_UNKNOWN', cause) }
     if (JSON.stringify(proof) !== JSON.stringify(this.headers())) {
@@ -50,6 +51,8 @@ export class SkillUsageDelivery {
       try { await response?.body?.cancel?.() } catch {}
       fail('SKILL_API_RESPONSE_UNCONFIRMED')
     }
+    if (call && response.headers.get('X-Request-Id') !== call.requestId) fail('SKILL_API_RESPONSE_UNCONFIRMED')
+    if (call) return readNativeJson(response)
     try { return await readNativeJson(response) } catch (cause) { fail('SKILL_API_RESPONSE_UNCONFIRMED', cause) }
   }
   resetPendingDiscovery() { this.pendingExecutionIds = null }

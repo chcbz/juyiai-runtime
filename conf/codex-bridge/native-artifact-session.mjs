@@ -39,10 +39,14 @@ export class NativeArtifactSession {
     if (old && skillDigest(old) !== skillDigest(binding)) fail('NATIVE_TURN_BINDING_CONFLICT')
     if (!old) this.store.write('native-turn', binding)
   }
-  async callTool(ctx) {
+  requireBoundTurn(ctx) {
     this.checkActive()
     const binding = this.store.read('native-turn')
     if (!binding || ['executionId', 'threadId', 'turnId'].some(k => ctx[k] !== binding[k]) || typeof ctx.callId !== 'string' || !ctx.callId) fail('NATIVE_TOOL_BINDING_INVALID')
+    return binding
+  }
+  async callTool(ctx) {
+    const binding = this.requireBoundTurn(ctx)
     if (!nativeArtifactTools.some(tool => tool.name === ctx.tool)) fail('NATIVE_TOOL_UNAVAILABLE')
     const key = `native-call-${skillDigest({ threadId: ctx.threadId, turnId: ctx.turnId, callId: ctx.callId })}`
     const requestSha256 = skillDigest({ tool: ctx.tool, arguments: ctx.arguments })

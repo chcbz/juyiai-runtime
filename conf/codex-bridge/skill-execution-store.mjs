@@ -1,7 +1,7 @@
 /** Execution-scoped, fsynced checkpoints. No auth proof/token/URL enters this store.
  * This is not a work queue: even local START requires server-authorized resume. */
 import { constants, closeSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync,
-  openSync, readFileSync, readSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+  openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { parseSkillJson, validateSkillData } from './skill-manifest.mjs'
@@ -76,6 +76,15 @@ export class SkillExecutionStore {
     if (!this.read('command')) this.write('command', command)
   }
   path(name) { if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(name)) fail('SKILL_STORE_KEY_INVALID'); return resolve(this.directory, `${name}.json`) }
+  pendingBusinessCalls() {
+    privateDirectory(this.directory)
+    return readdirSync(this.directory).filter(name => /^business-[a-f0-9]{64}\.json$/.test(name)).flatMap(name => {
+      const key = name.slice(0,-5), marker = this.read(key)
+      if (!marker || !skillId(marker.callId) || key !== `business-${skillDigest(marker.callId)}` || !skillSha(marker.digest)
+          || typeof marker.requestId !== 'string') fail('SKILL_STORE_UNSAFE')
+      return marker.settled ? [] : [{key,marker}]
+    })
+  }
   read(name) { privateDirectory(this.directory); const path = this.path(name); return existsSync(path) ? parseSkillJson(readPrivate(path)) : null }
   write(name, value) {
     privateDirectory(this.directory)
