@@ -435,6 +435,22 @@ test('real isolated native Node runs package mjs and reads inputs and writes out
   } finally { f.cleanup() }
 })
 
+test('multiple selected packages bind to one execution, not separate skill principals', () => {
+  const f = fixture()
+  try {
+    const secondRoot = mkdir(resolve(f.root, 'second-package'))
+    writeFileSync(resolve(secondRoot, 'SKILL.md'), 'Second fixture')
+    const skills = [...f.options.skills, { skillKey: 'second', packageRoot: secondRoot, packageTreeDigest: skillPackageTreeDigest(secondRoot) }]
+    const skillConfiguration = skills.map(({ skillKey }) => ({ skillKey, configuration: { marker: `private-${skillKey}` }, networkOrigins: [`https://${skillKey}.invalid`] }))
+    const options = { ...f.options, nativeExecution: { ...f.options.nativeExecution, networkAccess: true }, skills, skillConfiguration }
+    const layout = prepareNativeExecutionLayout(options)
+    assert.deepEqual(layout.binding.networkOrigins, ['https://authorized-helper.invalid', 'https://second.invalid'])
+    assert.deepEqual(layout.binding.skillConfiguration.map(row => row.skillKey), ['authorized-helper', 'second'])
+    assert.ok(!JSON.stringify(layout.binding).includes('private-second'))
+    assert.throws(() => prepareNativeExecutionLayout({ ...options, skills: skills.slice(0, 1) }), /CONFIG_BINDING_INVALID/)
+  } finally { f.cleanup() }
+})
+
 test('selected skill configuration is read-only and binds network and configuration digests without persisting secrets in mapping', () => {
   const f = fixture()
   try {
