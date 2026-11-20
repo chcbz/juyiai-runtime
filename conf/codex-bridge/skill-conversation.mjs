@@ -200,12 +200,16 @@ export class SkillConversationLane extends SkillUsageDelivery {
     const common = () => ({ executionId: command.executionId, snapshotSha256: command.snapshotDigest, fence })
     let resume = null
     const outstanding = new Map()
+    const bindInstallation = async installationId => {
+      checkLease(); const receipt=await this.request(`${path}/skill-selection`,'POST',{installationId,fence,snapshotSha256:command.snapshotDigest},[200],{requestId:randomUUID(),signal:executionAbort.signal})
+      checkLease(); if(!object(receipt) || (receipt.installationId??null)!==installationId)fail('NATIVE_DOMAIN_BINDING_UNCONFIRMED')
+    }
     const exchangeBusiness = async (resource, data, socketSignal, action = 'lookup') => {
       checkLease()
       const signal = AbortSignal.any([executionAbort.signal, socketSignal])
       const send = async verb => {
         checkLease(); signal.throwIfAborted()
-        const result = await this.request(`${path}/business/${resource}/${verb}`, 'POST', { ...data, fence, snapshotSha256: command.snapshotDigest }, [200], {requestId:randomUUID(),signal})
+        const result = await this.request(`${path}/business/${resource}/${verb}`, 'POST', { ...data, fence, snapshotSha256: command.snapshotDigest }, [200], {requestId:randomUUID(),signal,selectedInstallation:store.read('planned-installation')?.installationId})
         checkLease(); return result
       }
       if (action === 'lookup') return send(action)
@@ -235,7 +239,7 @@ export class SkillConversationLane extends SkillUsageDelivery {
     }
     const ctx = {
       registry: this.registry,
-      runNative: request => { if (typeof this.runNative !== 'function') fail('SKILL_NATIVE_ADAPTER_MISSING'); return this.runNative({ ...request, store, checkActive: checkLease, signal: executionAbort.signal, exchangeBusiness }) },
+      runNative: request => { if (typeof this.runNative !== 'function') fail('SKILL_NATIVE_ADAPTER_MISSING'); return this.runNative({ ...request, store, checkActive: checkLease, signal: executionAbort.signal, exchangeBusiness, bindInstallation }) },
       claimOrResume: async () => {
         const attempted = store.read('attempt')
         // Write before claim; lost lease reply must use resume, not a new claim.

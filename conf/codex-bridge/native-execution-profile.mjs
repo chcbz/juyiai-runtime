@@ -238,7 +238,7 @@ export const prepareNativeExecutionLayout = ({ inputDirectory, scratchDirectory,
     return Object.freeze({ skillKey: item.skillKey, configuration: structuredClone(item.configuration), networkOrigins, ...(webSearch === 'live' ? { webSearch } : {}) })
   }).sort((a, b) => a.skillKey.localeCompare(b.skillKey))
   const businessApi = Boolean(nativeExecution.businessSocket)
-  if (businessApi && (!packages.length || configurations.length)) fail('NATIVE_BUSINESS_SOCKET_BINDING_INVALID')
+  if (businessApi && (packages.length !== 1 || configurations.length)) fail('NATIVE_BUSINESS_SOCKET_BINDING_INVALID')
   const networkOrigins = nativeSkillOrigins(configurations.flatMap(item => item.networkOrigins))
   const networkAccess = nativeExecution.networkAccess === true
   if (networkAccess !== (networkOrigins.length > 0)) fail('NATIVE_SKILL_NETWORK_BINDING_INVALID')

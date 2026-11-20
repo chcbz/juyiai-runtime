@@ -4,19 +4,19 @@ const fail = code => { throw Object.assign(new Error(code), { code }) }
 /** Source-owned observations. A durable start precedes the engine call; discovery
  * delivers it even after a crash without terminal evidence. Business receipts never
  * acknowledge costs. No inference, pricing, process/lease or model replay occurs here. */
-export function pendingNativeUsage(store) {
-  const started = store.read('native-start-attempt')
-  const terminal = store.read('native-final-message') || store.read('native-usage-failure') || store.read('native-usage-recovered')
+export function pendingNativeUsage(store, prefix = 'native') {
+  const started = store.read(`${prefix}-start-attempt`)
+  const terminal = store.read(`${prefix}-final-message`) || store.read(`${prefix}-usage-failure`) || store.read(`${prefix}-usage-recovered`)
   if (!started) {
     if (terminal) fail('NATIVE_USAGE_SOURCE_MISSING')
     return null
   }
   for (const [phase, source, receiptName] of [
-    ['STARTED', started, 'native-usage-start-receipt'],
-    ['TERMINAL', terminal, 'native-usage-receipt']
+    ['STARTED', started, `${prefix}-usage-start-receipt`],
+    ['TERMINAL', terminal, `${prefix}-usage-receipt`]
   ]) {
     if (!source) return null
-    const payload = { executionId: store.command.executionId, phase,
+    const payload = { executionId: store.command.executionId, phase, ...(prefix==='planner'?{invocation:'SKILL_SELECTION'}:{}),
       requestedModel: started.requestedModel ?? null, usageEvidence: phase === 'STARTED' ? null : source.usageEvidence ?? null }
     const evidenceSha256 = skillDigest(payload)
     const receipt = store.read(receiptName)

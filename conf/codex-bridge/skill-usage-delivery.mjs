@@ -33,6 +33,7 @@ export class SkillUsageDelivery {
     const endpoint = new URL(path, `${this.origin}/`)
     if (endpoint.origin !== this.origin || endpoint.pathname !== path || endpoint.search || endpoint.hash) fail('SKILL_API_PATH_INVALID')
     const proof = this.headers(), headers = { ...proof, Accept: 'application/json' }
+    if (call?.selectedInstallation) headers['X-Cyf-Selected-Installation']=call.selectedInstallation
     if (call) headers['X-Request-Id'] = call.requestId
     if (body !== undefined && !(body instanceof FormData)) headers['Content-Type'] = 'application/json'
     let response
@@ -88,8 +89,8 @@ export class SkillUsageDelivery {
       if (command.executionId !== id) fail('SKILL_STORE_IDENTITY_CONFLICT')
       const store = new SkillExecutionStore({ rootDirectory: this.root, scope: { ...this.scope, apiOrigin: this.origin }, command })
       try {
-        const usage = pendingNativeUsage(store)
-        for (const item of [...(usage ? [usage] : []), ...pendingProviderUsage(store)]) { this.pendingUsage.push({ command, store, ...item }); unresolved.add(id) }
+        const usage = pendingNativeUsage(store), planner = command.skills.length>1 ? pendingNativeUsage(store,'planner') : null
+        for (const item of [...(usage ? [usage] : []), ...(planner ? [planner] : []), ...pendingProviderUsage(store)]) { this.pendingUsage.push({ command, store, ...item }); unresolved.add(id) }
       } catch (error) {
         if (!['NATIVE_USAGE_RECEIPT_CONFLICT', 'NATIVE_USAGE_SOURCE_MISSING', 'PROVIDER_USAGE_SOURCE_INVALID'].includes(error?.code)) throw error
         this.pendingUsageErrors.push({ executionId: id, code: error.code }); unresolved.add(id)

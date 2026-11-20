@@ -589,7 +589,7 @@ const skillFrontmatterString = raw => {
   return typeof parsed === 'string' && parsed.trim() && !/[\u0000-\u001f\u007f]/u.test(parsed) ? parsed : null
 }
 
-const parseSkillIdentity = text => {
+export const parseSkillIdentity = text => {
   const lines = text.split(/\r?\n/)
   if (lines[0] !== '---') return null
   const fields = new Map()

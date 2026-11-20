@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { SkillExecutionStore } from '../skill-execution-store.mjs'
@@ -234,4 +234,26 @@ test('recovered evidence preserves source data and does not overwrite an earlier
   await runNativeExecution(f.request)
   assert.deepEqual(f.store.read('native-usage-recovered').usageEvidence, usageEvidence)
   assert.equal(f.runs(), 1)
+})
+
+for(const chosen of ['id-a','id-b',null])test(`model selection ${chosen}: only chosen installation sees a domain socket`,async t=>{
+  const f=fixture(t); f.command.toolPolicyRef='NATIVE_DOMAIN_API_V1'
+  const entries=['a','b'].map(key=>{const packageRoot=resolve(f.store.directory,'pkg-'+key);mkdirSync(packageRoot);writeFileSync(resolve(packageRoot,'SKILL.md'),`---\nname: ${key}\ndescription: capability ${key}\n---\nprivate package body`);return {descriptor:{skillInstallationId:'id-'+key,skillKey:key,packageRoot,packageTreeDigest:'a'.repeat(64)}}})
+  const profile=f.request.profileRuntime, open=profile.openNativeExecutionAdapter;let selected=false,plannerCalls=0
+  profile.releaseAdapter=async()=>{}
+  profile.openNativeExecutionAdapter=async(input,id,b,options)=>{
+    if(id.endsWith(':select')){
+      assert.deepEqual(options.skills,[]);assert.deepEqual(options.nativeExecution.tools,[]);assert.equal(options.nativeExecution.businessSocket,undefined);assert.equal(options.nativeExecution.networkAccess,false);assert.equal(input,resolve(f.store.directory,'installation-choice/inputs'))
+      return {startOrResumeThread:async()=>({threadId:'choice'}),runTurn:async opts=>{plannerCalls++;assert.doesNotMatch(opts.input[0].text,/private package body/);return {content:JSON.stringify({installationId:chosen}),usageEvidence:{status:'UNVERIFIED'}}}}
+    }
+    assert.equal(selected,true);assert.deepEqual(options.skills.map(s=>s.skillKey),chosen?[chosen.slice(3)]:[]);assert.equal(Boolean(options.nativeExecution.businessSocket),chosen!==null);return open(input,id,b,options)
+  }
+  await runNativeExecution({...f.request,entries,bindInstallation:async id=>{assert.equal(id,chosen);selected=true},exchangeBusiness:async()=>{throw Error('not used')}})
+  assert.equal(plannerCalls,1);assert.equal(f.store.read('planned-installation').installationId,chosen)
+})
+
+test('a lost selection-binding reply reuses the durable choice; revocation prevents opening the business adapter',async t=>{
+  const f=fixture(t);f.command.toolPolicyRef='NATIVE_DOMAIN_API_V1';f.store.write('planned-installation',{installationId:'b'});
+  let opens=0,attempts=0;const args={...f.request,entries:['a','b'].map(id=>({descriptor:{skillInstallationId:id}})),profileRuntime:{openNativeExecutionAdapter:async()=>{opens++;throw Error('unexpected adapter')}},bindInstallation:async id=>{attempts++;assert.equal(id,'b');throw Error(attempts===1?'reply lost':'revoked')}}
+  await assert.rejects(runNativeExecution(args),/reply lost/);await assert.rejects(runNativeExecution(args),/revoked/);assert.equal(opens,0);assert.equal(attempts,2)
 })
