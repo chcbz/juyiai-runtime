@@ -205,12 +205,19 @@ export class SkillConversationLane extends SkillUsageDelivery {
       checkLease(); if(!object(receipt) || (receipt.installationId??null)!==installationId || typeof receipt.domainApi!=='boolean' || (installationId===null && receipt.domainApi))fail('NATIVE_DOMAIN_BINDING_UNCONFIRMED')
       return receipt.domainApi
     }
-    const exchangeBusiness = async (resource, data, socketSignal, action = 'lookup') => {
+    const exchangeBusiness = async (resource, data, socketSignal, action = 'lookup', attachment) => {
       checkLease()
       const signal = AbortSignal.any([executionAbort.signal, socketSignal])
       const send = async verb => {
         checkLease(); signal.throwIfAborted()
-        const result = await this.request(`${path}/business/${resource}/${verb}`, 'POST', { ...data, fence, snapshotSha256: command.snapshotDigest }, [200], {requestId:randomUUID(),signal,selectedInstallation:store.read('planned-installation')?.installationId})
+        const requestId=randomUUID(), dataWithProof={...data,fence,snapshotSha256:command.snapshotDigest}
+        let body=dataWithProof
+        if(verb==='commit' && attachment){
+          body=new FormData()
+          body.set('metadata',new Blob([JSON.stringify({protocolVersion:1,requestId,data:dataWithProof})],{type:'application/json'}),'metadata.json')
+          body.set('file',attachment,'attachment.bin')
+        }
+        const result = await this.request(`${path}/business/${resource}/${verb}`, 'POST',body,[200],{requestId,signal,selectedInstallation:store.read('planned-installation')?.installationId})
         checkLease(); return result
       }
       if (action === 'lookup') return send(action)

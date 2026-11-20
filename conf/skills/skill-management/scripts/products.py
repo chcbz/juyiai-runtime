@@ -13,11 +13,14 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='从标准输入读入本次请求的 JSON 对象')
     parser.add_argument('operation', choices=COMMANDS)
     parser.add_argument('--receipt', action='store_true', help='仅查询同一操作的回执，不执行写入')
+    parser.add_argument('--archive', help='发布已审核 ZIP，元数据提供 packageSha256，不附 files')
     args = parser.parse_args()
+    if args.archive and (args.operation != 'publish' or args.receipt):
+        parser.error('--archive 仅用于发布提交；查询回执只需原元数据')
     resource, verb = COMMANDS[args.operation]
     if args.receipt and verb != 'commit':
         parser.error('只读操作没有提交回执')
     data = json.load(sys.stdin)
     if not isinstance(data, dict):
         parser.error('需要 JSON 对象')
-    exchange(resource, 'receipt' if args.receipt else verb, {'payload': data})
+    exchange(resource, 'receipt' if args.receipt else verb, {'payload': data}, args.archive)

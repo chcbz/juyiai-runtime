@@ -30,3 +30,15 @@ test('native policy permits POST lookups but not actions, encoded resources or q
   assert.equal(allowed('POST','any-resource/lookup'),true)
   for (const [m,s] of [['GET','any-resource/lookup'],['POST','r/update'],['POST','r/lookup?'],['POST','%72/lookup'],['POST','r/extra/lookup']]) assert.equal(allowed(m,s),false)
 })
+
+test('domain commit spools one bounded binary attachment and never forwards transport metadata',async t=>{
+  const dir=mkdtempSync(join(tmpdir(),'domain-attach-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));
+  const meta=Buffer.from(JSON.stringify({payload:{note:'测试'}})), bytes=Buffer.alloc(192*1024,170);let calls=0
+  const s=await openBusinessSocket(dir,async(resource,data,signal,action,blob)=>{
+    calls++;assert.deepEqual([resource,data,action],['any-resource',{payload:{note:'测试'}},'commit']);assert.deepEqual(Buffer.from(await blob.arrayBuffer()),bytes);return {ok:true}
+  },{write:true});t.after(()=>s.dispose());
+  const send=(action,m,len,parts)=>new Promise((ok,fail)=>{const q=request({method:'POST',socketPath:s.socket,path:'/any-resource/'+action,headers:{'content-type':'application/octet-stream','content-length':len,'x-cyf-metadata-length':m}},r=>{r.resume();r.on('end',()=>ok(r.statusCode))});q.on('error',fail);for(const p of parts)q.write(p);q.end()});
+  assert.equal(await send('commit',meta.length,meta.length+bytes.length,[meta,bytes]),200);
+  assert.equal(await send('lookup',2,3,['{}a']),415);assert.equal(await send('commit',2,16777219,[]),413);
+  const forged=Buffer.from('{"fence":{}}');assert.equal(await send('commit',forged.length,forged.length+1,[forged,'a']),400);assert.equal(calls,1)
+})

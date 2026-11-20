@@ -1,8 +1,8 @@
 ---
 name: skill-management
-description: 按用户指令维护平台技能的标题、描述和版本，审核发布或下架技能；适用于已任职的技能管理员，不负责给其他 Agent 授权或安装技能。
+description: 按用户指令升级岗位技能定义所引用的商品版本；维护平台技能标题、描述，审核发布或下架技能；适用于已任职的技能管理员，不负责给其他 Agent 授权或安装技能。
 metadata:
-  version: "1.1.0"
+  version: "1.2.0"
 ---
 # 技能管理
 
@@ -28,3 +28,5 @@ metadata:
 | `publish` | `productId`、`productVersionId`、`name`、`description`、`skillKey`、`skillVersion`、`priceWen`、`approvedPermissionsManifest`、`expectedProductVersion`、`files`；文件各含 `path`、`content`、`encoding`（`utf8` 或 `base64`）。审核完整文件、权限、脚本依赖和外部调用后再发布。新商品预期版本为 `"0"`；已有商品读回当前版本，不能复用旧版本 ID。API 实际打包计算摘要。不上传凭证、私有会话或任务附件。 |
 
 写入回复不明时，对**原请求文件**运行 `python3 -B scripts/products.py 操作 --receipt < 请求.json`，不要重新提交。冲突后重新核对用户意图，不自动用更新的版本覆盖。发布成功不是岗位安装成功，只有读到对应安装回执才报告可用。
+
+发布较大包使用 `python3 -B scripts/products.py publish --archive APPROVED.zip < metadata.json`。元数据与 publish 相同，但以完整 ZIP 的 `packageSha256` 代替 `files`。先核对压缩包内容与摘要；最多 16 MiB 压缩、64 MiB 展开，不能把未审核附件当作技能包。响应不明只用同一份元数据 `publish --receipt`，不附 ZIP，不重传。
