@@ -238,13 +238,14 @@ test('recovered evidence preserves source data and does not overwrite an earlier
 
 for(const [chosen,domainApi] of [['id-a',true],['id-b',true],['id-b',false],[null,false]])test(`model selection ${chosen} domain=${domainApi}: only chosen installation sees a domain socket`,async t=>{
   const f=fixture(t); f.command.toolPolicyRef='NATIVE_DOMAIN_API_V1'
+  f.command.parameters={authorizedContext:{currentUserMessage:{content:'upgrade the selected product'},recentMessages:[{content:'obsolete capability refusal'}]}}
   const entries=['a','b'].map(key=>{const packageRoot=resolve(f.store.directory,'pkg-'+key);mkdirSync(packageRoot);writeFileSync(resolve(packageRoot,'SKILL.md'),`---\nname: ${key}\ndescription: capability ${key}\n---\nprivate package body`);return {descriptor:{skillInstallationId:'id-'+key,skillKey:key,packageRoot,packageTreeDigest:'a'.repeat(64)}}})
   const profile=f.request.profileRuntime, open=profile.openNativeExecutionAdapter;let selected=false,plannerCalls=0
   profile.releaseAdapter=async()=>{}
   profile.openNativeExecutionAdapter=async(input,id,b,options)=>{
     if(id.endsWith(':select')){
       assert.deepEqual(options.skills,[]);assert.deepEqual(options.nativeExecution.tools,[]);assert.equal(options.nativeExecution.businessSocket,undefined);assert.equal(options.nativeExecution.networkAccess,false);assert.equal(input,resolve(f.store.directory,'installation-choice/inputs'))
-      return {startOrResumeThread:async()=>({threadId:'choice'}),runTurn:async opts=>{plannerCalls++;assert.doesNotMatch(opts.input[0].text,/private package body/);return {content:JSON.stringify({installationId:chosen}),usageEvidence:{status:'UNVERIFIED'}}}}
+      return {startOrResumeThread:async()=>({threadId:'choice'}),runTurn:async opts=>{plannerCalls++;assert.equal(JSON.parse(opts.input[0].text).currentRequest,'upgrade the selected product');assert.doesNotMatch(opts.input[0].text,/private package body|obsolete capability refusal/);return {content:JSON.stringify({installationId:chosen}),usageEvidence:{status:'UNVERIFIED'}}}}
     }
     assert.equal(selected,true);assert.deepEqual(options.skills.map(s=>s.skillKey),chosen?[chosen.slice(3)]:[]);assert.equal(Boolean(options.nativeExecution.businessSocket),domainApi);return open(input,id,b,options)
   }
