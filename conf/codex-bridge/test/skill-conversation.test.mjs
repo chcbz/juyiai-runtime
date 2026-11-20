@@ -840,3 +840,19 @@ test('uncertain domain commit uses receipt-only recovery; repeated intent does n
   },runNative:async req=>{for(let i=0;i<2;i++)assert.deepEqual(await req.exchangeBusiness('fixture',{model:'sample'},new AbortController().signal,'commit'),{confirmed:true});return f.options.runNative(req)}})
   assert.equal((await lane.poll()).processed,1);assert.deepEqual(verbs,['commit','receipt','receipt'])
 })
+
+test('attachment commit binds the exact metadata requestId and never uploads bytes on receipt recovery', async t=>{
+  const f=fixture(t), verbs=[];const lane=new SkillConversationLane({...f.options,fetchFn:async(url,opts)=>{
+    if (!url.pathname.includes('/business/')) return f.options.fetchFn(url,opts)
+    const verb=url.pathname.split('/').at(-1);verbs.push(verb)
+    if (verb==='commit') {
+      assert.ok(opts.body instanceof FormData);assert.equal(opts.headers['Content-Type'],undefined)
+      const meta=JSON.parse(await opts.body.get('metadata').text());assert.equal(meta.requestId,opts.headers['X-Request-Id']);assert.equal(meta.protocolVersion,1);assert.equal(meta.data.snapshotSha256,f.c.snapshotDigest);assert.equal(meta.data.fence.version,'9007199254740993');assert.equal(meta.data.ref,'ref');assert.equal(opts.body.get('file').size,131072)
+      throw new Error('committed; reply lost')
+    }
+    assert.equal(typeof opts.body,'string');assert.equal(JSON.parse(opts.body).ref,'ref')
+    const id=opts.headers['X-Request-Id'];const res=new Response(JSON.stringify({protocolVersion:1,requestId:id,code:'E0',msg:'ok',data:{confirmed:true}}),{headers:{'X-Request-Id':id,'content-type':'application/json'}})
+    Object.defineProperty(res,'url',{value:url.href});return res
+  },runNative:async req=>{for(let i=0;i<2;i++)assert.deepEqual(await req.exchangeBusiness('fixture',{ref:'ref'},new AbortController().signal,'commit',new Blob([new Uint8Array(131072)])),{confirmed:true});return f.options.runNative(req)}})
+  assert.equal((await lane.poll()).processed,1);assert.deepEqual(verbs,['commit','receipt','receipt'])
+})
