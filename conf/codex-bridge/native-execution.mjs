@@ -48,7 +48,7 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
         checkActive()
         if (signal?.aborted || !store.read('native-turn') || store.read('native-selection') || store.read('native-terminal') || store.read('result')) fail('NATIVE_BUSINESS_READ_INACTIVE')
         return readBusiness(...args)
-      })
+      }, { write: skillConfiguration.some(item => item.businessApiWrite === true) })
       nativeExecution.businessSocket = businessSocket.socket
     }
     const adapter = await profileRuntime.openNativeExecutionAdapter(resolve(store.directory, 'inputs'), requestKey, binding, {

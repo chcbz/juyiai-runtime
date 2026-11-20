@@ -235,7 +235,7 @@ export const prepareNativeExecutionLayout = ({ inputDirectory, scratchDirectory,
     configured.add(item.skillKey)
     const networkOrigins = nativeSkillOrigins(item.networkOrigins || [])
     const webSearch = nativeSkillWebSearch(item.webSearch)
-    return Object.freeze({ skillKey: item.skillKey, configuration: structuredClone(item.configuration), networkOrigins, ...(item.businessApiRead === true ? { businessApiRead: true } : {}), ...(webSearch === 'live' ? { webSearch } : {}) })
+    return Object.freeze({ skillKey: item.skillKey, configuration: structuredClone(item.configuration), networkOrigins, ...(item.businessApiWrite === true ? { businessApiWrite: true } : {}), ...(item.businessApiRead === true ? { businessApiRead: true } : {}), ...(webSearch === 'live' ? { webSearch } : {}) })
   }).sort((a, b) => a.skillKey.localeCompare(b.skillKey))
   const businessRead = configurations.some(item => item.businessApiRead === true)
   if (businessRead !== Boolean(nativeExecution.businessSocket)) fail('NATIVE_BUSINESS_SOCKET_BINDING_INVALID')

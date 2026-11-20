@@ -76,6 +76,15 @@ export class SkillExecutionStore {
     if (!this.read('command')) this.write('command', command)
   }
   path(name) { if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(name)) fail('SKILL_STORE_KEY_INVALID'); return resolve(this.directory, `${name}.json`) }
+  pendingDomainCalls() {
+    privateDirectory(this.directory)
+    return readdirSync(this.directory).filter(n=>/^domain-[a-f0-9]{64}\.json$/.test(n)).flatMap(n=>{
+      const key=n.slice(0,-5), marker=this.read(key)
+      if (marker?.settled === true) return []
+      if (!marker || typeof marker.resource !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(marker.resource) || key !== `domain-${skillDigest(marker)}`) fail('SKILL_STORE_UNSAFE')
+      return [[key,marker]]
+    })
+  }
   pendingBusinessCalls() {
     privateDirectory(this.directory)
     return readdirSync(this.directory).filter(name => /^business-[a-f0-9]{64}\.json$/.test(name)).flatMap(name => {

@@ -12,22 +12,38 @@ class ExecutionConnection(http.client.HTTPConnection):
         self.sock.connect('/business-api.sock')
 
 
-def main(model):
+def exchange(resource, verb, data):
     connection = ExecutionConnection('localhost', timeout=15)
     try:
-        connection.request('POST', '/model-prices/lookup', json.dumps({'model': model}),
+        connection.request('POST', '/%s/%s' % (resource, verb), json.dumps(data),
                            {'Content-Type': 'application/json'})
         response = connection.getresponse()
         if response.status != 200:
-            sys.exit('模型查询未成功（HTTP %d）；未执行写入。' % response.status)
+            sys.exit('业务回执不可用（HTTP %d）。不能据此断言写入未发生。' % response.status)
         print(json.dumps(json.load(response), ensure_ascii=False))
     except (ValueError, OSError, http.client.HTTPException):
-        sys.exit('本次执行未能取得有效查询回执。')
+        sys.exit('未取得有效回执，不重发写入。')
     finally:
         connection.close()
 
 
 if __name__ == '__main__':
-    if len(sys.argv) != 2:
-        sys.exit('usage: lookup.py MODEL_ID')
-    main(sys.argv[1])
+    import argparse
+    parser = argparse.ArgumentParser(description='本次执行内的模型维护')
+    commands = parser.add_subparsers(dest='action')
+    for name, resource, verb, fields in [
+        ('price', 'model-prices', 'lookup', ('model',)),
+        ('add-price', 'model-prices', 'commit', ('model',)),
+        ('price-receipt', 'model-prices', 'receipt', ('model',)),
+        ('binding', 'hero-models', 'lookup', ('personaCode',)),
+        ('bind', 'hero-models', 'commit', ('personaCode','expectedModel','model')),
+        ('binding-receipt', 'hero-models', 'receipt', ('personaCode','expectedModel','model')),
+    ]:
+        cmd = commands.add_parser(name)
+        cmd.set_defaults(resource=resource, verb=verb, fields=fields)
+        for field in fields:
+            cmd.add_argument(field)
+    args = parser.parse_args()
+    if not args.action:
+        parser.error('需要子命令')
+    exchange(args.resource, args.verb, {field:getattr(args,field) for field in args.fields})

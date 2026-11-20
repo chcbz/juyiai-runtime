@@ -148,7 +148,7 @@ export const skillConversationHttpScope = (endpoint, options = {}) => {
   const call = new RegExp(`^/internal/agent/executions/${id}/runs/${id}/tool-calls/(${id})$`).exec(endpoint.pathname)
   if (call) return method === 'GET' && options.body == null || method === 'POST'
     && new Headers(options.headers).get('Idempotency-Key') === call[1]
-  return method === 'POST' && new RegExp(`^/internal/agent/executions/${id}/runs/${id}/(?:lease(?:/renew)?|inputs(?:/${id}/content)?|effects/${id}/(?:start|result)|resume|outputs/${id}/content|result-commits/${id}|business/[a-z][a-z0-9-]{0,63}/lookup|failure|usage|provider-usage)$`).test(endpoint.pathname)
+  return method === 'POST' && new RegExp(`^/internal/agent/executions/${id}/runs/${id}/(?:lease(?:/renew)?|inputs(?:/${id}/content)?|effects/${id}/(?:start|result)|resume|outputs/${id}/content|result-commits/${id}|business/[a-z][a-z0-9-]{0,63}/(?:lookup|commit|receipt)|failure|usage|provider-usage)$`).test(endpoint.pathname)
 }
 
 export const skillManagementResultHttpScope = (endpoint, options = {}) => {

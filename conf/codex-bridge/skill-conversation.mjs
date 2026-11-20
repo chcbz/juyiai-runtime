@@ -38,7 +38,7 @@ const resultReceipt = value => {
 // Existing recovery timing, also used for command-local transport/authority/environment
 // failures. Never grant a new execution, rewrite UNKNOWN or expire accepted work.
 const deferredRecoveryCodes = new Set(['SKILL_RESULT_UNKNOWN', 'SKILL_TRANSPORT_UNKNOWN',
-  'SKILL_API_RESPONSE_UNCONFIRMED', 'SKILL_PRIVATE_CALL_UNCONFIRMED', 'TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT',
+  'SKILL_API_RESPONSE_UNCONFIRMED', 'SKILL_DOMAIN_COMMIT_UNCONFIRMED', 'SKILL_PRIVATE_CALL_UNCONFIRMED', 'TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT',
   'NATIVE_EXECUTION_ADAPTER_BINDING_CONFLICT', 'NATIVE_EXECUTION_RECOVERY_ENVIRONMENT_CHANGED'])
 const engineTerminalCodes = new Set(['NATIVE_EXECUTION_TURN_FAILED', 'NATIVE_EXECUTION_TURN_INTERRUPTED'])
 const sourceKinds = new Set(['WORKSPACE_VERSION', 'TASK_LINKED_WORKSPACE_VERSION', 'CURRENT_CONVERSATION_ASSET', 'EXECUTION_RESULT', 'FORMAL_ARTIFACT'])
@@ -199,11 +199,39 @@ export class SkillConversationLane extends SkillUsageDelivery {
     }
     const common = () => ({ executionId: command.executionId, snapshotSha256: command.snapshotDigest, fence })
     let resume = null
-    const readBusiness = async (resource, data, socketSignal) => {
+    const outstanding = new Map()
+    const readBusiness = async (resource, data, socketSignal, action = 'lookup') => {
       checkLease()
-      const result = await this.request(`${path}/business/${resource}/lookup`, 'POST', { ...data, fence, snapshotSha256: command.snapshotDigest }, [200],
-        { requestId: randomUUID(), signal: AbortSignal.any([executionAbort.signal, socketSignal]) })
-      checkLease(); return result
+      const signal = AbortSignal.any([executionAbort.signal, socketSignal])
+      const send = async verb => {
+        checkLease(); signal.throwIfAborted()
+        const result = await this.request(`${path}/business/${resource}/${verb}`, 'POST', { ...data, fence, snapshotSha256: command.snapshotDigest }, [200], {requestId:randomUUID(),signal})
+        checkLease(); return result
+      }
+      if (action === 'lookup') return send(action)
+      const key = `domain-${skillDigest({resource,data})}`
+      // Checkpoint before any asynchronous I/O. A crash (including before send) is uncertainty,
+      // not permission to resend. Repeated calls can only retrieve the original API receipt.
+      const prior = store.read(key), marker = {resource,data}
+      const settle = async verb => {
+        const value = await send(verb)
+        if (outstanding.has(key)) { store.write(key,{settled:true}); outstanding.delete(key) }
+        return value
+      }
+      if (action === 'receipt' || prior) return settle('receipt')
+      store.write(key,marker); outstanding.set(key,marker)
+      try { return await settle('commit') } catch (error) {
+        if ([400,403,404,409,422].includes(error.status)) {
+          store.write(key,{settled:true}); outstanding.delete(key); throw error
+        }
+        return settle('receipt')
+      }
+    }
+    const reconcileDomain = async () => {
+      for (const {resource,data} of outstanding.values()) {
+        try { await readBusiness(resource,data,executionAbort.signal,'receipt') }
+        catch (error) { fail('SKILL_DOMAIN_COMMIT_UNCONFIRMED',error) }
+      }
     }
     const callPrivateTool = async ({executionId,threadId,turnId,callId,tool,arguments:args}) => {
       checkLease()
@@ -260,6 +288,10 @@ export class SkillConversationLane extends SkillUsageDelivery {
         if (!leaseValid(lease, command)) fail('SKILL_LEASE_UNCERTAIN')
         fence = { version: lease.version, token: lease.token }; expiry = lease.expiresAt; armLeaseExpiry()
         timer = setTimeout(() => { renewalPromise = renew() }, Math.max(1, Math.floor((expiry - Date.now()) / 2)))
+        if (resume) {
+          for (const [key,marker] of store.pendingDomainCalls()) outstanding.set(key,marker)
+          await reconcileDomain()
+        }
         if (resume && command.privateTools) for (const {key,marker} of store.pendingBusinessCalls()) {
           checkLease()
           try { await this.request(`${path}/tool-calls/${marker.callId}`,'GET',undefined,[200],{requestId:marker.requestId,callId:marker.callId,signal:executionAbort.signal}) }
@@ -315,6 +347,7 @@ export class SkillConversationLane extends SkillUsageDelivery {
       },
       commitResult: async (_command, manifest) => {
         checkLease()
+        await reconcileDomain()
         const preimage = skillResultPayload(manifest), digest = skillDigest(preimage)
         const manifestId = `manifest_${digest}`
         const payload = { fence, snapshotSha256: command.snapshotDigest, data: preimage.data, artifacts: preimage.artifacts.map(item => ({ ...item, byteLength: String(item.byteLength) })), inputReceipts: preimage.inputReceipts, effectDependencies: preimage.effectDependencies }
@@ -349,6 +382,7 @@ export class SkillConversationLane extends SkillUsageDelivery {
       // The fact is stable; a resumed execution must report under the newly
       // authorized lease, never reuse a previous runtime instance's fence.
       checkLease()
+      await reconcileDomain()
       const receipt = await this.request(`${path}/failure`, 'POST', { fence: terminal.fence, code: terminal.code })
       if (!object(receipt) || receipt.executionId !== command.executionId || skillDigest(receipt.scope ?? null) !== skillDigest(command.scope)
           || receipt.runId !== command.runId || receipt.targetAgentId !== this.agentId
