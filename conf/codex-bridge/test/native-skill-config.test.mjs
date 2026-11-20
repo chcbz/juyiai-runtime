@@ -88,3 +88,15 @@ test('explicit profile config retains precedence and local-only work never reads
   assert.deepEqual(loadNativeSkillConfiguration({ ...f, file: undefined, directory: '/missing', command: { toolPolicyRef: 'NATIVE_LOCAL_FILES_V1' } }), [])
   assert.deepEqual(loadNativeSkillConfiguration({ ...f, file: undefined, directory: undefined }), [])
 })
+
+test('read socket permission is pinned to the selected installation independently of network', t => {
+  const f = fixture(t); f.config.installations.installed1.networkOrigins = []; f.write()
+  const before = loadNativeSkillConfiguration(f)[0]
+  f.config.installations.installed2.businessApiRead = true; f.write()
+  assert.deepEqual(loadNativeSkillConfiguration(f)[0], before)
+  f.config.installations.installed1.businessApiRead = true; f.write()
+  const enabled = loadNativeSkillConfiguration(f)[0]
+  assert.equal(enabled.businessApiRead, true); assert.deepEqual(enabled.networkOrigins, []); assert.notEqual(enabled.digest,before.digest)
+  f.config.installations.installed1.businessApiRead = 'true'; f.write()
+  assert.throws(() => loadNativeSkillConfiguration(f), /CONFIG_INVALID/)
+})

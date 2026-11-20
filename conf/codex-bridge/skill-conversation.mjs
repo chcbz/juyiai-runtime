@@ -199,6 +199,12 @@ export class SkillConversationLane extends SkillUsageDelivery {
     }
     const common = () => ({ executionId: command.executionId, snapshotSha256: command.snapshotDigest, fence })
     let resume = null
+    const readBusiness = async (resource, data, socketSignal) => {
+      checkLease()
+      const result = await this.request(`${path}/business/${resource}/lookup`, 'POST', { ...data, fence, snapshotSha256: command.snapshotDigest }, [200],
+        { requestId: randomUUID(), signal: AbortSignal.any([executionAbort.signal, socketSignal]) })
+      checkLease(); return result
+    }
     const callPrivateTool = async ({executionId,threadId,turnId,callId,tool,arguments:args}) => {
       checkLease()
       if (executionId !== command.executionId || ![threadId,turnId,callId].every(skillId)
@@ -233,7 +239,7 @@ export class SkillConversationLane extends SkillUsageDelivery {
     }
     const ctx = {
       registry: this.registry,
-      runNative: request => { if (typeof this.runNative !== 'function') fail('SKILL_NATIVE_ADAPTER_MISSING'); return this.runNative({ ...request, store, checkActive: checkLease, signal: executionAbort.signal, callPrivateTool }) },
+      runNative: request => { if (typeof this.runNative !== 'function') fail('SKILL_NATIVE_ADAPTER_MISSING'); return this.runNative({ ...request, store, checkActive: checkLease, signal: executionAbort.signal, callPrivateTool, readBusiness }) },
       claimOrResume: async () => {
         const attempted = store.read('attempt')
         // Write before claim; lost lease reply must use resume, not a new claim.

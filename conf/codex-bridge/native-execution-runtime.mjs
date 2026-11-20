@@ -94,7 +94,7 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
       phase('adapter-spawn')
       adapter = await this._spawnAdapter({ inputDirectory: layout.inputDirectory, engineState, schemaMeasurement: schema,
         networkMode: 'provider-restricted', proxyUrl: egress.proxyUrl,
-        nativeView: { layout, engineState, neutralDirectory, skillsDirectory, skillConfigurationDirectory }, nativeExecution: { ...nativeExecution, checkActive } })
+        nativeView: { layout, engineState, neutralDirectory, skillsDirectory, skillConfigurationDirectory, businessSocket: nativeExecution.businessSocket }, nativeExecution: { ...nativeExecution, checkActive } })
       checkActive(); phase('egress-bind'); await egress.bindOwner(adapter.child, this.bwrap)
       phase('egress-attach')
       const network = await egress.attach(); checkActive()

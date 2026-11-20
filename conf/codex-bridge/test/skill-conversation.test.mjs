@@ -848,3 +848,17 @@ test('lost private write response reads the original call receipt without resend
   }})
   const report=await lane.poll();assert.deepEqual(methods,['POST','GET']);assert.equal(report.processed,1)
 })
+
+test('business read uses the running lease and request correlation without a write idempotency key',async t=>{
+  const f=fixture(t); let reads=0
+  const lane=new SkillConversationLane({...f.options,fetchFn:async(url,opts)=>{
+    if (!url.pathname.includes('/business/')) return f.options.fetchFn(url,opts)
+    assert.equal(url.pathname,`/internal/agent/executions/${f.c.executionId}/runs/${f.c.runId}/business/fixture/lookup`)
+    assert.equal(opts.method,'POST'); assert.equal(opts.headers['Idempotency-Key'],undefined)
+    assert.deepEqual(JSON.parse(opts.body),{model:'sample',snapshotSha256:f.c.snapshotDigest,fence:{version:'9007199254740993',token:'00000000-0000-0000-0000-000000000001'}})
+    const id=opts.headers['X-Request-Id']; assert.ok(id); reads++
+    const res=new Response(JSON.stringify({protocolVersion:1,requestId:id,code:'E0',msg:'ok',data:{found:true}}),{headers:{'X-Request-Id':id,'content-type':'application/json'}})
+    Object.defineProperty(res,'url',{value:url.href}); return res
+  },runNative:async req=>{assert.deepEqual(await req.readBusiness('fixture',{model:'sample'},new AbortController().signal),{found:true});return f.options.runNative(req)}})
+  assert.equal((await lane.poll()).processed,1); assert.equal(reads,1)
+})

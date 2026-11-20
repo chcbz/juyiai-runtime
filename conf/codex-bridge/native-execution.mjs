@@ -1,4 +1,5 @@
 /** Native engine orchestration only: no per-skill or Provider task branching. */
+import { openBusinessReadSocket } from './execution-business-read.mjs'
 import { resolve } from 'node:path'
 import { skillDigest } from './skill-executor.mjs'
 import { NATIVE_SKILL_SCRIPT_POLICY } from './native-skill-config.mjs'
@@ -8,7 +9,7 @@ const fail = code => { throw Object.assign(new Error(code), { code }) }
 export const nativeExecutionRequestBinding = command => ({ schemaVersion: 1,
   requestKey: `native:${command.executionId}:${command.snapshotDigest}`, authorizationId: command.executionId,
   manifestDigest: `sha256:${command.snapshotDigest}`, requestId: command.commandId, turnId: command.messageId, inputPolicyDigest: command.toolPolicyRef })
-export async function runNativeExecution({ command, inputs, entries, store, checkActive, signal, profileRuntime, model, effort, skillConfiguration = [], callPrivateTool }) {
+export async function runNativeExecution({ command, inputs, entries, store, checkActive, signal, profileRuntime, model, effort, skillConfiguration = [], callPrivateTool, readBusiness }) {
   if (!profileRuntime?.openNativeExecutionAdapter) fail('NATIVE_EXECUTION_PROFILE_UNAVAILABLE')
   if (skillConfiguration.length && command.toolPolicyRef !== NATIVE_SKILL_SCRIPT_POLICY) fail('NATIVE_SKILL_CONFIG_POLICY_MISMATCH')
   const networkAccess = skillConfiguration.some(item => item.networkOrigins.length > 0)
@@ -21,6 +22,7 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
   // Bind cancellation before opening the profile: network/bootstrap setup may
   // still be in flight when the lease is revoked. The profile owns cancellation
   // of pending startup as well as an already-running engine.
+  let businessSocket
   const abort = () => { void profileRuntime.suspendAdapter(requestKey).catch(() => {}) }
   signal?.addEventListener('abort', abort, { once: true })
   try {
@@ -39,6 +41,15 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
         if (store.read('result') || store.read('native-terminal')) fail('NATIVE_RESULT_ALREADY_FROZEN')
         return callPrivateTool(ctx)
       }
+    }
+    if (skillConfiguration.some(item => item.businessApiRead === true)) {
+      if (typeof readBusiness !== 'function') fail('NATIVE_BUSINESS_READ_UNAVAILABLE')
+      businessSocket = await openBusinessReadSocket(store.directory, async (...args) => {
+        checkActive()
+        if (signal?.aborted || !store.read('native-turn') || store.read('native-selection') || store.read('native-terminal') || store.read('result')) fail('NATIVE_BUSINESS_READ_INACTIVE')
+        return readBusiness(...args)
+      })
+      nativeExecution.businessSocket = businessSocket.socket
     }
     const adapter = await profileRuntime.openNativeExecutionAdapter(resolve(store.directory, 'inputs'), requestKey, binding, {
       scratchDirectory: resolve(store.directory, 'scratch'), draftsDirectory: resolve(store.directory, 'drafts'),
@@ -108,6 +119,7 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
     if (code) throw Object.assign(new Error(code), { code, cause, ...(cause?.usageEvidence ? { usageEvidence: cause.usageEvidence } : {}) })
     throw cause
   } finally {
+    businessSocket?.dispose()
     signal?.removeEventListener('abort', abort)
     // Stop tool processes before any result upload; preserve engine state for
     // reconciliation until the API commit receipt authorizes cleanup.

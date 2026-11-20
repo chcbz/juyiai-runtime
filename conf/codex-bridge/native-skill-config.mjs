@@ -68,7 +68,9 @@ export function loadNativeSkillConfiguration({ file, scope, command, entries, di
     if (!object(entry) || !object(entry.configuration)) fail('NATIVE_SKILL_CONFIG_INVALID')
     const configuration = structuredClone(entry.configuration), networkOrigins = nativeSkillOrigins(entry.networkOrigins || [])
     const webSearch = nativeSkillWebSearch(entry.webSearch)
+    if (entry.businessApiRead !== undefined && typeof entry.businessApiRead !== 'boolean') fail('NATIVE_SKILL_CONFIG_INVALID')
     const searchPermission = webSearch === 'live' ? { webSearch } : {}
+    if (entry.businessApiRead === true) searchPermission.businessApiRead = true
     return [{ skillKey: descriptor.skillKey, skillInstallationId: descriptor.skillInstallationId, configuration, networkOrigins, ...searchPermission,
       digest: skillDigest({ configuration, networkOrigins, ...searchPermission }) }]
   })

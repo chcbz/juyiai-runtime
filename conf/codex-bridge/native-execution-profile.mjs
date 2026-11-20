@@ -1,6 +1,7 @@
 // RB-03/08/10: enforce the authorized filesystem view, not task orchestration.
 // Toolchain files are explicitly pinned by the caller; never bind host /usr,
 // /etc, a main HOME, or the trusted execution store into the engine namespace.
+import { BUSINESS_READ_SOCKET } from './execution-business-read.mjs'
 import { spawnSync } from 'node:child_process'
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads'
 import { createHash } from 'node:crypto'
@@ -234,15 +235,17 @@ export const prepareNativeExecutionLayout = ({ inputDirectory, scratchDirectory,
     configured.add(item.skillKey)
     const networkOrigins = nativeSkillOrigins(item.networkOrigins || [])
     const webSearch = nativeSkillWebSearch(item.webSearch)
-    return Object.freeze({ skillKey: item.skillKey, configuration: structuredClone(item.configuration), networkOrigins, ...(webSearch === 'live' ? { webSearch } : {}) })
+    return Object.freeze({ skillKey: item.skillKey, configuration: structuredClone(item.configuration), networkOrigins, ...(item.businessApiRead === true ? { businessApiRead: true } : {}), ...(webSearch === 'live' ? { webSearch } : {}) })
   }).sort((a, b) => a.skillKey.localeCompare(b.skillKey))
+  const businessRead = configurations.some(item => item.businessApiRead === true)
+  if (businessRead !== Boolean(nativeExecution.businessSocket)) fail('NATIVE_BUSINESS_SOCKET_BINDING_INVALID')
   const networkOrigins = nativeSkillOrigins(configurations.flatMap(item => item.networkOrigins))
   const networkAccess = nativeExecution.networkAccess === true
   if (networkAccess !== (networkOrigins.length > 0)) fail('NATIVE_SKILL_NETWORK_BINDING_INVALID')
   const binding = Object.freeze({ schemaVersion: 1, executionId: nativeExecution.executionId,
     sandboxUser: { uid: 65534, gid: 65534 }, neutralMountTargets: NATIVE_NEUTRAL_MOUNT_TARGETS,
     input: directoryIdentity(input), scratch: directoryIdentity(scratch), drafts: directoryIdentity(drafts),
-    skills: packages, toolchain: fixedToolchain, tools: structuredClone(nativeExecution.tools), networkAccess, networkOrigins,
+    ...(businessRead ? { businessRead: true } : {}), skills: packages, toolchain: fixedToolchain, tools: structuredClone(nativeExecution.tools), networkAccess, networkOrigins,
     ...(nativeExecution.modelCatalogSha256 ? { modelCatalogSha256: nativeExecution.modelCatalogSha256 } : {}),
     ...(configurations.some(item => item.webSearch === 'live') ? { webSearch: 'live' } : {}),
     skillConfiguration: configurations.map(item => ({ skillKey: item.skillKey, digest: canonicalSha256(item) })) })
@@ -295,7 +298,7 @@ export const nativeToolchainMountArgs = toolchain => {
 
 // Append to an unshare-all bwrap view. HOME is neutral/read-only; only the
 // engine's request state is writable, with config and skill roots overmounted ro.
-export const nativeExecutionMountArgs = ({ layout, engineState, neutralDirectory, skillsDirectory, skillConfigurationDirectory }) => {
+export const nativeExecutionMountArgs = ({ layout, engineState, neutralDirectory, skillsDirectory, skillConfigurationDirectory, businessSocket }) => {
   // A non-root identity inside the outer user namespace permits the engine's
   // nested tool sandbox to map its own UID without CAP_SETFCAP. The mapping
   // still resolves to this process's host UID; no host account is changed.
@@ -306,6 +309,10 @@ export const nativeExecutionMountArgs = ({ layout, engineState, neutralDirectory
     '--dir', '/state/codex-home/skills', '--ro-bind', skillsDirectory, '/state/codex-home/skills',
     '--dir', '/workspace', '--bind', layout.scratchDirectory, '/workspace',
     '--dir', '/outputs', '--bind', layout.draftsDirectory, '/outputs']
+  if (layout.binding.businessRead) {
+    if (!businessSocket || !lstatSync(businessSocket).isSocket()) fail('NATIVE_BUSINESS_SOCKET_BINDING_INVALID')
+    args.push('--ro-bind', businessSocket, BUSINESS_READ_SOCKET)
+  }
   if (engineState.modelCatalogPath) args.push('--ro-bind', engineState.modelCatalogPath, '/state/codex-home/model-catalog.json')
   if (layout.skillConfiguration.length) {
     if (!skillConfigurationDirectory || resolve(skillConfigurationDirectory) !== resolve(engineState.directory, 'skill-config')) fail('NATIVE_SKILL_CONFIG_BINDING_INVALID')
