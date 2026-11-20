@@ -518,7 +518,7 @@ test('SCRIPT declaration requires its own successful configured package and rest
     }
     runtime.releaseAdapter = async id => { releases++; runtime.activeAdapters.delete(id); if (mode === 'script-cleanup-fail' && id.startsWith('native-script-')) throw Error('cleanup') }
     const declaration = await runtime.measureNativeExecution()
-    assert.deepEqual(declaration.supportedToolPolicyRefs, ['NATIVE_SKILL_SCRIPT_V1','NATIVE_DOMAIN_API_V1'])
+    assert.deepEqual(declaration.supportedToolPolicyRefs, ['NATIVE_SKILL_SCRIPT_V1'])
     assert.deepEqual(declaration.outputMimeTypes, ['text/plain', 'text/markdown', 'text/html', 'application/json', 'image/png'])
     for (mode of ['script-open-fail', 'script-network-fail', 'script-exec-fail', 'script-cleanup-fail']) {
       const local = await runtime.measureNativeExecution()
@@ -528,6 +528,34 @@ test('SCRIPT declaration requires its own successful configured package and rest
     }
     assert.equal(scriptOpens, 5); assert.equal(releases, 10)
     assert.deepEqual((await import('node:fs')).readdirSync(runtime.materializerRoot), [])
+  } finally { f.cleanup() }
+})
+
+test('DOMAIN declaration requires the challenge from the current lookup socket', async () => {
+  const { request } = await import('node:http')
+  const { open } = await import('node:fs/promises')
+  const f = fixture()
+  try {
+    const runtime = Object.create(NativeExecutionProfileRuntime.prototype)
+    Object.assign(runtime, { materializerRoot: f.root, nativeToolchain: { files: [tool('/usr/bin/python3', '/usr/bin/python3')] } })
+    let echo = true, released = 0
+    runtime.openNativeExecutionAdapter = async (_inputs, _id, _binding, { nativeExecution }) => ({
+      nativeExecutionIsolation: { network: { measured: true, nftDefaultDropReadback: true, directInternetBlocked: true } },
+      request: async () => {
+        const dir = await open(resolve(nativeExecution.businessSocket, '..'), 'r')
+        const challenge = await new Promise((ok, fail) => {
+          const req = request({ socketPath: `/proc/self/fd/${dir.fd}/api.sock`, path: '/probe/lookup', method: 'POST', headers: { 'Content-Type': 'application/json' } }, res => {
+            let text = ''; res.on('data', chunk => { text += chunk }); res.on('end', () => ok(JSON.parse(text).challenge)); res.on('error', fail)
+          }); req.on('error', fail); req.end('{}')
+        }).finally(() => dir.close())
+        return { exitCode: 0, stdout: echo ? challenge : 'stale-challenge' }
+      }
+    })
+    runtime.releaseAdapter = async () => { released++ }
+    assert.equal(await runtime._measureNativeDomainApi(), true)
+    echo = false
+    assert.equal(await runtime._measureNativeDomainApi(), false)
+    assert.equal(released, 2)
   } finally { f.cleanup() }
 })
 
