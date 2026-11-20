@@ -7,9 +7,9 @@ import { SkillInstallManager } from '../skill-install-manager.mjs'
 import { SkillRegistry } from '../skill-registry.mjs'
 import { zip, hash, binding, profile, headers, command, activate } from './fixtures/skill-management-fixture.mjs'
 
-for (const skillKey of ['document-workbench', 'browser-workbench', 'image-understanding', 'web-research', 'skill-management', 'text-file', 'analysis']) {
+for (const skillKey of ['document-workbench', 'browser-workbench', 'image-understanding', 'web-research', 'skill-management', 'model-maintenance', 'text-file', 'analysis']) {
   test(`${skillKey}: same ordinary package installs independently for two agents and resolves only its authorized binding`, async t => {
-    const version = skillKey === 'document-workbench' ? '1.0.1' : ['text-file', 'analysis'].includes(skillKey) ? '1.1.0' : '1.0.0'
+    const version = skillKey === 'document-workbench' ? '1.0.1' : ['text-file', 'analysis','model-maintenance','skill-management'].includes(skillKey) ? '1.1.0' : '1.0.0'
     const source = new URL(`../../skills/${skillKey}/`, import.meta.url), entries = []
     const collect = (prefix = '') => {
       for (const entry of readdirSync(new URL(prefix || './', source), { withFileTypes: true })) {
@@ -19,14 +19,14 @@ for (const skillKey of ['document-workbench', 'browser-workbench', 'image-unders
       }
     }
     collect()
-    assert.ok(entries.every(e => e.name === 'SKILL.md' || e.name.startsWith('references/')))
+    assert.ok(entries.every(e => e.name === 'SKILL.md' || e.name.startsWith('references/') || e.name.startsWith('scripts/')))
     const bytes = zip(entries), root = mkdtempSync(resolve(tmpdir(), 'cyf-reusable-skills-'))
     t.after(() => rmSync(root, { recursive: true, force: true }))
     const installed = []
     for (const agentId of ['agt_alpha', 'agt_beta']) {
       const home = resolve(root, agentId, 'home'); mkdirSync(home, { recursive: true })
       const session = { scope: { ...binding.scope, agentId }, fence: { ...binding.fence, installationId: `rti_${agentId}` } }
-      const target = { skillInstallationId: `si_${agentId}`, productVersionId: `spv_${skillKey}_1_0_0`, skillVersion: version,
+      const target = { skillInstallationId: `si_${agentId}`, productVersionId: `spv_${skillKey}_${version.replaceAll('.', '_')}`, skillVersion: version,
         packageSha256: hash(bytes), manifestSha256: null, byteLength: String(bytes.length), kind: 'INSTRUCTION' }
       let downloads = 0
       const manager = new SkillInstallManager({ profile: { ...profile(home), agentId }, stateRoot: resolve(root, agentId, 'state'),
