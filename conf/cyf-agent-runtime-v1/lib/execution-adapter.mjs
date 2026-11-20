@@ -392,6 +392,7 @@ export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   "native-output-format.mjs",
   "native-office-format.mjs",
   "native-execution.mjs",
+  "native-installation-selection.mjs",
   "execution-business-api.mjs",
   "native-usage-receipts.mjs",
   "provider-usage-receipts.mjs",
