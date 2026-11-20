@@ -1,3 +1,4 @@
+import { openBusinessSocket, BUSINESS_API_SOCKET } from './execution-business-api.mjs'
 import { BROWSER_PROBE } from './native-browser-toolchain.mjs'
 import { DOCUMENT_MIMES, DOCUMENT_PROBE, PDF_PROBE } from './native-document-toolchain.mjs'
 import { spawn } from 'node:child_process'
@@ -174,7 +175,7 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
     const binding = { schemaVersion: 1, requestKey: id, authorizationId: id, manifestDigest: id,
       requestId: id, turnId: id, inputPolicyDigest: id }
     this.nativeBrowserReady = false
-    let directory, ready = false, scriptReady = false, documentReady = false, browserReady = false, pdfReady = false, stage = 'toolchain'
+    let directory, ready = false, scriptReady = false, domainReady = false, documentReady = false, browserReady = false, pdfReady = false, stage = 'toolchain'
     const timings = []; let phaseStarted = performance.now()
     const phase = next => { timings.push({ phase: stage, durationMs: performance.now() - phaseStarted }); stage = next; phaseStarted = performance.now() }
     try {
@@ -234,6 +235,8 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
       phase('skill-script-probe')
       ready = !this.disposed
       if (ready) { try { scriptReady = await this._measureNativeSkillScript() } catch { this.nativeScriptMeasurementFailure = { code: 'NATIVE_SCRIPT_MEASUREMENT_FAILED' } } }
+      phase('domain-api-probe')
+      if (ready) domainReady = await this._measureNativeDomainApi()
     } catch (error) { ready = false; this.nativeExecutionMeasurementFailure = { stage, code: error.code || 'NATIVE_EXECUTION_MEASUREMENT_FAILED' } }
     finally {
       phase('cleanup')
@@ -245,7 +248,44 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
     this.nativeBrowserReady = ready && !this.disposed && browserReady
     return ready && !this.disposed ? Object.freeze({ schemaVersion: 1, executionProtocolVersion: 6,
       toolPolicyRef: 'NATIVE_LOCAL_FILES_V1', outputMimeTypes: Object.freeze(['text/plain', 'text/markdown', 'text/html', 'application/json', ...(scriptReady || browserReady ? ['image/png'] : []), ...(documentReady ? DOCUMENT_MIMES : []), ...(pdfReady ? ['application/pdf'] : [])]),
-      ...(scriptReady ? { supportedToolPolicyRefs: Object.freeze(['NATIVE_SKILL_SCRIPT_V1','NATIVE_DOMAIN_API_V1']) } : {}) }) : null
+      ...(scriptReady || domainReady ? { supportedToolPolicyRefs: Object.freeze([...(scriptReady ? ['NATIVE_SKILL_SCRIPT_V1'] : []), ...(domainReady ? ['NATIVE_DOMAIN_API_V1'] : [])]) } : {}) }) : null
+  }
+  async _measureNativeDomainApi() {
+    if (!this.nativeToolchain?.files?.some(f => f.sandboxPath === '/usr/bin/python3')) return false
+    const id = `native-domain-measurement-${randomUUID()}`
+    const binding = { schemaVersion: 1, requestKey: id, authorizationId: id, manifestDigest: id, requestId: id, turnId: id, inputPolicyDigest: id }
+    let directory, socket, opened = false, ready = false
+    try {
+      directory = ensurePrivateDirectory(mkdtempSync(resolve(this.materializerRoot, '.native-domain-probe-')))
+      const inputs = ensurePrivateDirectory(resolve(directory, 'inputs'))
+      const scratchDirectory = ensurePrivateDirectory(resolve(directory, 'scratch'))
+      const draftsDirectory = ensurePrivateDirectory(resolve(directory, 'drafts'))
+      const packageRoot = ensurePrivateDirectory(resolve(directory, 'package'))
+      writeFileSync(resolve(packageRoot, 'SKILL.md'), '---\nname: probe-skill\ndescription: Synthetic domain transport probe.\n---\nProbe only.\n', { mode: 0o600 })
+      let served = false
+      const challenge = randomUUID()
+      socket = await openBusinessSocket(directory, async (resource, data, signal, verb) => {
+        signal.throwIfAborted()
+        if (resource !== 'probe' || verb !== 'lookup' || Object.keys(data).length || served) fail('NATIVE_DOMAIN_PROBE_INVALID')
+        served = true; return { challenge }
+      })
+      const nativeExecution = { executionId: id, tools: [], businessSocket: socket.socket, networkAccess: false,
+        checkActive: () => { if (this.disposed) fail('TYPED_INSPECTION_PROFILE_DISPOSED') }, callTool: async () => { fail('NATIVE_EXECUTION_TOOL_UNAVAILABLE') } }
+      opened = true
+      const adapter = await this.openNativeExecutionAdapter(inputs, id, binding, { scratchDirectory, draftsDirectory,
+        skills: [{ skillKey: 'probe-skill', packageRoot, packageTreeDigest: skillPackageTreeDigest(packageRoot) }], nativeExecution })
+      const network = adapter.nativeExecutionIsolation?.network
+      if (!network?.measured || !network.nftDefaultDropReadback || !network.directInternetBlocked) fail('NATIVE_DOMAIN_NETWORK_UNVERIFIED')
+      const script = `import http.client,socket,json\ns=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);s.settimeout(5);s.connect(${JSON.stringify(BUSINESS_API_SOCKET)})\nc=http.client.HTTPConnection('localhost');c.sock=s;c.request('POST','/probe/lookup','{}',{'Content-Type':'application/json'});r=c.getresponse();assert r.status==200;print(json.load(r)['challenge']);c.close()`
+      const result = await adapter.request('command/exec', { command: ['/usr/bin/python3','-I','-B','-c',script], cwd: '/execution', disableTimeout: true, permissionProfile: NATIVE_PERMISSION_PROFILE }, null)
+      ready = served && result?.exitCode === 0 && result.stdout?.trim() === challenge
+    } catch { ready = false }
+    finally {
+      if (opened) try { await this.releaseAdapter(id, { requestBinding: binding }) } catch { ready = false }
+      try { socket?.dispose(); if (directory) rmSync(directory, { recursive: true, force: true }) } catch { ready = false }
+    }
+    this.nativeDomainMeasurementFailure = ready ? null : { code: 'NATIVE_DOMAIN_TRANSPORT_UNVERIFIED' }
+    return ready && !this.disposed
   }
   async _measureNativeSkillScript() {
     return measureNativeSkillScript(this)

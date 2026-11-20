@@ -551,7 +551,7 @@ test('real SCRIPT declaration uses Node package, read-only config and additional
     console.log('local measurement failure:', JSON.stringify(runtime.nativeExecutionMeasurementFailure))
     console.log('script measurement failure:', JSON.stringify(runtime.nativeScriptMeasurementFailure))
     assert.equal(declaration?.toolPolicyRef, 'NATIVE_LOCAL_FILES_V1')
-    assert.deepEqual(declaration?.supportedToolPolicyRefs, ['NATIVE_SKILL_SCRIPT_V1','NATIVE_DOMAIN_API_V1'])
+    assert.deepEqual(declaration?.supportedToolPolicyRefs, ['NATIVE_SKILL_SCRIPT_V1'])
     assert.deepEqual(declaration?.outputMimeTypes, ['text/plain', 'text/markdown', 'text/html', 'application/json', 'image/png'])
     assert.equal(runtime.activeAdapters.size, 0)
     console.log('real SCRIPT declaration passed; model turn, real credential and paid API: NOT_RUN')
@@ -585,6 +585,11 @@ test('Office declaration requires actual document reopens; document failure reta
     const ready = await runtime.measureNativeExecution()
     assert.deepEqual(ready.outputMimeTypes.slice(-DOCUMENT_MIMES.length), DOCUMENT_MIMES)
     assert.ok(ready.outputMimeTypes.includes('image/png'))
+    runtime._measureNativeSkillScript = async () => false
+    runtime._measureNativeDomainApi = async () => true
+    assert.deepEqual((await runtime.measureNativeExecution()).supportedToolPolicyRefs,['NATIVE_DOMAIN_API_V1'])
+    runtime._measureNativeSkillScript = async () => true
+    runtime._measureNativeDomainApi = async () => false
     success = false
     const failed = await runtime.measureNativeExecution()
     assert.deepEqual(failed.outputMimeTypes, ['text/plain', 'text/markdown', 'text/html', 'application/json', 'image/png'])
