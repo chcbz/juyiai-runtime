@@ -3,9 +3,9 @@ import { createServer } from 'node:http'
 import { constants, chmodSync, closeSync, mkdtempSync, openSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 
-export const BUSINESS_READ_SOCKET = '/business-api.sock'
-export async function openBusinessReadSocket(parent, exchange, { write = false } = {}) {
-  const directory = mkdtempSync(join(parent, '.business-read-'))
+export const BUSINESS_API_SOCKET = '/business-api.sock'
+export async function openBusinessSocket(parent, exchange, { write = false } = {}) {
+  const directory = mkdtempSync(join(parent, '.business-api-'))
   const socket = join(directory, 'api.sock')
   // sockaddr_un is short even when the trusted execution store has a long absolute path.
   const fd = openSync(directory, constants.O_DIRECTORY | constants.O_NOFOLLOW)

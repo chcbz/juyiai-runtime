@@ -1,7 +1,7 @@
 /** Native engine orchestration only: no per-skill or Provider task branching. */
-import { openBusinessReadSocket } from './execution-business-read.mjs'
+import { openBusinessSocket } from './execution-business-api.mjs'
 import { resolve } from 'node:path'
-import { skillDigest } from './skill-executor.mjs'
+import { skillDigest, NATIVE_DOMAIN_API_POLICY } from './skill-executor.mjs'
 import { NATIVE_SKILL_SCRIPT_POLICY } from './native-skill-config.mjs'
 import { NativeArtifactSession } from './native-artifact-session.mjs'
 import { validateNativeOutputSnapshot } from './native-output-format.mjs'
@@ -9,7 +9,7 @@ const fail = code => { throw Object.assign(new Error(code), { code }) }
 export const nativeExecutionRequestBinding = command => ({ schemaVersion: 1,
   requestKey: `native:${command.executionId}:${command.snapshotDigest}`, authorizationId: command.executionId,
   manifestDigest: `sha256:${command.snapshotDigest}`, requestId: command.commandId, turnId: command.messageId, inputPolicyDigest: command.toolPolicyRef })
-export async function runNativeExecution({ command, inputs, entries, store, checkActive, signal, profileRuntime, model, effort, skillConfiguration = [], callPrivateTool, readBusiness }) {
+export async function runNativeExecution({ command, inputs, entries, store, checkActive, signal, profileRuntime, model, effort, skillConfiguration = [], callPrivateTool, exchangeBusiness }) {
   if (!profileRuntime?.openNativeExecutionAdapter) fail('NATIVE_EXECUTION_PROFILE_UNAVAILABLE')
   if (skillConfiguration.length && command.toolPolicyRef !== NATIVE_SKILL_SCRIPT_POLICY) fail('NATIVE_SKILL_CONFIG_POLICY_MISMATCH')
   const networkAccess = skillConfiguration.some(item => item.networkOrigins.length > 0)
@@ -42,13 +42,13 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
         return callPrivateTool(ctx)
       }
     }
-    if (skillConfiguration.some(item => item.businessApiRead === true)) {
-      if (typeof readBusiness !== 'function') fail('NATIVE_BUSINESS_READ_UNAVAILABLE')
-      businessSocket = await openBusinessReadSocket(store.directory, async (...args) => {
+    if (command.toolPolicyRef === NATIVE_DOMAIN_API_POLICY) {
+      if (!entries.length || typeof exchangeBusiness !== 'function') fail('NATIVE_BUSINESS_API_UNAVAILABLE')
+      businessSocket = await openBusinessSocket(store.directory, async (...args) => {
         checkActive()
-        if (signal?.aborted || !store.read('native-turn') || store.read('native-selection') || store.read('native-terminal') || store.read('result')) fail('NATIVE_BUSINESS_READ_INACTIVE')
-        return readBusiness(...args)
-      }, { write: skillConfiguration.some(item => item.businessApiWrite === true) })
+        if (signal?.aborted || !store.read('native-turn') || store.read('native-selection') || store.read('native-terminal') || store.read('result')) fail('NATIVE_BUSINESS_API_INACTIVE')
+        return exchangeBusiness(...args)
+      }, { write: true })
       nativeExecution.businessSocket = businessSocket.socket
     }
     const adapter = await profileRuntime.openNativeExecutionAdapter(resolve(store.directory, 'inputs'), requestKey, binding, {

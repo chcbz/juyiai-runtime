@@ -27,6 +27,7 @@ export const executionScopeValid = scope => object(scope)
   && (scope.kind === 'PRIVATE' ? scope.taskId === null : scope.kind === 'TASK' && skillId(scope.taskId))
 
 export const NATIVE_LOCAL_FILES_POLICY = 'NATIVE_LOCAL_FILES_V1'
+export const NATIVE_DOMAIN_API_POLICY = 'NATIVE_DOMAIN_API_V1'
 export const NATIVE_SKILL_SCRIPT_POLICY = 'NATIVE_SKILL_SCRIPT_V1'
 export function parseSkillCommand(raw) {
   const value = typeof raw === 'string' || Buffer.isBuffer(raw) ? parseSkillJson(raw) : structuredClone(raw)
@@ -37,13 +38,13 @@ export function parseSkillCommand(raw) {
       || ['taskId', 'conversationId', 'conversationGeneration'].some(key => Object.hasOwn(value, key))
       || !['executionId', 'runId', 'commandId', 'messageId'].every(key => skillId(value[key]))
       || !executionScopeValid(value.scope)
-      || !skillSha(value.snapshotDigest) || ![NATIVE_LOCAL_FILES_POLICY, NATIVE_SKILL_SCRIPT_POLICY].includes(value.toolPolicyRef)
+      || !skillSha(value.snapshotDigest) || ![NATIVE_LOCAL_FILES_POLICY, NATIVE_SKILL_SCRIPT_POLICY, NATIVE_DOMAIN_API_POLICY].includes(value.toolPolicyRef)
       || !object(value.parameters) || typeof value.instruction !== 'string' || !value.instruction.trim()
       || !Array.isArray(value.inputRefs) || !value.inputRefs.every(skillId) || new Set(value.inputRefs).size !== value.inputRefs.length
       || !object(value.outputs) || !Array.isArray(value.outputs.mimeTypes)
       || !value.outputs.mimeTypes.every(mime) || typeof value.outputs.multiple !== 'boolean' || typeof value.outputs.artifactsRequired !== 'boolean'
       || !Array.isArray(value.skills)) fail('SKILL_COMMAND_INVALID')
-  if (value.toolPolicyRef === NATIVE_SKILL_SCRIPT_POLICY && value.skills.length === 0) fail('SKILL_COMMAND_INVALID')
+  if (value.toolPolicyRef !== NATIVE_LOCAL_FILES_POLICY && value.skills.length === 0) fail('SKILL_COMMAND_INVALID')
   value.outputs = { ...value.outputs, dataSchema: value.outputs.dataSchema ?? null }
   const installations = new Set()
   for (const item of value.skills) {

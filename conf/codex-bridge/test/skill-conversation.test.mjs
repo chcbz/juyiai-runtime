@@ -859,7 +859,7 @@ test('business read uses the running lease and request correlation without a wri
     const id=opts.headers['X-Request-Id']; assert.ok(id); reads++
     const res=new Response(JSON.stringify({protocolVersion:1,requestId:id,code:'E0',msg:'ok',data:{found:true}}),{headers:{'X-Request-Id':id,'content-type':'application/json'}})
     Object.defineProperty(res,'url',{value:url.href}); return res
-  },runNative:async req=>{assert.deepEqual(await req.readBusiness('fixture',{model:'sample'},new AbortController().signal),{found:true});return f.options.runNative(req)}})
+  },runNative:async req=>{assert.deepEqual(await req.exchangeBusiness('fixture',{model:'sample'},new AbortController().signal),{found:true});return f.options.runNative(req)}})
   assert.equal((await lane.poll()).processed,1); assert.equal(reads,1)
 })
 
@@ -870,6 +870,6 @@ test('uncertain domain commit uses receipt-only recovery; repeated intent does n
     if (verb==='commit') throw new Error('committed; reply lost')
     const id=opts.headers['X-Request-Id'];const res=new Response(JSON.stringify({protocolVersion:1,requestId:id,code:'E0',msg:'ok',data:{confirmed:true}}),{headers:{'X-Request-Id':id,'content-type':'application/json'}})
     Object.defineProperty(res,'url',{value:url.href});return res
-  },runNative:async req=>{for(let i=0;i<2;i++)assert.deepEqual(await req.readBusiness('fixture',{model:'sample'},new AbortController().signal,'commit'),{confirmed:true});return f.options.runNative(req)}})
+  },runNative:async req=>{for(let i=0;i<2;i++)assert.deepEqual(await req.exchangeBusiness('fixture',{model:'sample'},new AbortController().signal,'commit'),{confirmed:true});return f.options.runNative(req)}})
   assert.equal((await lane.poll()).processed,1);assert.deepEqual(verbs,['commit','receipt','receipt'])
 })

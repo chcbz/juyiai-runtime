@@ -518,7 +518,7 @@ test('SCRIPT declaration requires its own successful configured package and rest
     }
     runtime.releaseAdapter = async id => { releases++; runtime.activeAdapters.delete(id); if (mode === 'script-cleanup-fail' && id.startsWith('native-script-')) throw Error('cleanup') }
     const declaration = await runtime.measureNativeExecution()
-    assert.deepEqual(declaration.supportedToolPolicyRefs, ['NATIVE_SKILL_SCRIPT_V1'])
+    assert.deepEqual(declaration.supportedToolPolicyRefs, ['NATIVE_SKILL_SCRIPT_V1','NATIVE_DOMAIN_API_V1'])
     assert.deepEqual(declaration.outputMimeTypes, ['text/plain', 'text/markdown', 'text/html', 'application/json', 'image/png'])
     for (mode of ['script-open-fail', 'script-network-fail', 'script-exec-fail', 'script-cleanup-fail']) {
       const local = await runtime.measureNativeExecution()
@@ -551,7 +551,7 @@ test('real SCRIPT declaration uses Node package, read-only config and additional
     console.log('local measurement failure:', JSON.stringify(runtime.nativeExecutionMeasurementFailure))
     console.log('script measurement failure:', JSON.stringify(runtime.nativeScriptMeasurementFailure))
     assert.equal(declaration?.toolPolicyRef, 'NATIVE_LOCAL_FILES_V1')
-    assert.deepEqual(declaration?.supportedToolPolicyRefs, ['NATIVE_SKILL_SCRIPT_V1'])
+    assert.deepEqual(declaration?.supportedToolPolicyRefs, ['NATIVE_SKILL_SCRIPT_V1','NATIVE_DOMAIN_API_V1'])
     assert.deepEqual(declaration?.outputMimeTypes, ['text/plain', 'text/markdown', 'text/html', 'application/json', 'image/png'])
     assert.equal(runtime.activeAdapters.size, 0)
     console.log('real SCRIPT declaration passed; model turn, real credential and paid API: NOT_RUN')
