@@ -202,7 +202,8 @@ export class SkillConversationLane extends SkillUsageDelivery {
     const outstanding = new Map()
     const bindInstallation = async installationId => {
       checkLease(); const receipt=await this.request(`${path}/skill-selection`,'POST',{installationId,fence,snapshotSha256:command.snapshotDigest},[200],{requestId:randomUUID(),signal:executionAbort.signal})
-      checkLease(); if(!object(receipt) || (receipt.installationId??null)!==installationId)fail('NATIVE_DOMAIN_BINDING_UNCONFIRMED')
+      checkLease(); if(!object(receipt) || (receipt.installationId??null)!==installationId || typeof receipt.domainApi!=='boolean' || (installationId===null && receipt.domainApi))fail('NATIVE_DOMAIN_BINDING_UNCONFIRMED')
+      return receipt.domainApi
     }
     const exchangeBusiness = async (resource, data, socketSignal, action = 'lookup') => {
       checkLease()

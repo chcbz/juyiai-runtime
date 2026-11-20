@@ -47,6 +47,6 @@ export async function selectInstallation({command, entries, store, checkActive, 
     finally{signal?.removeEventListener('abort',abort);if(terminal)await profileRuntime.releaseAdapter(planner.requestKey,{requestBinding:planner});else await profileRuntime.suspendAdapter(planner.requestKey)}
   }
   call(); if(choice.installationId!==null&&!ids.has(choice.installationId))fail('NATIVE_DOMAIN_CHOICE_INVALID')
-  await bindInstallation(choice.installationId);call()
-  return choice.installationId===null?[]:[ids.get(choice.installationId)]
+  const domainApi=await bindInstallation(choice.installationId);call()
+  return {entries:choice.installationId===null?[]:[ids.get(choice.installationId)],domainApi:domainApi===true}
 }
