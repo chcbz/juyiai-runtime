@@ -38,7 +38,7 @@ const resultReceipt = value => {
 // Existing recovery timing, also used for command-local transport/authority/environment
 // failures. Never grant a new execution, rewrite UNKNOWN or expire accepted work.
 const deferredRecoveryCodes = new Set(['SKILL_RESULT_UNKNOWN', 'SKILL_TRANSPORT_UNKNOWN',
-  'SKILL_API_RESPONSE_UNCONFIRMED', 'SKILL_DOMAIN_COMMIT_UNCONFIRMED', 'SKILL_PRIVATE_CALL_UNCONFIRMED', 'TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT',
+  'SKILL_API_RESPONSE_UNCONFIRMED', 'SKILL_DOMAIN_COMMIT_UNCONFIRMED', 'TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT',
   'NATIVE_EXECUTION_ADAPTER_BINDING_CONFLICT', 'NATIVE_EXECUTION_RECOVERY_ENVIRONMENT_CHANGED'])
 const engineTerminalCodes = new Set(['NATIVE_EXECUTION_TURN_FAILED', 'NATIVE_EXECUTION_TURN_INTERRUPTED'])
 const sourceKinds = new Set(['WORKSPACE_VERSION', 'TASK_LINKED_WORKSPACE_VERSION', 'CURRENT_CONVERSATION_ASSET', 'EXECUTION_RESULT', 'FORMAL_ARTIFACT'])
@@ -233,41 +233,9 @@ export class SkillConversationLane extends SkillUsageDelivery {
         catch (error) { fail('SKILL_DOMAIN_COMMIT_UNCONFIRMED',error) }
       }
     }
-    const callPrivateTool = async ({executionId,threadId,turnId,callId,tool,arguments:args}) => {
-      checkLease()
-      if (executionId !== command.executionId || ![threadId,turnId,callId].every(skillId)
-          || !command.privateTools?.tools.some(row => row.name === tool)) fail('SKILL_PRIVATE_CALL_INVALID')
-      const input = {executionId,runId:command.runId,threadId,turnId,callId,tool,arguments:args,
-        snapshotSha256:command.snapshotDigest,catalogSha256:command.privateTools.catalogSha256}
-      const digest = skillDigest(input), key = `business-${skillDigest(callId)}`, prior = store.read(key)
-      if (prior && prior.digest !== digest) fail('SKILL_PRIVATE_CALL_CONFLICT')
-      const requestId = prior?.requestId || randomUUID(), url = `${path}/tool-calls/${callId}`
-      const options = {requestId,callId,signal:executionAbort.signal}
-      const lookup = () => this.request(url,'GET',undefined,[200],options)
-      // Write before transport. A lost reply, process death, or session rotation must not trigger a second POST.
-      const marker = {requestId,digest,callId}
-      if (!prior) store.write(key,marker)
-      try {
-        let result
-        if (prior) result = await lookup()
-        else try {
-          result = await this.request(url,'POST',{fence,snapshotSha256:input.snapshotSha256,catalogSha256:input.catalogSha256,
-            threadId,turnId,tool,arguments:args},[200,400,401,403,404,409,422,503],options)
-        } catch (error) {
-          if (error.failureClass === 'http' && [400,401,403,404,409,422].includes(error.status)) {
-            store.write(key,{...marker,settled:true}); error.recoverableToolError = true; throw error
-          }
-          checkLease(); result = await lookup()
-        }
-        checkLease(); store.write(key,{...marker,settled:true}); return result
-      } catch (error) {
-        if (error.recoverableToolError) throw error
-        fail('SKILL_PRIVATE_CALL_UNCONFIRMED',error)
-      }
-    }
     const ctx = {
       registry: this.registry,
-      runNative: request => { if (typeof this.runNative !== 'function') fail('SKILL_NATIVE_ADAPTER_MISSING'); return this.runNative({ ...request, store, checkActive: checkLease, signal: executionAbort.signal, callPrivateTool, exchangeBusiness }) },
+      runNative: request => { if (typeof this.runNative !== 'function') fail('SKILL_NATIVE_ADAPTER_MISSING'); return this.runNative({ ...request, store, checkActive: checkLease, signal: executionAbort.signal, exchangeBusiness }) },
       claimOrResume: async () => {
         const attempted = store.read('attempt')
         // Write before claim; lost lease reply must use resume, not a new claim.
@@ -291,12 +259,6 @@ export class SkillConversationLane extends SkillUsageDelivery {
         if (resume) {
           for (const [key,marker] of store.pendingDomainCalls()) outstanding.set(key,marker)
           await reconcileDomain()
-        }
-        if (resume && command.privateTools) for (const {key,marker} of store.pendingBusinessCalls()) {
-          checkLease()
-          try { await this.request(`${path}/tool-calls/${marker.callId}`,'GET',undefined,[200],{requestId:marker.requestId,callId:marker.callId,signal:executionAbort.signal}) }
-          catch (error) { fail('SKILL_PRIVATE_CALL_UNCONFIRMED',error) }
-          checkLease(); store.write(key,{...marker,settled:true})
         }
         if (resume?.turnFailureCode) {
           if (resume.phase !== 'RESULT_UNKNOWN' || resume.resultManifest != null || resume.allowedWork.some(work => work !== 'QUERY_EFFECT')) fail('SKILL_RESUME_INVALID')

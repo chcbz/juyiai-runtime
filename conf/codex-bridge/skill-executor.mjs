@@ -58,23 +58,7 @@ export function parseSkillCommand(raw) {
         || installations.has(binding.skillInstallationId)) fail('SKILL_COMMAND_INVALID')
     installations.add(binding.skillInstallationId)
   }
-  if (Object.hasOwn(value, 'privateTools')) {
-    const catalog = value.privateTools
-    if (value.scope.kind !== 'PRIVATE' || value.toolPolicyRef !== NATIVE_LOCAL_FILES_POLICY
-        || !object(catalog) || Object.keys(catalog).sort().join(',') !== 'catalogSha256,tools,version'
-        || catalog.version !== 1 || !Array.isArray(catalog.tools) || !catalog.tools.length
-        || !skillSha(catalog.catalogSha256)) fail('SKILL_PRIVATE_CATALOG_INVALID')
-    let previous = ''
-    for (const tool of catalog.tools) {
-      if (!object(tool) || Object.keys(tool).sort().join(',') !== 'description,inputSchema,name,type'
-          || tool.type !== 'function' || !skillId(tool.name) || tool.name <= previous
-          || ['artifact_stage','result_propose'].includes(tool.name) || typeof tool.description !== 'string'
-          || !object(tool.inputSchema) || tool.inputSchema.type !== 'object') fail('SKILL_PRIVATE_CATALOG_INVALID')
-      previous = tool.name
-    }
-    if (catalog.catalogSha256 !== skillDigest({ version: 1, tools: catalog.tools })) fail('SKILL_PRIVATE_CATALOG_INVALID')
-    fields.push('privateTools')
-  }
+  if (Object.hasOwn(value, 'privateTools')) fail('SKILL_COMMAND_INVALID')
   // Ignore documented harmless extensions, never interpret them as authority.
   return Object.fromEntries(fields.map(key => [key, value[key]]))
 }

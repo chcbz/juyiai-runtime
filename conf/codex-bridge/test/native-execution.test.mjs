@@ -235,22 +235,3 @@ test('recovered evidence preserves source data and does not overwrite an earlier
   assert.deepEqual(f.store.read('native-usage-recovered').usageEvidence, usageEvidence)
   assert.equal(f.runs(), 1)
 })
-
-test('a private tool and result proposal share the native turn; foreign turns never reach the callback',async t=>{
-  const f=fixture(t);let policy;let calls=0
-  f.command.privateTools={tools:[{type:'function',name:'fixture_read',description:'read fixture',inputSchema:{type:'object'}}]}
-  f.command.outputs.artifactsRequired=false
-  f.request.callPrivateTool=async ctx=>{calls++;assert.equal(ctx.turnId,'turn1');return {configured:true}}
-  f.request.profileRuntime.openNativeExecutionAdapter=async(_dir,_key,_binding,opts)=>{policy=opts.nativeExecution;return f.adapter}
-  f.adapter.runTurn=async({onAccepted})=>{
-    onAccepted({threadId:'thread1',turnId:'turn1'})
-    const ctx={executionId:f.command.executionId,threadId:'thread1',turnId:'turn1',callId:'read1',tool:'fixture_read',arguments:{}}
-    assert.deepEqual(policy.tools.map(t=>t.name),['artifact_stage','result_propose','fixture_read'])
-    for(const override of [{executionId:'other'},{threadId:'other'},{turnId:'other'}])
-      await assert.rejects(async()=>policy.callTool({...ctx,...override}),/NATIVE_TOOL_BINDING_INVALID/)
-    assert.deepEqual(await policy.callTool(ctx),{configured:true});assert.equal(calls,1)
-    await policy.callTool({...ctx,callId:'propose1',tool:'result_propose',arguments:{artifactRefs:[],summary:'read',data:null}})
-    return {threadId:'thread1',turnId:'turn1',finishReason:'completed',content:'read'}
-  }
-  await runNativeExecution(f.request); assert.equal(calls,1)
-})

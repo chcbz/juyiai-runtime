@@ -243,7 +243,7 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
     phase('finished')
     console.info(JSON.stringify({ event: 'native-execution-startup-timing', profileKey: createHash('sha256').update(this.profile.profileId || '').digest('hex'), ready, timings }))
     this.nativeBrowserReady = ready && !this.disposed && browserReady
-    return ready && !this.disposed ? Object.freeze({ schemaVersion: 1, executionProtocolVersion: 6, privateBusinessToolsVersion: 1,
+    return ready && !this.disposed ? Object.freeze({ schemaVersion: 1, executionProtocolVersion: 6,
       toolPolicyRef: 'NATIVE_LOCAL_FILES_V1', outputMimeTypes: Object.freeze(['text/plain', 'text/markdown', 'text/html', 'application/json', ...(scriptReady || browserReady ? ['image/png'] : []), ...(documentReady ? DOCUMENT_MIMES : []), ...(pdfReady ? ['application/pdf'] : [])]),
       ...(scriptReady ? { supportedToolPolicyRefs: Object.freeze(['NATIVE_SKILL_SCRIPT_V1','NATIVE_DOMAIN_API_V1']) } : {}) }) : null
   }

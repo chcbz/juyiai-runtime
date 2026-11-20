@@ -9,7 +9,7 @@ const fail = code => { throw Object.assign(new Error(code), { code }) }
 export const nativeExecutionRequestBinding = command => ({ schemaVersion: 1,
   requestKey: `native:${command.executionId}:${command.snapshotDigest}`, authorizationId: command.executionId,
   manifestDigest: `sha256:${command.snapshotDigest}`, requestId: command.commandId, turnId: command.messageId, inputPolicyDigest: command.toolPolicyRef })
-export async function runNativeExecution({ command, inputs, entries, store, checkActive, signal, profileRuntime, model, effort, skillConfiguration = [], callPrivateTool, exchangeBusiness }) {
+export async function runNativeExecution({ command, inputs, entries, store, checkActive, signal, profileRuntime, model, effort, skillConfiguration = [], exchangeBusiness }) {
   if (!profileRuntime?.openNativeExecutionAdapter) fail('NATIVE_EXECUTION_PROFILE_UNAVAILABLE')
   if (skillConfiguration.length && command.toolPolicyRef !== NATIVE_SKILL_SCRIPT_POLICY) fail('NATIVE_SKILL_CONFIG_POLICY_MISMATCH')
   const networkAccess = skillConfiguration.some(item => item.networkOrigins.length > 0)
@@ -29,19 +29,7 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
     if (signal?.aborted) fail('SKILL_LEASE_UNCERTAIN')
     checkActive()
     const local = session.policy()
-    const business = command.privateTools?.tools
     const nativeExecution = { ...local, networkAccess }
-    if (business?.length) {
-      const names = new Set(business.map(tool => tool.name))
-      if (typeof callPrivateTool !== 'function' || local.tools.some(t => names.has(t.name))) fail('SKILL_PRIVATE_CATALOG_INVALID')
-      nativeExecution.tools = [...local.tools, ...business]
-      nativeExecution.callTool = ctx => {
-        if (!names.has(ctx.tool)) return local.callTool(ctx)
-        session.requireBoundTurn(ctx)
-        if (store.read('result') || store.read('native-terminal')) fail('NATIVE_RESULT_ALREADY_FROZEN')
-        return callPrivateTool(ctx)
-      }
-    }
     if (command.toolPolicyRef === NATIVE_DOMAIN_API_POLICY) {
       if (!entries.length || typeof exchangeBusiness !== 'function') fail('NATIVE_BUSINESS_API_UNAVAILABLE')
       businessSocket = await openBusinessSocket(store.directory, async (...args) => {

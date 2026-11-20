@@ -85,15 +85,6 @@ export class SkillExecutionStore {
       return [[key,marker]]
     })
   }
-  pendingBusinessCalls() {
-    privateDirectory(this.directory)
-    return readdirSync(this.directory).filter(name => /^business-[a-f0-9]{64}\.json$/.test(name)).flatMap(name => {
-      const key = name.slice(0,-5), marker = this.read(key)
-      if (!marker || !skillId(marker.callId) || key !== `business-${skillDigest(marker.callId)}` || !skillSha(marker.digest)
-          || typeof marker.requestId !== 'string') fail('SKILL_STORE_UNSAFE')
-      return marker.settled ? [] : [{key,marker}]
-    })
-  }
   read(name) { privateDirectory(this.directory); const path = this.path(name); return existsSync(path) ? parseSkillJson(readPrivate(path)) : null }
   write(name, value) {
     privateDirectory(this.directory)

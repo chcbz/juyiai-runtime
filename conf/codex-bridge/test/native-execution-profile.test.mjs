@@ -363,7 +363,7 @@ test('native declaration requires a successful isolated engine, TLS and shell pr
     runtime.releaseAdapter = async (id, { requestBinding }) => { assert.equal(id, requestBinding.requestKey); releases++; runtime.activeAdapters.delete(id) }
     runtime.contractReadback = { unrelated: 'inspection evidence' }
     assert.equal(runtime.nativeExecutionDeclaration(), null)
-    assert.deepEqual(await runtime.measureNativeExecution(), { schemaVersion: 1, executionProtocolVersion: 6, privateBusinessToolsVersion: 1, toolPolicyRef: 'NATIVE_LOCAL_FILES_V1', outputMimeTypes: ['text/plain', 'text/markdown', 'text/html', 'application/json'] })
+    assert.deepEqual(await runtime.measureNativeExecution(), { schemaVersion: 1, executionProtocolVersion: 6, toolPolicyRef: 'NATIVE_LOCAL_FILES_V1', outputMimeTypes: ['text/plain', 'text/markdown', 'text/html', 'application/json'] })
     assert.equal(runtime.nativeExecutionDeclaration()?.executionProtocolVersion, 6)
     for (mode of ['open-fail', 'tls-fail', 'shell-fail']) { assert.equal(await runtime.measureNativeExecution(), null); assert.equal(runtime.nativeExecutionDeclaration(), null) }
     assert.equal(releases, 4); assert.equal(runtime.activeAdapters.size, 0)
@@ -393,7 +393,7 @@ test('real native capability declaration measures shell and provider TLS without
     assert.equal(runtime.nativeExecutionDeclaration(), null)
     const declaration = await runtime.measureNativeExecution()
     if (!declaration) console.log('native declaration failure:', JSON.stringify(runtime.nativeExecutionMeasurementFailure))
-    assert.deepEqual(declaration, { schemaVersion: 1, executionProtocolVersion: 6, privateBusinessToolsVersion: 1, toolPolicyRef: 'NATIVE_LOCAL_FILES_V1',
+    assert.deepEqual(declaration, { schemaVersion: 1, executionProtocolVersion: 6, toolPolicyRef: 'NATIVE_LOCAL_FILES_V1',
       outputMimeTypes: ['text/plain', 'text/markdown', 'text/html', 'application/json'] })
     assert.equal(runtime.nativeExecutionDeclaration(), declaration)
     assert.equal(runtime.activeAdapters.size, 0)

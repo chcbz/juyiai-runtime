@@ -145,9 +145,6 @@ export const skillConversationHttpScope = (endpoint, options = {}) => {
   const method = (options.method || 'GET').toUpperCase()
   if (endpoint.pathname === '/internal/agent/executions/commands') return method === 'GET' && options.body == null
   const id = '[A-Za-z0-9][A-Za-z0-9._:-]{0,99}'
-  const call = new RegExp(`^/internal/agent/executions/${id}/runs/${id}/tool-calls/(${id})$`).exec(endpoint.pathname)
-  if (call) return method === 'GET' && options.body == null || method === 'POST'
-    && new Headers(options.headers).get('Idempotency-Key') === call[1]
   return method === 'POST' && new RegExp(`^/internal/agent/executions/${id}/runs/${id}/(?:lease(?:/renew)?|inputs(?:/${id}/content)?|effects/${id}/(?:start|result)|resume|outputs/${id}/content|result-commits/${id}|business/[a-z][a-z0-9-]{0,63}/(?:lookup|commit|receipt)|failure|usage|provider-usage)$`).test(endpoint.pathname)
 }
 
