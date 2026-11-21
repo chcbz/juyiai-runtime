@@ -26,8 +26,12 @@ export class NativeArtifactSession {
     // Keep structured schemas at their existing root in outputs.dataSchema so
     // local $refs retain their original meaning; runtime validation is unchanged.
     const data = this.command.outputs.dataSchema ? {} : { type: 'null', description: 'This execution has no structured data output. Pass null; deliver files via artifactRefs.' }
+    const { artifactsRequired, multiple } = this.command.outputs
     const tools = nativeArtifactTools.map(tool => tool.name === 'result_propose'
-      ? { ...tool, inputSchema: { ...tool.inputSchema, properties: { ...tool.inputSchema.properties, data } } }
+      ? { ...tool, inputSchema: { ...tool.inputSchema, properties: { ...tool.inputSchema.properties, data,
+        artifactRefs: { ...tool.inputSchema.properties.artifactRefs, uniqueItems: true,
+          ...(artifactsRequired ? { minItems: 1 } : {}), ...(multiple ? {} : { maxItems: 1 }),
+          description: 'Use artifactRef values returned by artifact_stage, not file paths or display names.' } } } }
       : tool)
     return { executionId: this.command.executionId, tools, checkActive: this.checkActive, callTool: ctx => this.callTool(ctx) }
   }
@@ -101,12 +105,16 @@ export class NativeArtifactSession {
     return reply
   }
   _propose(key, requestSha256, args, binding) {
-    if (Object.keys(args).sort().join(',') !== 'artifactRefs,data,summary' || typeof args.summary !== 'string'
-        || !Array.isArray(args.artifactRefs) || !args.artifactRefs.every(skillId) || new Set(args.artifactRefs).size !== args.artifactRefs.length) fail('NATIVE_PROPOSAL_INVALID', true)
+    // Only record a stable reason and the existing invocation digest. A rejected
+    // proposal is not a result, and its arguments may contain private content.
+    const reject = code => { this.store.write(key, { phase: 'FAILED', requestSha256, code }); fail(code, true) }
+    if (Object.keys(args).sort().join(',') !== 'artifactRefs,data,summary' || typeof args.summary !== 'string') reject('NATIVE_PROPOSAL_INVALID_FIELDS')
+    if (!Array.isArray(args.artifactRefs) || !args.artifactRefs.every(skillId) || new Set(args.artifactRefs).size !== args.artifactRefs.length) reject('NATIVE_PROPOSAL_INVALID_REFS')
     const outputs = this.command.outputs
-    if (outputs.artifactsRequired && !args.artifactRefs.length || !outputs.multiple && args.artifactRefs.length > 1) fail('NATIVE_PROPOSAL_INVALID', true)
-    if (!outputs.dataSchema && args.data !== null) fail('NATIVE_PROPOSAL_INVALID', true)
-    if (outputs.dataSchema) { try { validateSkillData(outputs.dataSchema, args.data) } catch { fail('NATIVE_PROPOSAL_INVALID', true) } }
+    if (outputs.artifactsRequired && !args.artifactRefs.length) reject('NATIVE_PROPOSAL_INVALID_ARTIFACT_REQUIRED')
+    if (!outputs.multiple && args.artifactRefs.length > 1) reject('NATIVE_PROPOSAL_INVALID_ARTIFACT_COUNT')
+    if (!outputs.dataSchema && args.data !== null) reject('NATIVE_PROPOSAL_INVALID_DATA_EXPECTED_NULL')
+    if (outputs.dataSchema) { try { validateSkillData(outputs.dataSchema, args.data) } catch { reject('NATIVE_PROPOSAL_INVALID_DATA_SCHEMA') } }
     const artifacts = args.artifactRefs.map(ref => {
       const artifact = this.store.read(`artifact-${ref}`)
       if (!artifact || artifact.outputId !== ref || !outputs.mimeTypes.includes(artifact.contentMimeType)) fail('NATIVE_PROPOSAL_ARTIFACT_UNKNOWN', true)

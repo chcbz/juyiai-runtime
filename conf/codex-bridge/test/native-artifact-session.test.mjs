@@ -71,6 +71,18 @@ test('proposal tool advertises the same file-only data contract it enforces', as
   await assert.rejects(() => f.call('result_propose', { summary: 'done', artifactRefs: [a.artifactRef], data: {} }, 'invalid-data'), /PROPOSAL_INVALID/)
   await f.propose([a.artifactRef]); assert.equal(f.session.finalize(f.terminal, []).result.artifacts.length, 1)
 })
+test('file selection advertises the bound cardinality; deterministic rejections replay without selecting or leaking arguments', async t => {
+  const f = fixture(t); f.store.command.outputs.multiple = false
+  const refs = f.session.policy().tools.find(tool => tool.name === 'result_propose').inputSchema.properties.artifactRefs
+  assert.equal(refs.minItems, 1); assert.equal(refs.maxItems, 1); assert.equal(refs.uniqueItems, true)
+  const args = { summary: 'private summary', artifactRefs: [], data: null }
+  for (let n = 0; n < 2; n++) await assert.rejects(() => f.call('result_propose', args, 'one'), { code: 'NATIVE_PROPOSAL_INVALID_ARTIFACT_REQUIRED' })
+  assert.equal(f.store.read('native-selection'), null)
+  f.write('ok'); const a = await f.stage(); const corrected = { ...args, artifactRefs: [a.artifactRef] }
+  await assert.rejects(() => f.call('result_propose', corrected, 'one'), /CALL_CONFLICT/)
+  await f.call('result_propose', corrected, 'two')
+  assert.equal(f.session.finalize(f.terminal, []).result.artifacts[0].sha256, a.sha256)
+})
 test('structured data schemas are execution-local and do not leak to file-only sessions', async t => {
   const typed = fixture(t); const plain = fixture(t)
   const schema = { $schema: 'https://json-schema.org/draft/2020-12/schema', type: 'object', properties: { count: { type: 'integer' } }, required: ['count'], additionalProperties: false }
