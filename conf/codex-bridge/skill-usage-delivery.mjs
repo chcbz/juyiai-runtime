@@ -1,3 +1,4 @@
+import { deliverMetered,meteredBatch } from './metered-usage-delivery.mjs'
 import { recoverStoppedMeteredRoot } from './metered-capture-closure.mjs'
 import { pendingProviderUsage } from './provider-usage-receipts.mjs'
 import { pendingNativeUsage, acknowledgeNativeUsage } from './native-usage-receipts.mjs'
@@ -30,13 +31,14 @@ export class SkillUsageDelivery {
     this.pendingUsage = []; this.usageRetries = new Map()
   }
   headers() { return nativeSessionHeaders(this.auth(), this.agentId, this.instanceId) }
-  async request(path, method, body, statuses = [200]) {
+  async request(path, method, body, statuses = [200], call = null) {
     const endpoint = new URL(path, `${this.origin}/`)
     if (endpoint.origin !== this.origin || endpoint.pathname !== path || endpoint.search || endpoint.hash) fail('SKILL_API_PATH_INVALID')
     const proof = this.headers(), headers = { ...proof, Accept: 'application/json' }
+    if(call){headers['X-Request-Id']=call.requestId;headers['Idempotency-Key']=call.callId}
     if (body !== undefined && !(body instanceof FormData)) headers['Content-Type'] = 'application/json'
     let response
-    try { response = await this.fetch(endpoint, { method, redirect: 'error', headers,
+    try { response = await this.fetch(endpoint, { method, redirect: 'error', headers, ...(call?{signal:call.signal}:{}),
       ...(body === undefined ? {} : { body: body instanceof FormData ? body : JSON.stringify(body) }) }) }
     catch (cause) { fail('SKILL_TRANSPORT_UNKNOWN', cause) }
     if (JSON.stringify(proof) !== JSON.stringify(this.headers())) {
@@ -51,6 +53,7 @@ export class SkillUsageDelivery {
       try { await response?.body?.cancel?.() } catch {}
       fail('SKILL_API_RESPONSE_UNCONFIRMED')
     }
+    if(call&&response.headers.get('X-Request-Id')!==call.requestId)fail('SKILL_API_RESPONSE_UNCONFIRMED')
     try { return await readNativeJson(response) } catch (cause) { fail('SKILL_API_RESPONSE_UNCONFIRMED', cause) }
   }
   resetPendingDiscovery() { this.pendingExecutionIds = null }
@@ -109,7 +112,7 @@ export class SkillUsageDelivery {
     this.pendingExecutionIds = unresolved
     return pending
   }
-  async deliverPendingUsage() {
+  async deliverPendingUsage(live=true) {
     const errors = [...(this.pendingUsageErrors || [])]
     for (const item of this.pendingUsage) {
       const { command, store } = item
@@ -129,6 +132,16 @@ export class SkillUsageDelivery {
         errors.push({ executionId: command.executionId, code: error?.code || 'NATIVE_USAGE_DELIVERY_FAILED' })
       }
     }
+    if(live){
+      const batch=meteredBatch(),list=this.pendingMetered||[],start=(this.meteredCursor||0)%Math.max(1,list.length)
+      for(let i=0;i<list.length&&batch.left&&Date.now()<batch.until;i++){
+        const index=(start+i)%list.length,{store,command}=list[index];this.meteredCursor=index+1
+        const retry=this.usageRetries.get(command.executionId);if(retry&&this.now()<retry.nextAt)continue
+        try{await deliverMetered(store,this.request.bind(this),batch);this.usageRetries.delete(command.executionId)}
+        catch(error){if(/^SKILL_(?:SESSION|STORE|SCOPE)_/.test(error.code||''))throw error
+          const attempt=Math.min((retry?.attempt||0)+1,6);this.usageRetries.set(command.executionId,{attempt,nextAt:this.now()+Math.floor(Math.min(300000,15000*2**(attempt-1))*(0.8+0.2*this.random()))});errors.push({executionId:command.executionId,code:error.code||'METERED_USAGE_DELIVERY_FAILED'})}
+      }
+    }
     return errors
   }
 
@@ -141,25 +154,26 @@ export class SkillUsageDelivery {
       this.resetPendingDiscovery()
       this.pendingCommands()
       errors.push(...this.pendingCommandErrors.map(({ executionId, error }) => ({ executionId, code: error.code })))
-      errors.push(...await this.deliverPendingUsage())
+      errors.push(...await this.deliverPendingUsage(false))
       if (errors.length || !this.pendingUsage.length) break
     }
     this.resetPendingDiscovery()
     this.pendingCommands()
     // Only flush() is called by the stopped subject under its QUIESCED writer gate.
     // Discovery alone (also used live) is never permission to close a producer.
-    const captureStates=[]
+    const captureStates=[],batch=meteredBatch();let outstanding=this.pendingMetered.length
     for(const {store,command} of this.pendingMetered){
       try {
         const marker=await recoverStoppedMeteredRoot(store,()=>{
           if(store.commandDigest!==skillDigest(command)) fail('SKILL_STORE_IDENTITY_CONFLICT')
         })
-        captureStates.push({executionId:command.executionId,captureState:'FINALIZED',closeState:marker.closeState,deliveryState:'PENDING_ACK'})
+        const complete=await deliverMetered(store,this.request.bind(this),batch,true);if(complete)outstanding--
+        captureStates.push({executionId:command.executionId,captureState:'FINALIZED',closeState:marker.closeState,deliveryState:complete?'ACKED':'PENDING_ACK'})
       }catch(error){errors.push({executionId:command.executionId,code:error?.code||'METERED_CAPTURE_RECOVERY_FAILED'})}
     }
     const remainingErrors = [...this.pendingUsageErrors,
       ...this.pendingCommandErrors.map(({ executionId, error }) => ({ executionId, code: error.code }))]
-    return { confirmed: !errors.length && !remainingErrors.length && !this.pendingUsage.length && !this.pendingMetered.length,
-      ...(captureStates.length?{captureStates}:{}),pending: this.pendingUsage.length+this.pendingMetered.length, errors: errors.length ? errors : remainingErrors }
+    return { confirmed: !errors.length && !remainingErrors.length && !this.pendingUsage.length && !outstanding,
+      ...(captureStates.length?{captureStates}:{}),pending: this.pendingUsage.length+outstanding, errors: errors.length ? errors : remainingErrors }
   }
 }

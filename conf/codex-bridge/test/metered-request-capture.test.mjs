@@ -196,7 +196,19 @@ test('stopped delivery discovers completed scoped V2 without replay, legacy uplo
   const missing=await lane.flush();assert.equal(missing.confirmed,false);assert.equal(missing.pending,1);assert.ok(missing.errors.length)
   const foreign=new SkillUsageDelivery({...config,scope:{...scope,tenantId:'other'}});assert.equal((await foreign.flush()).pending,0)
   await startMeteredRoot(store,{executionId:'exec1',runId:'run1',executionConfigSha256:'c'.repeat(64),engineVersion:'fixture',coveragePolicyVersion:'fixture',rootSourceId:'root',channelNamespace:'fixture',adapterVersion:'fixture',checkActive(){}})
-  const report=await lane.flush();assert.deepEqual(report,{confirmed:false,captureStates:[{executionId:'exec1',captureState:'FINALIZED',closeState:'SEALED_INCOMPLETE',deliveryState:'PENDING_ACK'}],pending:1,errors:[]});assert.deepEqual(await lane.flush(),report)
+  const calls=[],prior=new Map();let corrupt=true
+  const fake=async(path,method,raw,status,call)=>{
+    assert.equal(path,'/internal/agent/executions/exec1/runs/run1/usage');assert.equal(method,'POST');assert.equal(call.callId,raw.receiptId);assert.equal(call.requestId,raw.receiptId)
+    calls.push(raw.kind);const a={...Object.fromEntries(['schemaVersion','executionId','runId','captureId','recordId','receiptId','sourceRevision','evidenceSha256'].map(k=>[k,raw[k]])),acceptance:'DURABLE',acceptedAt:123,ledger:null}
+    if(prior.has(raw.kind))assert.deepEqual(prior.get(raw.kind),a);prior.set(raw.kind,a)
+    if(raw.kind==='SOURCE'&&corrupt)return {...a,recordId:'0'.repeat(64)};return a
+  }
+  lane.request=fake;lane.pendingCommands();const errors=await lane.deliverPendingUsage();assert.equal(errors.length,1);assert.deepEqual(calls,['PLAN','SOURCE'])
+  // Restart: read persisted PLAN ACK; replay only missing/uncertain source. No legacy evidence or new engine.
+  corrupt=false;const stopped=new SkillUsageDelivery(config);stopped.request=fake
+  const report=await stopped.flush();assert.deepEqual(report,{confirmed:true,captureStates:[{executionId:'exec1',captureState:'FINALIZED',closeState:'SEALED_INCOMPLETE',deliveryState:'ACKED'}],pending:0,errors:[]})
+  assert.deepEqual(calls,['PLAN','SOURCE','SOURCE','SOURCE_FINAL','CAPTURE_FINAL']);assert.deepEqual(await stopped.flush(),report);assert.equal(calls.length,5)
+
 })
 test('stopped seal waits for in-flight response persistence and closes admission first',async t=>{
   const {capture,dir,read}=await openRoot(t),entered=Promise.withResolvers(),resume=Promise.withResolvers()
