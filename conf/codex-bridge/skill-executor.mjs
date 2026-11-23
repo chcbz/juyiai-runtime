@@ -57,6 +57,10 @@ export function parseSkillCommand(raw) {
         || installations.has(binding.skillInstallationId)) fail('SKILL_COMMAND_INVALID')
     installations.add(binding.skillInstallationId)
   }
+  if (Object.hasOwn(value, 'usageMode') || Object.hasOwn(value, 'captureProtocol')) {
+    if (value.usageMode !== 'RESPONSE_V2' || value.captureProtocol !== 'METERED_CAPTURE_V2') fail('SKILL_COMMAND_INVALID')
+    fields.push('usageMode','captureProtocol')
+  }
   // Ignore documented harmless extensions, never interpret them as authority.
   return Object.fromEntries(fields.map(key => [key, value[key]]))
 }

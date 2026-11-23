@@ -7,15 +7,15 @@ import { startMeteredRoot } from '../metered-request-capture.mjs'
 import { SkillExecutionStore } from '../skill-execution-store.mjs'
 import { skillDigest } from '../skill-executor.mjs'
 
-const openRoot = async (t, options = {}) => {
+const openRoot = async (t, options = {}, deferred = false) => {
   const directory = await mkdtemp(join(tmpdir(), 'metered-'))
   t.after(() => rm(directory, {recursive:true, force:true}))
   const store = new SkillExecutionStore({rootDirectory:directory,scope:{tenant:'t',owner:'o'},
     command:{executionProtocolVersion:6,executionId:'exec1',runId:'run1',usageMode:'RESPONSE_V2',captureProtocol:'METERED_CAPTURE_V2',snapshotDigest:'a'.repeat(64)}})
   const args = { executionId:'exec1',runId:'run1',executionConfigSha256:'c'.repeat(64),engineVersion:'engine1',
     coveragePolicyVersion:'TEST_MODEL_ONLY',rootSourceId:'source_model',channelNamespace:'test_gateway',adapterVersion:'FIXTURE',checkActive:()=>{}, ...options }
-  const capture = await startMeteredRoot(store, args)
-  const dir = join(store.directory, `usage-capture-${capture.captureId}`)
+  const capture = deferred ? null : await startMeteredRoot(store, args)
+  const dir = join(store.directory, `usage-capture-${skillDigest(['CAPTURE_V2','exec1','run1'])}`)
   const read = async key => JSON.parse(await readFile(join(dir, `${key}.json`)))
   return {capture, store, args, dir, read}
 }
@@ -100,9 +100,9 @@ import { writeFile } from 'node:fs/promises'
 import { NativeExecutionProfileRuntime } from '../native-execution-runtime.mjs'
 import { measureMinimalNativeExecutionToolchain } from '../native-execution-profile.mjs'
 
-test('real metered Codex native turn uses sealed temporary HOME, measured namespace and one durable request at the TLS fixture',
+for (const admitted of [false,true]) test(admitted ? 'admitted V2 profile measures the CLI, persists before real TLS and retains suspend watermark without false coverage' : 'real metered Codex native turn uses sealed temporary HOME, measured namespace and one durable request at the TLS fixture',
   {skip:process.env.CYF_NATIVE_EXECUTION_ISOLATION_PROBE !== '1',timeout:60000}, async t=>{
-  const {capture,read,store}=await openRoot(t,{engineVersion:'codex-cli-0.167.0',adapterVersion:'RESPONSES_TEXT_TOKENS_V1',coveragePolicyVersion:'TEXT_MODEL_ONLY_V1'}), root=await mkdtemp(join(tmpdir(),'mrt-'));t.after(()=>rm(root,{recursive:true,force:true}))
+  const {capture,read,store}=await openRoot(t,{engineVersion:'codex-cli-0.167.0',adapterVersion:'RESPONSES_TEXT_TOKENS_V1',coveragePolicyVersion:'TEXT_MODEL_ONLY_V1'},admitted), root=await mkdtemp(join(tmpdir(),'mrt-'));t.after(()=>rm(root,{recursive:true,force:true}))
   const privateDir=async name=>{const path=join(root,name);await mkdir(path,{mode:0o700});return path}
   const sourceHome=await privateDir('home'),stateRoot=await privateDir('state'),materializerRoot=await privateDir('materials')
   await writeFile(join(sourceHome,'auth.json'),JSON.stringify({auth_mode:'apikey',OPENAI_API_KEY:'upstream-fixture-only'}),{mode:0o600})
@@ -114,24 +114,32 @@ test('real metered Codex native turn uses sealed temporary HOME, measured namesp
   const runtime=new NativeExecutionProfileRuntime({profile:{profileId:'metered-test',agentId:'agent',codexBin:process.env.CYF_CODEX_BIN,codexHome:sourceHome,typedInspectionProviderNetwork:'restricted-proxy',typedInspectionProviderId:'fixture',typedInspectionProviderBaseUrl:`https://127.0.0.1:${upstream.address().port}/custom`,typedInspectionNetworkConnectTimeoutMs:2000,typedInspectionCaBundlePath:cert},materializerRoot,stateRoot,nativeToolchain:measureMinimalNativeExecutionToolchain()})
   const spawn=runtime._spawnAdapter.bind(runtime);let inspected=false
   runtime._spawnAdapter=async args=>{const staged=JSON.parse(await readFile(args.engineState.authPath));assert.match(staged.OPENAI_API_KEY,/^[a-f0-9]{64}$/);assert.notEqual(staged.OPENAI_API_KEY,'upstream-fixture-only');inspected=true;return spawn(args)}
-  const binding={schemaVersion:1,requestKey:'metered-request',authorizationId:'exec1',manifestDigest:'manifest-1',requestId:'req-1',turnId:'turn-1',inputPolicyDigest:'policy-1'}
+  const binding={schemaVersion:1,requestKey:'metered-request',authorizationId:'exec1',manifestDigest:'sha256:'+store.command.snapshotDigest,requestId:'req-1',turnId:'turn-1',inputPolicyDigest:'policy-1'}
   try {
-    const adapter=await runtime.openNativeExecutionAdapter(join(store.directory,'inputs'),binding.requestKey,binding,{scratchDirectory:join(store.directory,'scratch'),draftsDirectory:join(store.directory,'drafts'),nativeExecution:{executionId:'exec1',tools:[],checkActive(){},callTool(){}},meteredCapture:capture})
+    const adapter=await runtime.openNativeExecutionAdapter(join(store.directory,'inputs'),binding.requestKey,binding,{scratchDirectory:join(store.directory,'scratch'),draftsDirectory:join(store.directory,'drafts'),nativeExecution:{executionId:'exec1',tools:[],checkActive(){},callTool(){}},...(admitted?{meteredAdmission:{store,model:"gpt-5.4",effort:null}}:{meteredCapture:capture})})
     assert.ok(inspected);assert.ok(adapter.readback.credentialIsolation.bootstrapCredentialRemoved);assert.ok(adapter.nativeExecutionIsolation.network.nftDefaultDropReadback)
     const policy={cwd:'/execution',model:'gpt-5.4'},thread=await adapter.startOrResumeThread(null,policy)
     await adapter.runTurn({threadId:thread.threadId,clientUserMessageId:'fixture-message',policy,input:[{type:'text',text:'fixture'}]})
     assert.deepEqual(calls,[{path:'/custom/responses',auth:'Bearer upstream-fixture-only',pending:'PENDING'}])
-    await capture.stopAndDrain()
+    if(admitted){
+      await runtime.suspendAdapter(binding.requestKey)
+      assert.equal((await read('plan')).observation.engineVersion,'codex-cli-0.167.0')
+      assert.equal((await read('producer-stopped')).reservedHigh,'1')
+      await assert.rejects(read('capture-final-1'),{code:'ENOENT'})
+    } else await capture.stopAndDrain()
     const linked=await read('request-1-2'), response=await read(`response-${linked.observation.sourceAttemptId}-1`)
     assert.equal(linked.previousEvidenceSha256,(await read('request-1-1')).evidenceSha256);assert.equal(linked.observation.resolution,'RESPONSE')
     assert.equal(response.expectedRevision,'0');assert.equal(response.observation.actualBillingIdentity,null)
-    assert.deepEqual(response.observation.measuredQuantities.tokens,{INPUT:'7',CACHED_INPUT:'3',OUTPUT:'2'})
+    if(admitted){assert.equal(response.observation.measuredQuantities,null);assert.equal(response.observation.reportedUsage.input_tokens,10)}
+    else assert.deepEqual(response.observation.measuredQuantities.tokens,{INPUT:'7',CACHED_INPUT:'3',OUTPUT:'2'})
     await runtime.releaseAdapter(binding.requestKey,{requestBinding:binding})
+    if(admitted) await recoverStoppedMeteredRoot(store,()=>{assert.equal(runtime.activeAdapters.size,0)})
+    const expected=admitted?'SEALED_INCOMPLETE':'DRAINED'
     const sourceFinal=await read('source-final-1'),captureFinal=await read('capture-final-1')
-    assert.equal(sourceFinal.observation.closeState,'DRAINED');assert.equal(sourceFinal.observation.requestCount,'1')
+    assert.equal(sourceFinal.observation.closeState,expected);assert.equal(sourceFinal.observation.requestCount,'1')
     const tuple=r=>[r.recordId,r.sourceRevision,r.evidenceSha256]
     assert.equal(sourceFinal.observation.recordsSha256,skillDigest([await read('source-0'),linked,response].map(tuple).sort(([a],[b])=>a<b?-1:1)))
-    assert.equal(captureFinal.observation.sourcesSha256,skillDigest([tuple(sourceFinal)]));assert.equal((await read('usage-capture-finalized')).closeState,'DRAINED')
+    assert.equal(captureFinal.observation.sourcesSha256,skillDigest([tuple(sourceFinal)]));assert.equal((await read('usage-capture-finalized')).closeState,expected)
   } finally {await runtime.dispose()}
 })
 
@@ -181,6 +189,9 @@ test('stopped delivery discovers completed scoped V2 without replay, legacy uplo
   const config={rootDir,apiOrigin,scope,agentId:'agent',runtimeInstanceId:'rt',getRuntimeHeaders:()=>assert.fail('unexpected auth'),fetchFn:()=>assert.fail('unexpected delivery')}
   const command={executionProtocolVersion:6,executionId:'exec1',runId:'run1',scope:{kind:'TASK',taskId:'task',conversationId:'conv',conversationGeneration:'1'},commandId:'cmd',messageId:'msg',skills:[],snapshotDigest:'a'.repeat(64),parameters:{},instruction:'fixture',inputRefs:[],outputs:{dataSchema:null,mimeTypes:[],multiple:false,artifactsRequired:false},toolPolicyRef:'NATIVE_LOCAL_FILES_V1',usageMode:'RESPONSE_V2',captureProtocol:'METERED_CAPTURE_V2'}
   const store=new SkillExecutionStore({rootDirectory:join(rootDir,'skill-runs'),scope:{...scope,apiOrigin},command});store.write('attempt',{started:true});store.write('receipt',{done:true})
+  const wire={...command,snapshotSha256:command.snapshotDigest};delete wire.snapshotDigest
+  const {skillCommandFromWire}=await import('../skill-conversation.mjs')
+  assert.deepEqual(skillCommandFromWire(wire),command);assert.throws(()=>skillCommandFromWire({...wire,captureProtocol:'other'}),/SKILL_COMMAND_INVALID/)
   const lane=new SkillUsageDelivery(config);assert.deepEqual(lane.pendingCommands(),[])
   const missing=await lane.flush();assert.equal(missing.confirmed,false);assert.equal(missing.pending,1);assert.ok(missing.errors.length)
   const foreign=new SkillUsageDelivery({...config,scope:{...scope,tenantId:'other'}});assert.equal((await foreign.flush()).pending,0)

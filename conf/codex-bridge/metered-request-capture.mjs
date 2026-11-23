@@ -28,20 +28,24 @@ export async function startMeteredRoot(store, { executionId, runId, executionCon
     adapterVersion, channelNamespace, parentSourceRecordId: null, previousEpochSourceRecordId: null }, now)
   await persist(dir, 'source-0', source); checkActive()
   let next = 0n, stopped = false, inflight=0, drained, wake, writeFailed=false
-  let sealing
+  let sealing, watermark
+  async function markStopped(assertStopped) {
+    await assertStopped(); stopped=true
+    if(inflight)await (drained??=new Promise(resolve=>{wake=resolve}))
+    await assertStopped()
+    // A stopped recovery may have already closed the source incomplete. Never rewrite its decision.
+    return watermark??=(async()=>{
+      const sealed=await lstat(resolve(dir,'source-final-1.json')).then(()=>true,error=>{if(error.code==='ENOENT')return false;throw error})
+      if(!sealed)await persist(dir,'producer-stopped',{...binding,reservedHigh:String(next),writeFailed})
+    })().catch(error=>{watermark=null;throw error})
+  }
   return Object.freeze({ ...binding, textTokenProtocol:engineVersion==='codex-cli-0.167.0' && adapterVersion==='RESPONSES_TEXT_TOKENS_V1' && coveragePolicyVersion==='TEXT_MODEL_ONLY_V1', stopAdmission() { stopped = true },
     async stopAndDrain(){stopped=true;if(inflight)await (drained??=new Promise(resolve=>{wake=resolve}));if(writeFailed)bad('METERED_CAPTURE_WRITE_INCOMPLETE')},
     // Called only after the owner has joined the engine and closed the egress. No re-opening after this point.
+    markStopped,
     sealStopped(assertStopped) {
       return sealing??=(async()=>{
-        await assertStopped(); stopped=true
-        if(inflight)await (drained??=new Promise(resolve=>{wake=resolve}))
-        await assertStopped()
-        // A crash-recovery fence may already have sealed this source incomplete.
-        // Revalidate the immutable decision instead of retroactively changing its watermark.
-        const sealed=await lstat(resolve(dir,'source-final-1.json')).then(()=>true,error=>{if(error.code==='ENOENT')return false;throw error})
-        if(sealed)return recoverStoppedMeteredRoot(store,assertStopped,now)
-        await persist(dir,'producer-stopped',{...binding,reservedHigh:String(next),writeFailed})
+        await markStopped(assertStopped)
         return recoverStoppedMeteredRoot(store,assertStopped,now)
       })().catch(error=>{sealing=null;throw error})
     },

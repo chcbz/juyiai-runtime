@@ -1,4 +1,3 @@
-import { parseSkillJson } from './skill-manifest.mjs'
 import { recoverStoppedMeteredRoot } from './metered-capture-closure.mjs'
 import { pendingProviderUsage } from './provider-usage-receipts.mjs'
 import { pendingNativeUsage, acknowledgeNativeUsage } from './native-usage-receipts.mjs'
@@ -78,13 +77,7 @@ export class SkillUsageDelivery {
         const stat = fstatSync(fd)
         if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.geteuid() || (stat.mode & 0o077)) fail('SKILL_STORE_UNSAFE')
         try {
-          const saved = parseSkillJson(readFileSync(fd))
-          command = parseSkillCommand(saved)
-          // These fields bind already persisted evidence. They do not authorize execution.
-          if (saved.usageMode === 'RESPONSE_V2' || saved.captureProtocol === 'METERED_CAPTURE_V2') {
-            if (saved.usageMode !== 'RESPONSE_V2' || saved.captureProtocol !== 'METERED_CAPTURE_V2') fail('SKILL_COMMAND_INVALID')
-            Object.assign(command, { usageMode: saved.usageMode, captureProtocol: saved.captureProtocol })
-          }
+          command = parseSkillCommand(readFileSync(fd))
         } catch (error) {
           // Historical commands without a current authority binding are not executable.
           // Preserve them and report their failure, but do not starve unrelated current work.
@@ -99,10 +92,10 @@ export class SkillUsageDelivery {
         const metered=command.usageMode==='RESPONSE_V2'
         if (metered) {
           this.pendingMetered.push({store,command}); unresolved.add(id)
-          continue // source recovery only, never enqueue as runnable or bill through legacy delivery
+        } else {
+          const usage = pendingNativeUsage(store)
+          for (const item of [...(usage ? [usage] : []), ...pendingProviderUsage(store)]) { this.pendingUsage.push({ command, store, ...item }); unresolved.add(id) }
         }
-        const usage = pendingNativeUsage(store)
-        for (const item of [...(usage ? [usage] : []), ...pendingProviderUsage(store)]) { this.pendingUsage.push({ command, store, ...item }); unresolved.add(id) }
       } catch (error) {
         if (!['NATIVE_USAGE_RECEIPT_CONFLICT', 'NATIVE_USAGE_SOURCE_MISSING', 'PROVIDER_USAGE_SOURCE_INVALID'].includes(error?.code)) throw error
         this.pendingUsageErrors.push({ executionId: id, code: error.code }); unresolved.add(id)

@@ -442,15 +442,16 @@ export class IsolatedEngineProfileRuntime {
       if (active.slot) active.slot.cancelled = true
       if (active.engineState.conversationKey) this.chatAdapterLifecycle?.closing(active.adapter)
       try { await active.adapter.shutdown({ timeoutMs: 1000 }) } finally { await active.egress?.dispose() }
-      if (active.slot?.meteredCapture && !preserveState) {
-        await active.slot.meteredCapture.sealStopped(() => {
+      if (active.nativeLayout) rmSync(resolve(active.engineState.directory, 'skill-config'), { recursive: true, force: true })
+      if (active.slot?.meteredCapture) {
+        const capture=active.slot.meteredCapture
+        await (preserveState ? capture.markStopped : capture.sealStopped)(() => {
           if (!active.adapter.childClosed || !active.egress.lifecycle.signal.aborted || this.activeAdapters.get(requestKey)!==active) fail('METERED_PRODUCER_STOP_UNCONFIRMED')
         })
       }
       if (this.activeAdapters.get(requestKey) === active) this.activeAdapters.delete(requestKey)
       const conversationKey = active.engineState.conversationKey
       if (conversationKey && this.conversationOwners?.get(conversationKey) === requestKey) this.conversationOwners.delete(conversationKey)
-      if (active.nativeLayout) rmSync(resolve(active.engineState.directory, 'skill-config'), { recursive: true, force: true })
       if (!preserveState && !active.slot?.meteredCapture) { rmSync(active.engineState.directory, { recursive: true, force: true }); this.suspendedNativeStates?.delete(requestKey) }
       else {
         this.suspendedNativeStates ||= new Map()
@@ -481,6 +482,9 @@ export class IsolatedEngineProfileRuntime {
     collect(await Promise.allSettled([...this.activeAdapters.entries()].map(async ([key, item]) => {
       try { await item.adapter.shutdown({ timeoutMs: 1000 }) } finally { await item.egress?.dispose() }
       if (item.nativeLayout) rmSync(resolve(item.engineState.directory, 'skill-config'), { recursive: true, force: true })
+      if(item.slot?.meteredCapture) await item.slot.meteredCapture.markStopped(()=>{
+        if(!item.adapter.childClosed || !item.egress.lifecycle.signal.aborted || this.activeAdapters.get(key)!==item) fail('METERED_PRODUCER_STOP_UNCONFIRMED')
+      })
       if (this.activeAdapters.get(key) === item) this.activeAdapters.delete(key)
       const conversationKey = item.engineState.conversationKey
       if (conversationKey && this.conversationOwners?.get(conversationKey) === key) this.conversationOwners.delete(conversationKey)

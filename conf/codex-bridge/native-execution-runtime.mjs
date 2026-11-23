@@ -1,3 +1,5 @@
+import { startMeteredRoot } from './metered-request-capture.mjs'
+import { skillDigest } from './skill-executor.mjs'
 import { readModelAuthFile } from './model-auth.mjs'
 import { BROWSER_PROBE } from './native-browser-toolchain.mjs'
 import { DOCUMENT_MIMES, DOCUMENT_PROBE, PDF_PROBE } from './native-document-toolchain.mjs'
@@ -33,16 +35,17 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
   constructor(options = {}) {
     super({ ...options, profile: nativeExecutionProfile(options.profile || {}) })
   }
-  openNativeExecutionAdapter(inputDirectory, requestKey, requestBinding, { scratchDirectory, draftsDirectory, skills = [], skillConfiguration = [], nativeExecution, meteredCapture = null, requireExistingState = false } = {}) {
+  openNativeExecutionAdapter(inputDirectory, requestKey, requestBinding, { scratchDirectory, draftsDirectory, skills = [], skillConfiguration = [], nativeExecution, meteredCapture = null, meteredAdmission = null, requireExistingState = false } = {}) {
     if (nativeExecution) nativeExecution = Object.freeze({ ...nativeExecution, tools: structuredClone(nativeExecution.tools), ...(this.nativeModelCatalog ? { modelCatalogSha256: this.nativeModelCatalog.sha256 } : {}) })
     if (this.disposed) return Promise.reject(Object.assign(new Error('TYPED_INSPECTION_PROFILE_DISPOSED'), { code: 'TYPED_INSPECTION_PROFILE_DISPOSED' }))
     const binding = engineStateBinding(requestBinding)
     if (!nonblank(requestKey) || binding.requestKey !== requestKey) fail('NATIVE_EXECUTION_BINDING_INVALID')
     if (meteredCapture && (meteredCapture.executionId !== binding.authorizationId || meteredCapture.executionId !== nativeExecution.executionId || !/^[0-9a-f]{64}$/.test(meteredCapture.captureId))) fail('METERED_CAPTURE_BINDING_INVALID')
+    if (meteredAdmission && (meteredCapture || meteredAdmission.store.command.executionId !== binding.authorizationId || nativeExecution.executionId !== binding.authorizationId || meteredAdmission.store.command.snapshotDigest !== binding.manifestDigest.slice(7))) fail('METERED_CAPTURE_BINDING_INVALID')
     const layout = prepareNativeExecutionLayout({ inputDirectory, scratchDirectory, draftsDirectory, skills, skillConfiguration, nativeExecution,
       toolchain: this.nativeToolchain, stateRoot: this.stateRoot, sourceHome: this.profile.codexHome })
     const bindingDigest = canonicalSha256(binding)
-    const matches = active => (active.slot || active).meteredCapture === meteredCapture && active.nativeLayout?.digest === layout.digest && active.engineState.bindingDigest === bindingDigest
+    const matches = active => (active.slot || active).meteredAdmission === meteredAdmission && (active.slot || active).meteredCapture === meteredCapture && active.nativeLayout?.digest === layout.digest && active.engineState.bindingDigest === bindingDigest
       && active.nativeExecution.checkActive === nativeExecution.checkActive && active.nativeExecution.callTool === nativeExecution.callTool
     if (this.closingAdapters?.has(requestKey)) fail('NATIVE_EXECUTION_ADAPTER_CLOSING')
     if (this.pendingInspectionKeys?.has(requestKey)) fail('NATIVE_EXECUTION_ADAPTER_BINDING_CONFLICT')
@@ -53,7 +56,7 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
       if (!active.adapter.closed && matches(active)) return Promise.resolve(active.adapter)
       fail('NATIVE_EXECUTION_ADAPTER_BINDING_CONFLICT')
     }
-    const slot = { meteredCapture, nativeLayout: layout, engineState: { bindingDigest }, nativeExecution, cancelled: false }
+    const slot = { meteredAdmission, meteredCapture, nativeLayout: layout, engineState: { bindingDigest }, nativeExecution, cancelled: false }
     this.pendingNativeAdapters.set(requestKey, slot)
     slot.promise = this._openNativeExecutionAdapter(binding, layout, nativeExecution, requireExistingState, slot)
       .finally(() => { if (this.pendingNativeAdapters.get(requestKey) === slot) this.pendingNativeAdapters.delete(requestKey) })
@@ -69,6 +72,21 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
       if (this.profile.typedInspectionProviderNetwork !== 'restricted-proxy') fail('TYPED_INSPECTION_PROVIDER_NETWORK_NOT_CONFIGURED')
       const schema = await this.measureBinary(this.profile); checkActive()
       const egressOptions = { providerBaseUrl: this.profile.typedInspectionProviderBaseUrl, networkConnectTimeoutMs: this.profile.typedInspectionNetworkConnectTimeoutMs, additionalOrigins: layout.binding.networkOrigins }
+      if (slot.meteredAdmission) {
+        // A fresh epoch must not take over unknown prior requests or send again during recovery.
+        if (requireExistingState) fail('SKILL_RESULT_UNKNOWN')
+        const { store, model, effort } = slot.meteredAdmission
+        const channelNamespace = skillDigest(['METERED_PROVIDER_NAMESPACE_V1', this.profile.typedInspectionProviderId, new URL(egressOptions.providerBaseUrl).href.replace(/\/$/, '')])
+        const engineVersion = /^\d+\.\d+\.\d+$/.test(schema.cliVersion) ? `codex-cli-${schema.cliVersion}` : 'unknown'
+        // Layout covers local tools, skills and allowed network routes; that alone does not attest
+        // every provider-side cost category. Never promote a live run to fixture text-only policy.
+        const coveragePolicyVersion = 'NATIVE_EXECUTION_UNVERIFIED_V1'
+        try {
+          slot.meteredCapture = await startMeteredRoot(store, { executionId:binding.authorizationId, runId:store.command.runId,
+            executionConfigSha256:skillDigest([layout.digest,store.commandDigest,engineVersion,channelNamespace,model,effort]),
+            engineVersion,coveragePolicyVersion,rootSourceId:'source_model',channelNamespace,adapterVersion:'RESPONSES_TEXT_TOKENS_V1',checkActive })
+        } catch (error) { if (error.code === 'EEXIST') fail('SKILL_RESULT_UNKNOWN'); throw error }
+      }
       if (slot.meteredCapture) {
         phase('metered-egress-start')
         const key = readModelAuthFile(this.profile.codexHome).auth.OPENAI_API_KEY
