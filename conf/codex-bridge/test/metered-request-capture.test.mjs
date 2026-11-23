@@ -266,3 +266,17 @@ test('ambiguous JSON or SSE members never produce usage even when the last value
     const control=read(valid.replace('"id":','"irrelevant":[{"id":"{}\\\"id\\\":"},{"id":"ok"}],"id":'));assert.equal(control.measuredQuantities.tokens.INPUT,'3')
   }
 })
+
+test('large JSON and multiline SSE discard output values and still validate syntax beyond the observation window',()=>{
+  const body='密'.repeat(512*1024)+'\\"id\\":\\"spoof', usage={input_tokens:5,output_tokens:4,total_tokens:9,input_tokens_details:{cached_tokens:2},output_tokens_details:{reasoning_tokens:1}}
+  const response=JSON.stringify({output:[{content:[{text:body}]}],id:'r1',status:'completed',usage})
+  for(const sse of [false,true])for(const corrupt of [false,true]){
+    const raw=corrupt?response.replace('spoof','\\x'):response
+    const wire=Buffer.from(sse?`event: message\r\ndata: {"type":"response.completed",\r\ndata: "response":${raw}}\r\n\r\ndata: [DONE]\n\n`:raw)
+    const obs=observeResponse(sse?'text/event-stream':'application/json',200,512,true)
+    for(let i=0;i<wire.length;i+=997)obs.push(wire.subarray(i,i+997))
+    const result=obs.finish(true);if(corrupt){assert.equal(result.measuredQuantities,null);assert.ok(result.reasonCodes.includes('RESPONSE_STREAM_INVALID'))}
+    else {assert.equal(result.providerResponseId,'r1');assert.equal(result.measuredQuantities.tokens.INPUT,'3')}
+    assert.ok(!JSON.stringify(result).includes('密'))
+  }
+})

@@ -1,23 +1,8 @@
 // Passive observation, never a response-size limit on the business stream. Only the
 // allowlisted projection escapes this object; a missing category is not zero.
 import { skillId } from './skill-executor.mjs'
+import { projectedJson } from './metered-response-json.mjs'
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
-// JSON.parse validates grammar and preserves numeric lexemes in the reviver, but
-// collapses duplicate members. Check decoded member names per object before use.
-function parse(text) {
-  const value = JSON.parse(text, (_key, value, context) => typeof value === 'number' && !/^(0|[1-9][0-9]*)$/.test(context?.source ?? '') ? null : value)
-  const scopes = []
-  for (const [token] of text.matchAll(/"(?:[^"\\]|\\[\s\S])*"[ \t\r\n]*:?|[{}]/g)) {
-    if (token === '{') scopes.push(new Set())
-    else if (token === '}') scopes.pop()
-    else if (token.endsWith(':')) {
-      const key = JSON.parse(token.slice(0, -1)), keys = scopes.at(-1)
-      if (keys.has(key)) throw new Error('AMBIGUOUS_RESPONSE_MEMBER')
-      keys.add(key)
-    }
-  }
-  return value
-}
 const count = value => Number.isSafeInteger(value) && value >= 0
 const fields = {input_tokens:null,output_tokens:null,total_tokens:null,input_tokens_details:['cached_tokens'],output_tokens_details:['reasoning_tokens']}
 function quantities(raw, supported) {
@@ -37,9 +22,9 @@ function quantities(raw, supported) {
 }
 export function observeResponse(contentType, status, windowBytes, supported) {
   const type=String(contentType).split(';')[0].trim().toLowerCase(),sse=type==='text/event-stream',json=type==='application/json'
-  let id=null, terminal=false, usage=quantities(null,false), reason=null, line='', data=[], bytes=0, cr=false
+  let id=null, terminal=false, usage=quantities(null,false), reason=null
   const decoder=new TextDecoder('utf-8',{fatal:true})
-  const invalid=code=>{reason??=code; line='';data=[]}
+  const invalid=code=>{reason??=code; parser=null}
   const observe=(response,complete)=>{
     if(!skillId(response?.id)) return invalid('RESPONSE_ID_INVALID')
     if(id && id!==response.id) { id=null;return invalid('RESPONSE_ID_CONFLICT') }
@@ -49,25 +34,57 @@ export function observeResponse(contentType, status, windowBytes, supported) {
     terminal=true;usage=quantities(response.usage,supported)
     if(response.status!=='completed') invalid('RESPONSE_NOT_COMPLETED')
   }
-  const event=()=>{if(data.length){const text=data.join('\n');if(text!=='[DONE]'){
-    const e=parse(text);if(e.type==='response.created') observe(e.response,false)
-    else if(['response.completed','response.failed','response.incomplete'].includes(e.type)) observe(e.response,true)
-  }}data=[];bytes=0}
-  const endLine=()=>{if(!line)event();else if(line==='data'||line.startsWith('data:'))data.push(line.slice(5).replace(/^ /,''));line=''}
-  function append(text){
-    if(!sse){bytes+=Buffer.byteLength(text);if(bytes>windowBytes)return invalid('OBSERVATION_WINDOW_EXCEEDED');line+=text;return}
-    for(const part of text.split(/([\r\n])/)) {if(!part||reason)continue
-      if(part==='\n' && cr){cr=false;continue}cr=part==='\r'
-      if(cr||part==='\n'){bytes++;if(bytes>windowBytes)invalid('OBSERVATION_WINDOW_EXCEEDED');else endLine()}
-      else {bytes+=Buffer.byteLength(part);if(bytes>windowBytes)invalid('OBSERVATION_WINDOW_EXCEEDED');else line+=part}
+  // A line's optional leading space is framing. JSON data continues across HTTP
+  // chunks; separate SSE data fields are joined by exactly one LF.
+  let parser=json?projectedJson(false,windowBytes):null, prefix='', mode='field', probe='', started=false, cr=false
+  const payload=part=>{
+    if(!parser){const n=Math.min(6-probe.length,part.length);probe+=part.slice(0,n);part=part.slice(n)
+      if('[DONE]'.startsWith(probe)&&!part)return
+      parser=projectedJson(true,windowBytes);parser.push(probe);probe=''}
+    parser.push(part)
+  }
+  const startData=()=>{if(started)payload('\n');started=true;mode='space'}
+  const fragment=part=>{
+    if(mode==='field'){
+      const colon=part.indexOf(':'),field=colon<0?part:part.slice(0,colon)
+      if(prefix.length+field.length>windowBytes)throw Error('OBSERVATION_WINDOW_EXCEEDED')
+      prefix+=field;if(colon<0)return
+      mode='ignore';if(prefix==='data')startData();part=part.slice(colon+1)
     }
+    if(mode==='space'&&part){if(part[0]===' ')part=part.slice(1);mode='data'}
+    if(mode==='data'&&part)payload(part)
+  }
+  const endLine=()=>{
+    if(mode==='field'&&prefix==='data')startData()
+    else if(mode==='field'&&!prefix&&started){
+      if(parser||probe!=='[DONE]'){
+        if(!parser)throw Error('RESPONSE_STREAM_INVALID');const e=parser.finish()
+        if(!object(e))throw Error('RESPONSE_STREAM_INVALID')
+        if(e.type==='response.created')observe(e.response,false)
+        else if(['response.completed','response.failed','response.incomplete'].includes(e.type)){
+          observe(e.response,true);if(e.type!=='response.completed')invalid('RESPONSE_NOT_COMPLETED')
+        }
+      }
+      parser=null;probe='';started=false
+    }
+    mode='field';prefix=''
+  }
+  function append(text){
+    if(json){parser.push(text);return}
+    let from=0
+    for(const match of text.matchAll(/[\r\n]/g)){
+      if(reason)return
+      const i=match.index;if(i>from){fragment(text.slice(from,i));cr=false}
+      if(!(match[0]==='\n'&&cr))endLine();cr=match[0]==='\r';from=i+1
+    }
+    if(from<text.length&&!reason){cr=false;fragment(text.slice(from))}
   }
   if(status!==200 || !(sse||json)) invalid('RESPONSE_PROTOCOL_UNSUPPORTED')
-  return { push(chunk){if(!reason)try{append(decoder.decode(chunk,{stream:true}))}catch{invalid('RESPONSE_STREAM_INVALID')}},
+  return { push(chunk){if(!reason)try{append(decoder.decode(chunk,{stream:true}))}catch(error){invalid(error.message==='OBSERVATION_WINDOW_EXCEEDED'?error.message:'RESPONSE_STREAM_INVALID')}},
     finish(ended){if(!reason)try{
       append(decoder.decode());if(!ended)invalid('RESPONSE_STREAM_TRUNCATED')
-      else if(json&&!reason)observe(parse(line),true);else if(line||data.length)invalid('RESPONSE_STREAM_TRUNCATED')
-    }catch{invalid('RESPONSE_STREAM_INVALID')}
+      else if(json&&!reason)observe(parser.finish(),true);else if(prefix||mode!=='field'||started)invalid('RESPONSE_STREAM_TRUNCATED')
+    }catch(error){invalid(error.message==='OBSERVATION_WINDOW_EXCEEDED'?error.message:'RESPONSE_STREAM_INVALID')}
     const complete=!reason&&terminal&&usage.measuredQuantities!==null
     return {providerResponseId:id,reportedUsage:usage.reportedUsage,measuredQuantities:complete?usage.measuredQuantities:null,
       actualBillingIdentity:null,reasonCodes:[...(id?['BILLING_IDENTITY_UNKNOWN']:[]),...(complete?[]:[reason||(!terminal?'MISSING_TERMINAL':!supported?'UNSUPPORTED_COST_SOURCE':'USAGE_INCOMPLETE')])]}
