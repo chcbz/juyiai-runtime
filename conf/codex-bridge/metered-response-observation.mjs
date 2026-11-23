@@ -57,3 +57,4 @@ export function observeResponse(contentType, status, windowBytes, supported) {
     return {providerResponseId:id,reportedUsage:usage.reportedUsage,measuredQuantities:complete?usage.measuredQuantities:null,
       actualBillingIdentity:null,reasonCodes:[...(id?['BILLING_IDENTITY_UNKNOWN']:[]),...(complete?[]:[reason||(!terminal?'MISSING_TERMINAL':!supported?'UNSUPPORTED_COST_SOURCE':'USAGE_INCOMPLETE')])]}
   }}
+}
