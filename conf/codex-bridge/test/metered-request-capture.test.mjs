@@ -219,11 +219,8 @@ test('stopped seal waits for in-flight response persistence and closes admission
 })
 
 test('native HTTP posts exact revisions and recovers the original lost RESPONSE ACK, not just the final manifest',async t=>{
-  const {RuntimeV1Client}=await import('../../cyf-agent-runtime-v1/lib/runtime-client.mjs')
-  const {deliverMetered,meteredBatch}=await import('../metered-usage-delivery.mjs')
-  const {createServer}=await import('node:http');const {store,capture}=await openRoot(t)
-  const observed=observeResponse('application/json',200,4096,false);observed.push(Buffer.from('{"id":"provider_1","status":"completed"}'))
-  await capture.dispatch((_r,finish)=>finish(observed.finish(true)));await capture.sealStopped(async()=>{})
+  const {exercisePeer}=await import('./fixtures/metered-java-peer.mjs')
+  const {createServer}=await import('node:http')
   const log=[],stored=new Map();let dropped=false,serverError
   const server=createServer(async(req,res)=>{try{
     const id=req.headers['x-request-id'];assert.equal(req.headers.authorization,`AgentRuntime rts1_${'a'.repeat(64)}`)
@@ -240,16 +237,9 @@ test('native HTTP posts exact revisions and recovers the original lost RESPONSE 
     res.writeHead(200,{'Content-Type':'application/json','X-Request-Id':id});res.end(JSON.stringify({protocolVersion:1,requestId:id,code:'E0',msg:'',data:a}))
   }catch(error){serverError=error;res.destroy()}})
   await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>{server.closeAllConnections();server.close()})
-  const origin=`http://127.0.0.1:${server.address().port}`,client=new RuntimeV1Client({apiBaseUrl:origin,manifest:{}})
-  client.currentSession={sessionToken:'rts1_'+'a'.repeat(64),canonicalAgentId:'agent',installationId:'i',hostId:'h',runtimeInstanceId:'rt',sessionGeneration:'1'}
-  const lane=new SkillUsageDelivery({rootDir:store.directory,apiOrigin:origin,scope:{agentId:'agent'},agentId:'agent',runtimeInstanceId:'rt',fetchFn:client.nativeFetch.bind(client),getRuntimeHeaders:()=>client.sessionHeaders()})
-  const send=(batch)=>deliverMetered(store,lane.request.bind(lane),batch,true)
-  assert.equal(await send({...meteredBatch(),left:2}),false);assert.equal(log.length,2)
-  assert.equal(await send(meteredBatch()),true);assert.ifError(serverError)
-  assert.deepEqual(log,['PLAN:1','SOURCE:1','REQUEST:1','REQUEST:2','RESPONSE:1','GET','SOURCE_FINAL:1','CAPTURE_FINAL:1'])
-  const acks=join(store.directory,`usage-acks-${skillDigest(['CAPTURE_V2','exec1','run1'])}`)
-  await rm(join(acks,'request-1-1.json'));assert.equal(await send({...meteredBatch(),left:0}),false)
-  assert.equal(await send(meteredBatch()),true);assert.equal(log.at(-1),'REQUEST:1');assert.equal(stored.size,7)
+  const result=await exercisePeer({port:server.address().port,executionId:'exec1',runId:'run1',session:{sessionToken:'rts1_'+'a'.repeat(64),canonicalAgentId:'agent',installationId:'i',hostId:'h',runtimeInstanceId:'rt',sessionGeneration:'1'}})
+  assert.ifError(serverError);assert.equal(result.ackCount,7);assert.equal(stored.size,7)
+  assert.deepEqual(log,['PLAN:1','SOURCE:1','REQUEST:1','REQUEST:2','RESPONSE:1','GET','SOURCE_FINAL:1','CAPTURE_FINAL:1','RESPONSE:1'])
 })
 
 test('dispatch group commits to launch configuration, not an individual command or local paths',async t=>{
