@@ -1,3 +1,4 @@
+import { MeteredResponsesRoute } from './metered-responses-route.mjs'
 import { waitForSandboxStartup } from './sandbox-startup.mjs'
 import { spawn } from 'node:child_process'
 import { inspectExecutable, fileStamp } from './executable-integrity.mjs'
@@ -195,8 +196,10 @@ export const isolatedSlirpCommand = (slirpBin, pid, options = {}) => ownedNamesp
   { ...options, network: false })
 
 export class RestrictedProviderEgress {
-  constructor({ providerBaseUrl, networkConnectTimeoutMs, additionalOrigins = [], slirpBin = '/usr/bin/slirp4netns', nftBin = '/usr/sbin/nft', nsenterBin = '/usr/bin/nsenter', pythonBin = '/usr/bin/python3', spawnFn = spawn, processInspector = defaultProcessInspector() } = {}) {
+  constructor({ providerBaseUrl, networkConnectTimeoutMs, meteredResponses = null, additionalOrigins = [], slirpBin = '/usr/bin/slirp4netns', nftBin = '/usr/sbin/nft', nsenterBin = '/usr/bin/nsenter', pythonBin = '/usr/bin/python3', spawnFn = spawn, processInspector = defaultProcessInspector() } = {}) {
     this.policy = restrictedProviderNetworkPolicy(providerBaseUrl, { connectTimeoutMs: networkConnectTimeoutMs, additionalOrigins })
+    this.meteredRoute = meteredResponses == null ? null : new MeteredResponsesRoute(providerBaseUrl, meteredResponses)
+    if (this.meteredRoute) this.policy = Object.freeze({ ...this.policy, transport: 'metered-http-responses-v1' })
     this.networkConnectTimeoutMs = networkConnectTimeoutMs
     this.slirpBin = slirpBin; this.nftBin = nftBin; this.nsenterBin = nsenterBin; this.pythonBin = pythonBin
     this.spawnFn = spawnFn; this.processInspector = processInspector; this.server = null; this.canaryServer = null; this.slirp = null; this.port = 0; this.canaryPort = 0; this.attestation = null; this.owner = null; this.hostCanary = null
@@ -268,12 +271,17 @@ export class RestrictedProviderEgress {
       socket.on('error', () => socket.destroy())
       return socket
     }
-    const server = createHttpServer((_request, response) => { response.writeHead(405, { Connection: 'close' }); response.end() })
+    const server = createHttpServer((req, response) => {
+      if (this.meteredRoute) return void this.meteredRoute.handle(req, response, { authority: `10.0.2.2:${this.port}`,
+        assertOwner: async () => { if (!this.attestation?.measured) fail('METERED_ROUTE_NOT_ATTACHED'); await this._assertOwner() },
+        signal: this.lifecycle.signal, connectTimeoutMs: this.networkConnectTimeoutMs }).catch(() => response.destroy())
+      response.writeHead(405, { Connection: 'close' }); response.end()
+    })
     server.on('connection', track)
     server.on('connect', (request, client, head) => {
       const authority = String(request.url || '').toLowerCase()
       const destination = [this.policy.providerOrigin, ...(this.policy.additionalOrigins || [])].find(origin => exactAuthority(new URL(origin)) === authority)
-      if (!destination) { client.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return }
+      if (!destination || (this.meteredRoute && authority === this.policy.providerAuthority)) { client.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return }
       const provider = new URL(destination); const upstream = track(connect(Number(provider.port || 443), provider.hostname))
       const abort = () => { try { client.destroy() } catch {}; try { upstream.destroy() } catch {} }
       upstream.setTimeout(this.networkConnectTimeoutMs, abort); upstream.once('error', abort); client.once('error', abort)
@@ -349,6 +357,7 @@ export class RestrictedProviderEgress {
     return Object.freeze({ measured: true, providerAuthority: authority, tlsVerified: true, protocol: readback.protocol, peerCertificateSha256: readback.peerCertificateSha256, caBundleSha256: expectedDigest })
   }
   async dispose() {
+    this.meteredRoute?.close()
     if (!this.lifecycle.signal.aborted) this.lifecycle.abort()
     try { if (this.slirp?.exitCode === null) this.slirp.kill('SIGTERM') } catch {}
     this.slirp = null
