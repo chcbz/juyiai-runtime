@@ -15,20 +15,24 @@ export const nativeArtifactTools = Object.freeze([
   { type: 'function', name: 'result_propose', description: 'Submit the reply data required by outputs.dataSchema and select any already staged artifactRefs. Required before ending every successful turn, including pure-text answers, clarification questions and preview-only deliveries. For zero files use artifactRefs: []; still submit the declared data. A plain final message does not submit structured data. This requirement also applies when the user says not to accept yet. This does not accept, settle payment or archive a task, and is not an API completion receipt.', inputSchema: { type: 'object', properties: { summary: { type: 'string' }, artifactRefs: { type: 'array', items: { type: 'string' } }, data: {} }, required: ['summary', 'artifactRefs', 'data'], additionalProperties: false } }
 ])
 
+export function nativeArtifactOutputTools(outputs) {
+  // Advertise the execution's actual data contract, not an unconstrained value
+  // that the same tool subsequently rejects (e.g. {} for file-only results).
+  // Keep structured schemas at their existing root in outputs.dataSchema so
+  // local $refs retain their original meaning; runtime validation is unchanged.
+  const data = outputs.dataSchema ? {} : { type: 'null', description: 'This execution has no structured data output. Pass null; deliver files via artifactRefs.' }
+  return nativeArtifactTools.map(tool => tool.name === 'result_propose'
+    ? { ...tool, inputSchema: { ...tool.inputSchema, properties: { ...tool.inputSchema.properties, data } } }
+    : tool)
+}
+
 export class NativeArtifactSession {
   constructor({ store, checkActive, validateSnapshot }) {
     this.store = store; this.command = store.command; this.checkActive = checkActive; this.validateSnapshot = validateSnapshot
     if (this.command.executionProtocolVersion !== 6 || typeof checkActive !== 'function' || typeof validateSnapshot !== 'function') fail('NATIVE_ARTIFACT_SESSION_INVALID')
   }
   policy() {
-    // Advertise the execution's actual data contract, not an unconstrained value
-    // that the same tool subsequently rejects (e.g. {} for file-only results).
-    // Keep structured schemas at their existing root in outputs.dataSchema so
-    // local $refs retain their original meaning; runtime validation is unchanged.
-    const data = this.command.outputs.dataSchema ? {} : { type: 'null', description: 'This execution has no structured data output. Pass null; deliver files via artifactRefs.' }
-    const tools = nativeArtifactTools.map(tool => tool.name === 'result_propose'
-      ? { ...tool, inputSchema: { ...tool.inputSchema, properties: { ...tool.inputSchema.properties, data } } }
-      : tool)
+    const tools = nativeArtifactOutputTools(this.command.outputs)
     return { executionId: this.command.executionId, tools, checkActive: this.checkActive, callTool: ctx => this.callTool(ctx) }
   }
   bindTurn({ threadId, turnId }) {

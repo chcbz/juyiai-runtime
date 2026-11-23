@@ -802,3 +802,16 @@ test('prospective profile refuses an unverified binary and never warms up on a b
     assert.equal(runtime.prospectiveNativeGroup({}),null);assert.equal(counts().spawns,0)
   } finally { f.cleanup() }
 })
+
+test('task pre-dispatch uses the artifact owner output tool contract and rejects unresolved or private selections',async()=>{
+  const {compareProspectiveTaskConfiguration}=await import('../native-execution.mjs')
+  const {NativeArtifactSession}=await import('../native-artifact-session.mjs')
+  const call={prospectiveNativeGroup: input=>input}, intent={scopeKind:'TASK',outputs:{dataSchema:null},entries:[],skillConfiguration:[],privateTools:null,toolPolicyRef:'NATIVE_LOCAL_FILES_V1'}
+  for(const dataSchema of [null,{type:'string'}]) {
+    const outputs={dataSchema}, session=new NativeArtifactSession({store:{command:{executionProtocolVersion:6,outputs}},checkActive(){},validateSnapshot(){}})
+    const inputs=compareProspectiveTaskConfiguration(call,{...intent,outputs});assert.deepEqual(inputs.tools,session.policy().tools)
+    assert.match(inputs.instructionsSha256,/^[0-9a-f]{64}$/);assert.equal(inputs.networkAccess,false)
+  }
+  for(const change of [{scopeKind:'PRIVATE'},{outputs:{}},{entries:undefined},{skillConfiguration:undefined},{privateTools:undefined},{privateTools:{tools:[]}}, {toolPolicyRef:'NATIVE_SKILL_SCRIPT_V1'}])
+    assert.equal(compareProspectiveTaskConfiguration(call,{...intent,...change}),null)
+})
