@@ -95,3 +95,31 @@ test('restricted metered listener: authenticated POST only, durable before TLS u
   for(const name of (await readdir(dir)).filter(n=>!n.startsWith('request-3-'))) {const text=await readFile(join(dir,name),'utf8');for(const secret of [token,'only-upstream','正文']) assert.equal(text.includes(secret),false)}
   await eg.dispose();assert.throws(()=>eg.meteredRoute.sandboxToken(),/CLOSED/)
 })
+
+import { writeFile } from 'node:fs/promises'
+import { NativeExecutionProfileRuntime } from '../native-execution-runtime.mjs'
+import { measureMinimalNativeExecutionToolchain } from '../native-execution-profile.mjs'
+
+test('real metered Codex native turn uses sealed temporary HOME, measured namespace and one durable request at the TLS fixture',
+  {skip:process.env.CYF_NATIVE_EXECUTION_ISOLATION_PROBE !== '1',timeout:60000}, async t=>{
+  const {capture,read,store}=await openRoot(t), root=await mkdtemp(join(tmpdir(),'mrt-'));t.after(()=>rm(root,{recursive:true,force:true}))
+  const privateDir=async name=>{const path=join(root,name);await mkdir(path,{mode:0o700});return path}
+  const sourceHome=await privateDir('home'),stateRoot=await privateDir('state'),materializerRoot=await privateDir('materials')
+  await writeFile(join(sourceHome,'auth.json'),JSON.stringify({auth_mode:'apikey',OPENAI_API_KEY:'upstream-fixture-only'}),{mode:0o600})
+  const cert=join(root,'cert'),key=join(root,'key');execFileSync('/usr/bin/openssl',['req','-x509','-newkey','rsa:2048','-nodes','-keyout',key,'-out',cert,'-days','1','-subj','/CN=localhost','-addext','subjectAltName=IP:127.0.0.1'],{stdio:'ignore'})
+  const calls=[];const upstream=createHttpsServer({key:await readFile(key),cert:await readFile(cert)},async(req,res)=>{
+    for await(const _ of req){};calls.push({path:req.url,auth:req.headers.authorization,pending:(await read(`request-${calls.length+1}-1`)).observation.resolution})
+    res.writeHead(200,{'Content-Type':'text/event-stream'});for(const event of [{type:'response.created',response:{id:'resp-1'}},{type:'response.output_item.done',output_index:0,item:{id:'msg-1',type:'message',role:'assistant',content:[{type:'output_text',text:'fixture complete'}]}},{type:'response.completed',response:{id:'resp-1',status:'completed',usage:{input_tokens:10,output_tokens:2,total_tokens:12}}}])res.write(`data: ${JSON.stringify(event)}\n\n`);res.end()
+  });await new Promise(resolve=>upstream.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>upstream.close(resolve)))
+  const runtime=new NativeExecutionProfileRuntime({profile:{profileId:'metered-test',agentId:'agent',codexBin:process.env.CYF_CODEX_BIN,codexHome:sourceHome,typedInspectionProviderNetwork:'restricted-proxy',typedInspectionProviderId:'fixture',typedInspectionProviderBaseUrl:`https://127.0.0.1:${upstream.address().port}/custom`,typedInspectionNetworkConnectTimeoutMs:2000,typedInspectionCaBundlePath:cert},materializerRoot,stateRoot,nativeToolchain:measureMinimalNativeExecutionToolchain()})
+  const spawn=runtime._spawnAdapter.bind(runtime);let inspected=false
+  runtime._spawnAdapter=async args=>{const staged=JSON.parse(await readFile(args.engineState.authPath));assert.match(staged.OPENAI_API_KEY,/^[a-f0-9]{64}$/);assert.notEqual(staged.OPENAI_API_KEY,'upstream-fixture-only');inspected=true;return spawn(args)}
+  const binding={schemaVersion:1,requestKey:'metered-request',authorizationId:'exec1',manifestDigest:'manifest-1',requestId:'req-1',turnId:'turn-1',inputPolicyDigest:'policy-1'}
+  try {
+    const adapter=await runtime.openNativeExecutionAdapter(join(store.directory,'inputs'),binding.requestKey,binding,{scratchDirectory:join(store.directory,'scratch'),draftsDirectory:join(store.directory,'drafts'),nativeExecution:{executionId:'exec1',tools:[],checkActive(){},callTool(){}},meteredCapture:capture})
+    assert.ok(inspected);assert.ok(adapter.readback.credentialIsolation.bootstrapCredentialRemoved);assert.ok(adapter.nativeExecutionIsolation.network.nftDefaultDropReadback)
+    const policy={cwd:'/execution',model:'gpt-5.4'},thread=await adapter.startOrResumeThread(null,policy)
+    await adapter.runTurn({threadId:thread.threadId,clientUserMessageId:'fixture-message',policy,input:[{type:'text',text:'fixture'}]})
+    assert.deepEqual(calls,[{path:'/custom/responses',auth:'Bearer upstream-fixture-only',pending:'PENDING'}])
+  } finally {await runtime.dispose()}
+})

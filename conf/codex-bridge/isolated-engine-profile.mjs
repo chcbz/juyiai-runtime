@@ -120,8 +120,7 @@ const exactSupportedInputs = value => {
   }
   return Object.freeze(result.sort((a, b) => [a.mediaKind, a.mimeType, a.carrier, a.carrierContractDigest].join('\u001f').localeCompare([b.mediaKind, b.mimeType, b.carrier, b.carrierContractDigest].join('\u001f'))))
 }
-const copyCredentialFile = (sourceHome, target) => {
-  const { bytes } = readModelAuthFile(sourceHome)
+const stageCredentialBytes = (bytes, target) => {
   const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`
   try {
     writeFileSync(temporary, bytes, { mode: 0o600, flag: 'wx' })
@@ -130,32 +129,36 @@ const copyCredentialFile = (sourceHome, target) => {
     renameSync(temporary, target); fsyncDirectory(dirname(target))
   } finally { rmSync(temporary, { force: true }) }
 }
-const providerConfig = profile => {
+const providerConfig = (profile, meteredBaseUrl) => {
   const id = String(profile.typedInspectionProviderId || '').trim(); const baseUrl = String(profile.typedInspectionProviderBaseUrl || '').trim(); const wireApi = String(profile.typedInspectionProviderWireApi || 'responses').trim()
   if (!id && !baseUrl) return ''
   if (!/^[A-Za-z0-9._-]{1,64}$/.test(id) || !['responses', 'chat'].includes(wireApi)) fail('TYPED_INSPECTION_PROVIDER_CONFIG_INVALID')
   let parsed; try { parsed = new URL(baseUrl) } catch { fail('TYPED_INSPECTION_PROVIDER_CONFIG_INVALID') }
   if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash) fail('TYPED_INSPECTION_PROVIDER_CONFIG_INVALID')
+  if (meteredBaseUrl && (wireApi !== 'responses' || !/^http:\/\/10\.0\.2\.2:[1-9][0-9]{0,4}\/v1$/.test(meteredBaseUrl))) fail('METERED_PROVIDER_CONFIG_INVALID')
   const escaped = value => value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')
-  return `model_provider = "${escaped(id)}"\ncli_auth_credentials_store = "file"\n[model_providers."${escaped(id)}"]\nname = "Typed Inspection Provider"\nbase_url = "${escaped(parsed.toString().replace(/\/$/, ''))}"\nwire_api = "${wireApi}"\nrequires_openai_auth = true\n`
+  return `model_provider = "${escaped(id)}"\ncli_auth_credentials_store = "file"\n[model_providers."${escaped(id)}"]\nname = "Typed Inspection Provider"\nbase_url = "${escaped(meteredBaseUrl || parsed.toString().replace(/\/$/, ''))}"\nwire_api = "${wireApi}"\nrequires_openai_auth = true\n${meteredBaseUrl ? 'supports_websockets = false\n' : ''}`
 }
 const usesChatFiles = profile => profile?.typedInspectionSupportedInputs?.some(input => input.carrier === 'LOCAL_FILE') === true
-export const buildTypedInspectionCodexConfig = profile => {
+export const buildTypedInspectionCodexConfig = (profile, meteredBaseUrl = null) => {
   const systemProxy = profile?.typedInspectionProviderNetwork === 'restricted-proxy' ? '[features]\nrespect_system_proxy = true\n' : ''
-  const config = `approval_policy = "never"\nsandbox_mode = "read-only"\nweb_search = "disabled"\n${providerConfig(profile)}${systemProxy}`
+  const config = `approval_policy = "never"\nsandbox_mode = "read-only"\nweb_search = "disabled"\n${providerConfig(profile, meteredBaseUrl)}${systemProxy}`
   return usesChatFiles(profile) ? buildChatFileCodexConfig(config) : config
 }
-const stageCodexHome = (profile, stateRoot, { nativeExecution = false, webSearch = 'disabled', modelCatalog = null } = {}) => {
+const stageCodexHome = (profile, stateRoot, { nativeExecution = false, webSearch = 'disabled', modelCatalog = null, meteredEgress = null } = {}) => {
   const codexHome = ensurePrivateDirectory(resolve(stateRoot, 'codex-home')); ensurePrivateDirectory(resolve(stateRoot, 'home'))
-  copyCredentialFile(profile.codexHome, resolve(codexHome, 'auth.json'))
+  if (meteredEgress && (!nativeExecution || !meteredEgress.meteredRoute || !profile.typedInspectionProviderId)) fail('METERED_PROVIDER_CONFIG_INVALID')
+  const meteredBaseUrl = meteredEgress ? `${meteredEgress.proxyUrl}/v1` : null
   const modelCatalogPath = nativeExecution && modelCatalog ? stateMarker(codexHome, JSON.parse(modelCatalog.text), 'model-catalog.json') : null
-  const readOnlyConfig = (modelCatalogPath ? 'model_catalog_json = "/state/codex-home/model-catalog.json"\n' : '') + buildTypedInspectionCodexConfig(nativeExecution ? { ...profile, typedInspectionSupportedInputs: [] } : profile)
+  const readOnlyConfig = (modelCatalogPath ? 'model_catalog_json = "/state/codex-home/model-catalog.json"\n' : '') + buildTypedInspectionCodexConfig(nativeExecution ? { ...profile, typedInspectionSupportedInputs: [] } : profile, meteredBaseUrl)
   const config = nativeExecution ? buildNativeExecutionCodexConfig(readOnlyConfig, { webSearch }) : readOnlyConfig
   const configPath = resolve(codexHome, 'config.toml'); const temporary = `${configPath}.${process.pid}.${randomUUID()}.tmp`
   writeFileSync(temporary, config, { mode: 0o600, flag: 'wx' }); chmodSync(temporary, 0o600)
   const configFd = openSync(temporary, constants.O_RDONLY | constants.O_NOFOLLOW); try { fsyncSync(configFd) } finally { closeSync(configFd) }
   renameSync(temporary, configPath); fsyncDirectory(codexHome)
-  return { codexHome, modelCatalogPath, authPath: resolve(codexHome, 'auth.json'), configDigest: `sha256:${sha256(Buffer.from(config))}` }
+  const bytes = meteredEgress ? Buffer.from(JSON.stringify({ auth_mode:'apikey', OPENAI_API_KEY:meteredEgress.meteredRoute.sandboxToken() })) : readModelAuthFile(profile.codexHome).bytes
+  stageCredentialBytes(bytes, resolve(codexHome, 'auth.json'))
+  return { codexHome, modelCatalogPath, meteredBaseUrl, authPath: resolve(codexHome, 'auth.json'), configDigest: `sha256:${sha256(Buffer.from(config))}` }
 }
 const engineStateBinding = value => {
   const keys = ['schemaVersion', 'requestKey', 'authorizationId', 'manifestDigest', 'requestId', 'turnId', 'inputPolicyDigest']
@@ -211,7 +214,7 @@ const sandboxArgs = ({ snapshot, stateRoot, stateMountPath = '/state', chatWorkd
       '--dir', '/tmp/chat-files', '--setenv', 'TMPDIR', '/tmp/chat-files', '--setenv', 'SHELL', chatToolchain.shell, '--remount-ro', '/')
   }
   args.push('--setenv', 'HOME', `${stateMountPath}/home`, '--setenv', 'CODEX_HOME', `${stateMountPath}/codex-home`, '--setenv', 'PATH', nativeView || chatToolchain ? '/runtime/bin:/usr/bin:/bin' : '/runtime/bin')
-  if (networkMode === 'provider-restricted') args.push('--setenv', 'HTTP_PROXY', proxyUrl, '--setenv', 'HTTPS_PROXY', proxyUrl, '--setenv', 'http_proxy', proxyUrl, '--setenv', 'https_proxy', proxyUrl, '--setenv', 'NO_PROXY', '', '--setenv', 'no_proxy', '', '--setenv', 'SSL_CERT_FILE', PROVIDER_CA_SANDBOX_PATH, '--setenv', 'NODE_EXTRA_CA_CERTS', PROVIDER_CA_SANDBOX_PATH)
+  if (networkMode === 'provider-restricted') args.push('--setenv', 'HTTP_PROXY', proxyUrl, '--setenv', 'HTTPS_PROXY', proxyUrl, '--setenv', 'http_proxy', proxyUrl, '--setenv', 'https_proxy', proxyUrl, '--setenv', 'NO_PROXY', nativeView?.engineState.meteredBaseUrl ? '10.0.2.2' : '', '--setenv', 'no_proxy', nativeView?.engineState.meteredBaseUrl ? '10.0.2.2' : '', '--setenv', 'SSL_CERT_FILE', PROVIDER_CA_SANDBOX_PATH, '--setenv', 'NODE_EXTRA_CA_CERTS', PROVIDER_CA_SANDBOX_PATH)
   else args.push('--unsetenv', 'HTTP_PROXY', '--unsetenv', 'HTTPS_PROXY', '--unsetenv', 'ALL_PROXY', '--unsetenv', 'http_proxy', '--unsetenv', 'https_proxy', '--unsetenv', 'all_proxy')
   args.push('--chdir', nativeView ? '/execution' : chatWorkdir, '/runtime/bin/codex')
   return args
@@ -317,7 +320,7 @@ export class IsolatedEngineProfileRuntime {
     return { directory, sandboxStatePath: directory, chatWorkdir: ensurePrivateDirectory(resolve(directory, 'chat')),
       markerPath: null, created: true, bindingDigest: null, ...stageCodexHome(this.profile, directory) }
   }
-  _prepareRequestState(rawBinding, { requireExistingState = false, nativeExecution = false, nativeBinding = null, conversationKey = null } = {}) {
+  _prepareRequestState(rawBinding, { requireExistingState = false, nativeExecution = false, nativeBinding = null, meteredEgress = null, conversationKey = null } = {}) {
     if (conversationKey !== null && (nativeExecution || !/^sha256:[a-f0-9]{64}$/.test(conversationKey))) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_INVALID')
     const binding = engineStateBinding(rawBinding); const rootPath = resolve(this.stateRoot, 'requests')
     const bindingDigest = canonicalSha256(binding); const directory = resolve(rootPath, bindingDigest.slice('sha256:'.length))
@@ -341,7 +344,7 @@ export class IsolatedEngineProfileRuntime {
     } else if (existsSync(resolve(directory, 'conversation-binding.json'))) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT')
     // Request receipts own directory; the separately owned Home survives ACK cleanup.
     return { ...(conversationState || { conversationDirectory: null, sandboxStatePath: '/state', chatWorkdir: '/inputs',
-      ...stageCodexHome(this.profile, directory, { nativeExecution, webSearch: nativeBinding?.webSearch, modelCatalog: nativeExecution ? this.nativeModelCatalog : null }) }),
+      ...stageCodexHome(this.profile, directory, { nativeExecution, meteredEgress, webSearch: nativeBinding?.webSearch, modelCatalog: nativeExecution ? this.nativeModelCatalog : null }) }),
       directory, markerPath, created, bindingDigest, binding, conversationKey }
   }
 
@@ -368,9 +371,10 @@ export class IsolatedEngineProfileRuntime {
     adapter.typedInspectionEngineState = engineState; adapter.typedInspectionNetworkMode = networkMode; return adapter
   }
   async _initializeAndSeal(adapter) {
-    const fileAuth = { id: this.profile.typedInspectionProviderId, baseUrl: this.profile.typedInspectionProviderBaseUrl, wireApi: this.profile.typedInspectionProviderWireApi || 'responses' }
+    const fileAuth = { id: this.profile.typedInspectionProviderId, baseUrl: adapter.typedInspectionEngineState?.meteredBaseUrl || this.profile.typedInspectionProviderBaseUrl, wireApi: this.profile.typedInspectionProviderWireApi || 'responses' }
     const readback = await adapter.initialize({fileAuth}); const pid = readback?.processExecutable?.pid
     if (!Number.isInteger(pid) || pid <= 0) fail('TYPED_INSPECTION_SANDBOX_PROCESS_REQUIRED')
+    if (adapter.typedInspectionEngineState?.meteredBaseUrl && readback?.config?.config?.model_providers?.[fileAuth.id]?.supports_websockets !== false) fail('METERED_PROVIDER_WEBSOCKET_CONFIG_INVALID')
     const systemProxyEnabled = readback?.config?.config?.features?.respect_system_proxy === true
     if (adapter.typedInspectionNetworkMode === 'provider-restricted' && !systemProxyEnabled) fail('TYPED_INSPECTION_SYSTEM_PROXY_NOT_ENABLED')
     readback.providerSystemProxy = Object.freeze({ required: adapter.typedInspectionNetworkMode === 'provider-restricted', enabled: systemProxyEnabled })

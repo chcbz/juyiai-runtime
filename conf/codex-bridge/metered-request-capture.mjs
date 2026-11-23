@@ -55,7 +55,7 @@ export async function startMeteredRoot(store, { executionId, runId, executionCon
     adapterVersion, channelNamespace, parentSourceRecordId: null, previousEpochSourceRecordId: null }, now)
   await persist(dir, 'source-0', source); checkActive()
   let next = 0n, stopped = false
-  return Object.freeze({ captureId: binding.captureId, stopAdmission() { stopped = true },
+  return Object.freeze({ ...binding, stopAdmission() { stopped = true },
     // Only the actual egress handler may supply send; call it after checking the live fence again.
     async dispatch(send) {
       if (stopped || typeof send !== 'function') bad('METERED_CAPTURE_ADMISSION_CLOSED')

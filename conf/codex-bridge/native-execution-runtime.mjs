@@ -1,3 +1,4 @@
+import { readModelAuthFile } from './model-auth.mjs'
 import { BROWSER_PROBE } from './native-browser-toolchain.mjs'
 import { DOCUMENT_MIMES, DOCUMENT_PROBE, PDF_PROBE } from './native-document-toolchain.mjs'
 import { spawn } from 'node:child_process'
@@ -32,15 +33,16 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
   constructor(options = {}) {
     super({ ...options, profile: nativeExecutionProfile(options.profile || {}) })
   }
-  openNativeExecutionAdapter(inputDirectory, requestKey, requestBinding, { scratchDirectory, draftsDirectory, skills = [], skillConfiguration = [], nativeExecution, requireExistingState = false } = {}) {
+  openNativeExecutionAdapter(inputDirectory, requestKey, requestBinding, { scratchDirectory, draftsDirectory, skills = [], skillConfiguration = [], nativeExecution, meteredCapture = null, requireExistingState = false } = {}) {
     if (nativeExecution) nativeExecution = Object.freeze({ ...nativeExecution, tools: structuredClone(nativeExecution.tools), ...(this.nativeModelCatalog ? { modelCatalogSha256: this.nativeModelCatalog.sha256 } : {}) })
     if (this.disposed) return Promise.reject(Object.assign(new Error('TYPED_INSPECTION_PROFILE_DISPOSED'), { code: 'TYPED_INSPECTION_PROFILE_DISPOSED' }))
     const binding = engineStateBinding(requestBinding)
     if (!nonblank(requestKey) || binding.requestKey !== requestKey) fail('NATIVE_EXECUTION_BINDING_INVALID')
+    if (meteredCapture && (meteredCapture.executionId !== binding.authorizationId || meteredCapture.executionId !== nativeExecution.executionId || !/^[0-9a-f]{64}$/.test(meteredCapture.captureId))) fail('METERED_CAPTURE_BINDING_INVALID')
     const layout = prepareNativeExecutionLayout({ inputDirectory, scratchDirectory, draftsDirectory, skills, skillConfiguration, nativeExecution,
       toolchain: this.nativeToolchain, stateRoot: this.stateRoot, sourceHome: this.profile.codexHome })
     const bindingDigest = canonicalSha256(binding)
-    const matches = active => active.nativeLayout?.digest === layout.digest && active.engineState.bindingDigest === bindingDigest
+    const matches = active => (active.slot || active).meteredCapture === meteredCapture && active.nativeLayout?.digest === layout.digest && active.engineState.bindingDigest === bindingDigest
       && active.nativeExecution.checkActive === nativeExecution.checkActive && active.nativeExecution.callTool === nativeExecution.callTool
     if (this.closingAdapters?.has(requestKey)) fail('NATIVE_EXECUTION_ADAPTER_CLOSING')
     if (this.pendingInspectionKeys?.has(requestKey)) fail('NATIVE_EXECUTION_ADAPTER_BINDING_CONFLICT')
@@ -51,7 +53,7 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
       if (!active.adapter.closed && matches(active)) return Promise.resolve(active.adapter)
       fail('NATIVE_EXECUTION_ADAPTER_BINDING_CONFLICT')
     }
-    const slot = { nativeLayout: layout, engineState: { bindingDigest }, nativeExecution, cancelled: false }
+    const slot = { meteredCapture, nativeLayout: layout, engineState: { bindingDigest }, nativeExecution, cancelled: false }
     this.pendingNativeAdapters.set(requestKey, slot)
     slot.promise = this._openNativeExecutionAdapter(binding, layout, nativeExecution, requireExistingState, slot)
       .finally(() => { if (this.pendingNativeAdapters.get(requestKey) === slot) this.pendingNativeAdapters.delete(requestKey) })
@@ -66,8 +68,17 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
       checkActive()
       if (this.profile.typedInspectionProviderNetwork !== 'restricted-proxy') fail('TYPED_INSPECTION_PROVIDER_NETWORK_NOT_CONFIGURED')
       const schema = await this.measureBinary(this.profile); checkActive()
+      const egressOptions = { providerBaseUrl: this.profile.typedInspectionProviderBaseUrl, networkConnectTimeoutMs: this.profile.typedInspectionNetworkConnectTimeoutMs, additionalOrigins: layout.binding.networkOrigins }
+      if (slot.meteredCapture) {
+        phase('metered-egress-start')
+        const key = readModelAuthFile(this.profile.codexHome).auth.OPENAI_API_KEY
+        const ca = readFileSync(this.providerCaTrust.path)
+        if (`sha256:${createHash('sha256').update(ca).digest('hex')}` !== this.providerCaTrust.sha256) fail('METERED_PROVIDER_CA_CHANGED')
+        egress = this.egressFactory({ ...egressOptions, meteredResponses: { capture: slot.meteredCapture, getProviderKey: () => key, ca } })
+        await egress.start(); checkActive()
+      }
       phase('request-state-and-skill-view')
-      engineState = this._prepareRequestState(binding, { requireExistingState, nativeExecution: true, nativeBinding: layout.binding })
+      engineState = this._prepareRequestState(binding, { requireExistingState, nativeExecution: true, nativeBinding: slot.meteredCapture ? { ...layout.binding, captureId:slot.meteredCapture.captureId } : layout.binding, meteredEgress: egress })
       slot.engineState = engineState
       const skillConfigurationDirectory = ensurePrivateDirectory(resolve(engineState.directory, 'skill-config'))
       for (const item of layout.skillConfiguration) stateMarker(skillConfigurationDirectory, item.configuration, `${item.skillKey}.json`)
@@ -84,9 +95,9 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
         const mountpoint = ensurePrivateDirectory(resolve(skillsDirectory, skill.skillKey))
         if (readdirSync(mountpoint).length) fail('NATIVE_EXECUTION_DISCOVERY_ROOT_UNSAFE')
       }
-      phase('egress-start')
-      egress = this.egressFactory({ providerBaseUrl: this.profile.typedInspectionProviderBaseUrl, networkConnectTimeoutMs: this.profile.typedInspectionNetworkConnectTimeoutMs, additionalOrigins: layout.binding.networkOrigins })
-      await egress.start(); checkActive()
+      if (!egress) {
+        phase('egress-start'); egress = this.egressFactory(egressOptions); await egress.start(); checkActive()
+      }
       // Recheck bytes/identities after asynchronous setup, immediately before bind.
       phase('layout-recheck')
       const current = prepareNativeExecutionLayout({ ...layout, nativeExecution, toolchain: this.nativeToolchain, stateRoot: this.stateRoot, sourceHome: this.profile.codexHome })
