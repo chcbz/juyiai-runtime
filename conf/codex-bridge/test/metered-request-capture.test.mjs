@@ -102,14 +102,14 @@ import { measureMinimalNativeExecutionToolchain } from '../native-execution-prof
 
 test('real metered Codex native turn uses sealed temporary HOME, measured namespace and one durable request at the TLS fixture',
   {skip:process.env.CYF_NATIVE_EXECUTION_ISOLATION_PROBE !== '1',timeout:60000}, async t=>{
-  const {capture,read,store}=await openRoot(t), root=await mkdtemp(join(tmpdir(),'mrt-'));t.after(()=>rm(root,{recursive:true,force:true}))
+  const {capture,read,store}=await openRoot(t,{engineVersion:'codex-cli-0.167.0',adapterVersion:'RESPONSES_TEXT_TOKENS_V1',coveragePolicyVersion:'TEXT_MODEL_ONLY_V1'}), root=await mkdtemp(join(tmpdir(),'mrt-'));t.after(()=>rm(root,{recursive:true,force:true}))
   const privateDir=async name=>{const path=join(root,name);await mkdir(path,{mode:0o700});return path}
   const sourceHome=await privateDir('home'),stateRoot=await privateDir('state'),materializerRoot=await privateDir('materials')
   await writeFile(join(sourceHome,'auth.json'),JSON.stringify({auth_mode:'apikey',OPENAI_API_KEY:'upstream-fixture-only'}),{mode:0o600})
   const cert=join(root,'cert'),key=join(root,'key');execFileSync('/usr/bin/openssl',['req','-x509','-newkey','rsa:2048','-nodes','-keyout',key,'-out',cert,'-days','1','-subj','/CN=localhost','-addext','subjectAltName=IP:127.0.0.1'],{stdio:'ignore'})
   const calls=[];const upstream=createHttpsServer({key:await readFile(key),cert:await readFile(cert)},async(req,res)=>{
     for await(const _ of req){};calls.push({path:req.url,auth:req.headers.authorization,pending:(await read(`request-${calls.length+1}-1`)).observation.resolution})
-    res.writeHead(200,{'Content-Type':'text/event-stream'});for(const event of [{type:'response.created',response:{id:'resp-1'}},{type:'response.output_item.done',output_index:0,item:{id:'msg-1',type:'message',role:'assistant',content:[{type:'output_text',text:'fixture complete'}]}},{type:'response.completed',response:{id:'resp-1',status:'completed',usage:{input_tokens:10,output_tokens:2,total_tokens:12}}}])res.write(`data: ${JSON.stringify(event)}\n\n`);res.end()
+    res.writeHead(200,{'Content-Type':'text/event-stream'});for(const event of [{type:'response.created',response:{id:'resp-1'}},{type:'response.output_item.done',output_index:0,item:{id:'msg-1',type:'message',role:'assistant',content:[{type:'output_text',text:'fixture complete'}]}},{type:'response.completed',response:{id:'resp-1',status:'completed',usage:{input_tokens:10,output_tokens:2,total_tokens:12,input_tokens_details:{cached_tokens:3},output_tokens_details:{reasoning_tokens:1}}}}])res.write(`data: ${JSON.stringify(event)}\n\n`);res.end()
   });await new Promise(resolve=>upstream.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>upstream.close(resolve)))
   const runtime=new NativeExecutionProfileRuntime({profile:{profileId:'metered-test',agentId:'agent',codexBin:process.env.CYF_CODEX_BIN,codexHome:sourceHome,typedInspectionProviderNetwork:'restricted-proxy',typedInspectionProviderId:'fixture',typedInspectionProviderBaseUrl:`https://127.0.0.1:${upstream.address().port}/custom`,typedInspectionNetworkConnectTimeoutMs:2000,typedInspectionCaBundlePath:cert},materializerRoot,stateRoot,nativeToolchain:measureMinimalNativeExecutionToolchain()})
   const spawn=runtime._spawnAdapter.bind(runtime);let inspected=false
@@ -121,5 +121,30 @@ test('real metered Codex native turn uses sealed temporary HOME, measured namesp
     const policy={cwd:'/execution',model:'gpt-5.4'},thread=await adapter.startOrResumeThread(null,policy)
     await adapter.runTurn({threadId:thread.threadId,clientUserMessageId:'fixture-message',policy,input:[{type:'text',text:'fixture'}]})
     assert.deepEqual(calls,[{path:'/custom/responses',auth:'Bearer upstream-fixture-only',pending:'PENDING'}])
+    await capture.stopAndDrain()
+    const linked=await read('request-1-2'), response=await read(`response-${linked.observation.sourceAttemptId}-1`)
+    assert.equal(linked.previousEvidenceSha256,(await read('request-1-1')).evidenceSha256);assert.equal(linked.observation.resolution,'RESPONSE')
+    assert.equal(response.expectedRevision,'0');assert.equal(response.observation.actualBillingIdentity,null)
+    assert.deepEqual(response.observation.measuredQuantities.tokens,{INPUT:'7',CACHED_INPUT:'3',OUTPUT:'2'})
   } finally {await runtime.dispose()}
+})
+
+import { observeResponse } from '../metered-response-observation.mjs'
+test('UTF-8 CRLF streaming keeps only numeric usage; unknown/missing/truncated evidence cannot normalize',()=>{
+  const raw={id:'response_1',status:'completed',output:'绝不保存正文',usage:{input_tokens:5,output_tokens:4,total_tokens:9,input_tokens_details:{cached_tokens:2},output_tokens_details:{reasoning_tokens:1}}}
+  const observe=(r,ended=true,supported=true)=>{const o=observeResponse('text/event-stream',200,4096,supported);for(const b of Buffer.from(`data: ${JSON.stringify({type:'response.completed',response:r})}\r\n\r\n`))o.push(Buffer.from([b]));return o.finish(ended)}
+  const v=observe(raw);assert.equal(v.providerResponseId,'response_1');assert.deepEqual(v.measuredQuantities.tokens,{INPUT:'3',CACHED_INPUT:'2',OUTPUT:'4'});assert.ok(!JSON.stringify(v).includes(raw.output))
+  for(const v of [observe(raw,false),observe(raw,true,false),observe({...raw,usage:null}),observe({...raw,usage:{...raw.usage,adversarial:raw.output}})]){assert.equal(v.measuredQuantities,null);assert.ok(!JSON.stringify(v).includes(raw.output))}
+  const o=observeResponse('application/json',200,4096,true);o.push(Buffer.from(JSON.stringify(raw).replace('"input_tokens":5','"input_tokens":4.9999999999999999999')));assert.equal(o.finish(true).measuredQuantities,null)
+  const bounded=observeResponse('text/event-stream',200,24,true);bounded.push(Buffer.alloc(128,65));assert.ok(bounded.finish(true).reasonCodes.includes('OBSERVATION_WINDOW_EXCEEDED'))
+})
+test('duplicate provider identity never overwrites a response and an unresolved request revises its own pending record',async t=>{
+  const {capture,dir,read}=await openRoot(t), observe=observeResponse('application/json',200,4096,false)
+  observe.push(Buffer.from('{"id":"resp_shared","status":"completed"}'));const evidence=observe.finish(true)
+  await Promise.all([1,2].map(()=>capture.dispatch((_req,finish)=>finish(evidence))))
+  await capture.dispatch((_req,finish)=>finish(observeResponse('application/json',503,4096,false).finish(false)))
+  await capture.stopAndDrain();const keys=await readdir(dir),duplicates=keys.filter(x=>x.startsWith('duplicate-'));assert.equal(duplicates.length,1)
+  assert.equal(keys.filter(x=>/^response-[a-f0-9]+-1\.json$/.test(x)).length,1)
+  const a=await read('request-1-2'),b=await read('request-2-2');assert.equal(a.observation.sourceAttemptId,b.observation.sourceAttemptId);assert.ok([a,b].some(x=>x.observation.reasonCodes.includes('DUPLICATE_RESPONSE_ID')))
+  const u=await read('request-3-2');assert.equal(u.observation.resolution,'UNRESOLVED');assert.equal(u.observation.sourceAttemptId,null)
 })

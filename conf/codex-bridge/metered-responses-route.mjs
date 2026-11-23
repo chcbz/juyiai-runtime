@@ -2,6 +2,7 @@
 // body logs or automatic retries. Coverage remains pending until source closure.
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { request as httpsRequest } from 'node:https'
+import { observeResponse } from './metered-response-observation.mjs'
 import { pipeline } from 'node:stream/promises'
 
 const deny = (res, status) => {
@@ -34,23 +35,31 @@ export class MeteredResponsesRoute {
       active(); await assertOwner(); active()
       const key = this.#key()
       if (typeof key !== 'string' || !key || /[^\x21-\x7e]/.test(key) || key === this.#temporary) throw Error('METERED_ROUTE_CREDENTIAL_INVALID')
-      await this.#capture.dispatch(async () => {
-        active()
-        const upstream = httpsRequest(this.#upstream, { method:'POST', agent:false, signal:aborted.signal, ca:this.#ca,
-          headers:{Authorization:`Bearer ${key}`, 'Content-Type':'application/json','Accept':'text/event-stream, application/json', 'Accept-Encoding':'identity'} })
-        const timer=setTimeout(()=>upstream.destroy(Error('METERED_CONNECT_TIMEOUT')),connectTimeoutMs)
-        upstream.once('socket', s=>s.once('secureConnect',()=>clearTimeout(timer))); upstream.once('close',()=>clearTimeout(timer))
-        const response = new Promise((resolve,reject)=>{upstream.once('response',resolve);upstream.once('error',reject);
-          upstream.once('upgrade',(_res,socket)=>{socket.destroy();reject(Error('METERED_UPGRADE_REJECTED'))})})
-        // Both streams use native backpressure. Do not finish uploading before reading a possible early response.
-        await Promise.all([pipeline(req,upstream),response.then(async incoming=>{
-          const status=incoming.statusCode
-          if ((status >= 300 && status < 400) || incoming.headers['content-encoding'] && incoming.headers['content-encoding'] !== 'identity') {
-            incoming.destroy(); deny(res,502); return
-          }
-          res.writeHead(status, {'Content-Type':incoming.headers['content-type'] || 'application/octet-stream','Cache-Control':'no-store'})
-          await pipeline(incoming,res)
-        })])
+      await this.#capture.dispatch(async (_request, finish) => {
+        let observer, ended=false
+        try {
+          active()
+          const upstream = httpsRequest(this.#upstream, { method:'POST', agent:false, signal:aborted.signal, ca:this.#ca,
+            headers:{Authorization:`Bearer ${key}`, 'Content-Type':'application/json','Accept':'text/event-stream, application/json', 'Accept-Encoding':'identity'} })
+          const timer=setTimeout(()=>upstream.destroy(Error('METERED_CONNECT_TIMEOUT')),connectTimeoutMs)
+          upstream.once('socket', s=>s.once('secureConnect',()=>clearTimeout(timer))); upstream.once('close',()=>clearTimeout(timer))
+          const response = new Promise((resolve,reject)=>{upstream.once('response',resolve);upstream.once('error',reject);
+            upstream.once('upgrade',(_res,socket)=>{socket.destroy();reject(Error('METERED_UPGRADE_REJECTED'))})})
+          // Both streams use native backpressure. Do not finish uploading before reading a possible early response.
+          await Promise.all([pipeline(req,upstream),response.then(async incoming=>{
+            const status=incoming.statusCode
+            if ((status >= 300 && status < 400) || incoming.headers['content-encoding'] && incoming.headers['content-encoding'] !== 'identity') {
+              incoming.destroy(); deny(res,502); return
+            }
+            res.writeHead(status, {'Content-Type':incoming.headers['content-type'] || 'application/octet-stream','Cache-Control':'no-store'})
+            observer=observeResponse(incoming.headers['content-type'],status,incoming.readableHighWaterMark,this.#capture.textTokenProtocol)
+            await pipeline(incoming,async function* (source){ for await(const bytes of source){observer.push(bytes);yield bytes} ended=true },res)
+          })])
+        } finally {
+          // A lost observation must not trigger a model retry after a completed business stream.
+          const evidence=observer?.finish(ended) ?? {providerResponseId:null,reportedUsage:null,measuredQuantities:null,actualBillingIdentity:null,reasonCodes:['NO_RESPONSE_EVIDENCE']}
+          await finish(evidence)
+        }
       })
     } catch { deny(res,502) } finally { abort(); res.off('close',abort); signal.removeEventListener('abort',abort) }
   }
