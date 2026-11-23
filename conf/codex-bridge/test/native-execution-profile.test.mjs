@@ -791,3 +791,14 @@ test('prospective comparison measures actual installed policy without starting o
     assert.equal(existsSync(f.execution),false)
   } finally { f.cleanup() }
 })
+
+test('prospective profile refuses an unverified binary and never warms up on a budget read', () => {
+  const f=fixture()
+  try {
+    const { runtime,counts }=stubRuntime(f)
+    runtime.profile.typedInspectionProviderId='provider';runtime.profile.typedInspectionProviderBaseUrl='https://provider.invalid'
+    runtime.nativeExecutionReadback={schemaVersion:1};runtime.nativeBinaryMeasurement={ measured:true, binarySha256:'a'.repeat(64), cliVersion:'1.2.3' }
+    runtime.measureBinary=()=>assert.fail('no executable measurement on budget read');runtime.egressFactory=()=>assert.fail('no provider call')
+    assert.equal(runtime.prospectiveNativeGroup({}),null);assert.equal(counts().spawns,0)
+  } finally { f.cleanup() }
+})

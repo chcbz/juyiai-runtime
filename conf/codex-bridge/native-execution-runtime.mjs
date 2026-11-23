@@ -1,3 +1,4 @@
+import { isCurrentAppServerMeasurement } from './app-server-adapter.mjs'
 import { startMeteredRoot } from './metered-request-capture.mjs'
 import { skillDigest } from './skill-executor.mjs'
 import { readModelAuthFile } from './model-auth.mjs'
@@ -13,7 +14,7 @@ import { skillPackageTreeDigest } from './skill-manifest.mjs'
 
 import { canonicalSha256 } from './chat-runtime.mjs'
 
-import { NATIVE_NEUTRAL_MOUNT_TARGETS, NATIVE_PERMISSION_PROFILE, nativeDispatchGroup, prepareNativeExecutionLayout, validateNativeExecutionToolchain, verifyNativeExecutionConfig, verifyNativeExecutionSkillCatalog } from './native-execution-profile.mjs'
+import { NATIVE_NEUTRAL_MOUNT_TARGETS, NATIVE_PERMISSION_PROFILE, measureProspectiveNativeGroup, nativeDispatchGroup, prepareNativeExecutionLayout, validateNativeExecutionToolchain, verifyNativeExecutionConfig, verifyNativeExecutionSkillCatalog } from './native-execution-profile.mjs'
 
 import { IsolatedEngineProfileRuntime, nonblank, fail, sha256, ensurePrivateDirectory, engineStateBinding, stateMarker, emptyMcpCatalog } from './isolated-engine-profile.mjs'
 
@@ -33,9 +34,29 @@ export const nativeExecutionProfile = profile => {
 
 export { nativeDispatchGroup } from './native-execution-profile.mjs'
 
+const nativeMeteringRoute = (profile, schema) => {
+  const channelNamespace = skillDigest(['METERED_PROVIDER_NAMESPACE_V1', profile.typedInspectionProviderId, new URL(profile.typedInspectionProviderBaseUrl).href.replace(/\/$/, '')])
+  const engineVersion = /^\d+\.\d+\.\d+$/.test(schema.cliVersion) ? `codex-cli-${schema.cliVersion}` : 'unknown'
+  // Layout covers local tools, skills and allowed network routes; that alone does not attest
+  // every provider-side cost category. Never promote a live run to fixture text-only policy.
+  const coveragePolicyVersion = 'NATIVE_EXECUTION_UNVERIFIED_V1'
+  return { channelNamespace, engineVersion, coveragePolicyVersion }
+}
+
 export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime {
   constructor(options = {}) {
     super({ ...options, profile: nativeExecutionProfile(options.profile || {}) })
+  }
+  // Only internal dispatch preparation supplies the selected tools/skills and instruction commitment.
+  // The executable, model, effort, route, toolchain and loaded model catalogue are profile-owned.
+  prospectiveNativeGroup({skills,skillConfiguration,tools,networkAccess,toolPolicyRef,instructionsSha256}) {
+    const profile = this.profile, schema = this.nativeBinaryMeasurement
+    if (!this.nativeExecutionDeclaration() || !this.nativeToolchain || profile.typedInspectionProviderNetwork !== 'restricted-proxy'
+        || !profile.typedInspectionProviderId || !profile.typedInspectionProviderBaseUrl || !isCurrentAppServerMeasurement(profile,schema)) return null
+    return measureProspectiveNativeGroup({skills,skillConfiguration,tools,networkAccess,stateRoot:this.stateRoot,
+      toolchain:this.nativeToolchain,modelCatalogSha256:this.nativeModelCatalog?.sha256 ?? null}, {
+      ...nativeMeteringRoute(profile,schema), binarySha256:schema.binarySha256, model:profile.chatModel || profile.codexModel,
+      effort:profile.chatReasoningEffort, toolPolicyRef, instructionsSha256 })
   }
   openNativeExecutionAdapter(inputDirectory, requestKey, requestBinding, { scratchDirectory, draftsDirectory, skills = [], skillConfiguration = [], nativeExecution, meteredCapture = null, meteredAdmission = null, requireExistingState = false } = {}) {
     if (nativeExecution) nativeExecution = Object.freeze({ ...nativeExecution, tools: structuredClone(nativeExecution.tools), ...(this.nativeModelCatalog ? { modelCatalogSha256: this.nativeModelCatalog.sha256 } : {}) })
@@ -78,11 +99,7 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
         // A fresh epoch must not take over unknown prior requests or send again during recovery.
         if (requireExistingState) fail('SKILL_RESULT_UNKNOWN')
         const { store, model, effort } = slot.meteredAdmission
-        const channelNamespace = skillDigest(['METERED_PROVIDER_NAMESPACE_V1', this.profile.typedInspectionProviderId, new URL(egressOptions.providerBaseUrl).href.replace(/\/$/, '')])
-        const engineVersion = /^\d+\.\d+\.\d+$/.test(schema.cliVersion) ? `codex-cli-${schema.cliVersion}` : 'unknown'
-        // Layout covers local tools, skills and allowed network routes; that alone does not attest
-        // every provider-side cost category. Never promote a live run to fixture text-only policy.
-        const coveragePolicyVersion = 'NATIVE_EXECUTION_UNVERIFIED_V1'
+        const { channelNamespace, engineVersion, coveragePolicyVersion } = nativeMeteringRoute(this.profile, schema)
         try {
           slot.meteredCapture = await startMeteredRoot(store, { executionId:binding.authorizationId, runId:store.command.runId,
             executionConfigSha256:skillDigest([layout.digest,store.commandDigest,engineVersion,channelNamespace,model,effort]),
@@ -151,6 +168,8 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
       adapter.nativeExecutionIsolation = Object.freeze({ schemaVersion: 1, layoutDigest: layout.digest, cwd: '/execution',
         writableRoots: Object.freeze(['/workspace', '/outputs']), skills: discovery, network, modelTurnMeasured: false })
       this.suspendedNativeStates?.delete(binding.requestKey)
+      // Keep the process-local, integrity-owner-attested object, never a serialized PLAN or heartbeat.
+      this.nativeBinaryMeasurement = schema
       this.activeAdapters.set(binding.requestKey, { adapter, egress, engineState, inputDirectory: layout.inputDirectory, nativeLayout: layout, nativeExecution, slot })
       adapter.once('exit', () => {
         // Keep the closed entry until per-execution suspend/release joins
