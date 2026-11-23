@@ -38,7 +38,9 @@ const first = (binding, kind, identity, observation, clock) => {
 /** Start only a NEW RESPONSE_V2 run, before spawning the engine. Existing plan is recovery work, never dispatch authority. */
 export async function startMeteredRoot(store, { executionId, runId, executionConfigSha256, engineVersion, coveragePolicyVersion,
   rootSourceId, channelNamespace, adapterVersion, checkActive, now = Date.now }) {
-  if (store.command.executionId !== checkId(executionId) || !skillSha(executionConfigSha256) || typeof checkActive !== 'function') bad('METERED_CAPTURE_BINDING_INVALID')
+  if (store.command.executionId !== checkId(executionId) || store.command.runId !== checkId(runId)
+      || store.command.usageMode !== 'RESPONSE_V2' || store.command.captureProtocol !== 'METERED_CAPTURE_V2'
+      || !skillSha(executionConfigSha256) || typeof checkActive !== 'function') bad('METERED_CAPTURE_BINDING_INVALID')
   for (const id of [runId, engineVersion, coveragePolicyVersion, rootSourceId, channelNamespace, adapterVersion]) checkId(id)
   const binding = { executionId, runId, captureId: skillDigest(['CAPTURE_V2', executionId, runId]) }
   const dir = resolve(store.directory, `usage-capture-${binding.captureId}`)

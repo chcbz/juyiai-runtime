@@ -11,7 +11,7 @@ const openRoot = async (t, options = {}) => {
   const directory = await mkdtemp(join(tmpdir(), 'metered-'))
   t.after(() => rm(directory, {recursive:true, force:true}))
   const store = new SkillExecutionStore({rootDirectory:directory,scope:{tenant:'t',owner:'o'},
-    command:{executionProtocolVersion:6,executionId:'exec1',snapshotDigest:'a'.repeat(64)}})
+    command:{executionProtocolVersion:6,executionId:'exec1',runId:'run1',usageMode:'RESPONSE_V2',captureProtocol:'METERED_CAPTURE_V2',snapshotDigest:'a'.repeat(64)}})
   const args = { executionId:'exec1',runId:'run1',executionConfigSha256:'c'.repeat(64),engineVersion:'engine1',
     coveragePolicyVersion:'TEST_MODEL_ONLY',rootSourceId:'source_model',channelNamespace:'test_gateway',adapterVersion:'FIXTURE',checkActive:()=>{}, ...options }
   const capture = await startMeteredRoot(store, args)
@@ -48,4 +48,10 @@ test('revoked after prewrite leaves unresolved evidence and cannot call upstream
   let checks=0,sends=0; const {capture,read}=await openRoot(t,{checkActive:()=>{if(++checks===4)throw Error('revoked')}})
   await assert.rejects(capture.dispatch(()=>sends++),/revoked/); assert.equal(sends,0)
   assert.equal((await read('request-1-1')).observation.resolution,'PENDING')
+})
+
+test('does not invent a plan for another run or a legacy command',async t=>{
+  const {store,args}=await openRoot(t)
+  await assert.rejects(startMeteredRoot(store,{...args,runId:'other'}),{code:'METERED_CAPTURE_BINDING_INVALID'})
+  await assert.rejects(startMeteredRoot({directory:store.directory,command:{executionId:'exec1',runId:'run1'}},args),{code:'METERED_CAPTURE_BINDING_INVALID'})
 })
