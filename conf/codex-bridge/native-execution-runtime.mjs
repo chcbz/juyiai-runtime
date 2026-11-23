@@ -31,6 +31,21 @@ export const nativeExecutionProfile = profile => {
   }
 }
 
+// Compatibility evidence about the local launch, not a provider invoice or a coverage verdict.
+// Call only with the validated layout. Keep the original per-run layout/command commitment separately.
+export function nativeDispatchGroup(binding, {binarySha256, engineVersion, channelNamespace, model, effort, instructionsSha256, toolPolicyRef, coveragePolicyVersion}) {
+  if (!model || !effort || !instructionsSha256 || !toolPolicyRef || engineVersion === 'unknown' || !binarySha256) return null
+  const routeSha256 = skillDigest(['NATIVE_LOCAL_ROUTE_V1', channelNamespace, model])
+  const toolConfigSha256 = skillDigest(['NATIVE_LOCAL_TOOLS_V1', toolPolicyRef, binding.tools,
+    binding.skills.map(x => [x.skillKey,x.packageTreeDigest]), binding.skillConfiguration,
+    binding.toolchain.shell, binding.toolchain.files.map(x => [x.sandboxPath,x.sha256]),
+    binding.networkAccess,binding.networkOrigins,binding.webSearch ?? null])
+  const executionConfigSha256 = skillDigest(['NATIVE_DISPATCH_GROUP_V1',binarySha256,engineVersion,
+    routeSha256,toolConfigSha256,effort,instructionsSha256,binding.modelCatalogSha256 ?? null,
+    binding.sandboxUser,binding.neutralMountTargets,coveragePolicyVersion])
+  return {version:'NATIVE_DISPATCH_GROUP_V1', executionConfigSha256,routeSha256,toolConfigSha256}
+}
+
 export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime {
   constructor(options = {}) {
     super({ ...options, profile: nativeExecutionProfile(options.profile || {}) })
@@ -84,6 +99,8 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
         try {
           slot.meteredCapture = await startMeteredRoot(store, { executionId:binding.authorizationId, runId:store.command.runId,
             executionConfigSha256:skillDigest([layout.digest,store.commandDigest,engineVersion,channelNamespace,model,effort]),
+            dispatchGroup:nativeDispatchGroup(layout.binding,{binarySha256:schema.binarySha256,engineVersion,channelNamespace,model,effort,
+              instructionsSha256:slot.meteredAdmission.instructionsSha256,toolPolicyRef:store.command.toolPolicyRef,coveragePolicyVersion}),
             engineVersion,coveragePolicyVersion,rootSourceId:'source_model',channelNamespace,adapterVersion:'RESPONSES_TEXT_TOKENS_V1',checkActive })
         } catch (error) { if (error.code === 'EEXIST') fail('SKILL_RESULT_UNKNOWN'); throw error }
       }

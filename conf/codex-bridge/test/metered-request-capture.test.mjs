@@ -251,3 +251,17 @@ test('native HTTP posts exact revisions and recovers the original lost RESPONSE 
   await rm(join(acks,'request-1-1.json'));assert.equal(await send({...meteredBatch(),left:0}),false)
   assert.equal(await send(meteredBatch()),true);assert.equal(log.at(-1),'REQUEST:1');assert.equal(stored.size,7)
 })
+
+test('dispatch group commits to launch configuration, not an individual command or local paths',async t=>{
+  const {nativeDispatchGroup}=await import('../native-execution-runtime.mjs')
+  const binding={executionId:'one',input:{inode:1},sandboxUser:{uid:65534},neutralMountTargets:[],tools:[],
+    skills:[{skillKey:'x',packageRoot:'/private',packageTreeDigest:'tree'}],skillConfiguration:[],networkAccess:false,networkOrigins:[],
+    toolchain:{shell:'/bin/sh',files:[{sourcePath:'/private/bin',sandboxPath:'/bin/sh',sha256:'binary'}]}}
+  const settings={binarySha256:'cli',engineVersion:'1',channelNamespace:'route',model:'model',effort:'medium',instructionsSha256:'instructions',toolPolicyRef:'local',coveragePolicyVersion:'unverified'}
+  const group=nativeDispatchGroup(binding,settings);const moved=structuredClone(binding);moved.executionId='two';moved.input.inode=42;moved.skills[0].packageRoot='/elsewhere';moved.toolchain.files[0].sourcePath='/relocated';assert.deepEqual(nativeDispatchGroup(moved,settings),group)
+  assert.equal(nativeDispatchGroup(binding,{...settings,model:null}),null);assert.equal(nativeDispatchGroup(binding,{...settings,effort:null}),null)
+  for(const key of Object.keys(settings))assert.notEqual(nativeDispatchGroup(binding,{...settings,[key]:'different'}).executionConfigSha256,group.executionConfigSha256)
+  moved.toolchain.files[0].sha256='changed';assert.notEqual(nativeDispatchGroup(moved,settings).toolConfigSha256,group.toolConfigSha256)
+  const {read}=await openRoot(t,{dispatchGroup:group});const plan=(await read('plan')).observation
+  assert.deepEqual(plan.dispatchGroup,group);assert.equal(plan.executionConfigSha256,'c'.repeat(64));assert.equal(JSON.stringify(plan).includes('/private'),false)
+})

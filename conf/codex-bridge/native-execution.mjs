@@ -28,7 +28,7 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
     checkActive()
     const adapter = await profileRuntime.openNativeExecutionAdapter(resolve(store.directory, 'inputs'), requestKey, binding, {
       scratchDirectory: resolve(store.directory, 'scratch'), draftsDirectory: resolve(store.directory, 'drafts'),
-      ...(command.usageMode === 'RESPONSE_V2' ? { meteredAdmission: { store, model: model ?? null, effort: effort ?? null } } : {}),
+      ...(command.usageMode === 'RESPONSE_V2' ? { meteredAdmission: { store, instructionsSha256:skillDigest(policy.developerInstructions), model: model ?? null, effort: effort ?? null } } : {}),
       skills: entries.map(entry => ({ skillKey: entry.descriptor.skillKey, packageRoot: entry.descriptor.packageRoot, packageTreeDigest: entry.descriptor.packageTreeDigest })),
       skillConfiguration, nativeExecution: { ...session.policy(), networkAccess }, requireExistingState: Boolean(existing)
     })

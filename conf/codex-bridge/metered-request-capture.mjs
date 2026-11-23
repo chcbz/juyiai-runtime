@@ -9,7 +9,7 @@ import { recoverStoppedMeteredRoot } from './metered-capture-closure.mjs'
 const bad = code => { throw Object.assign(new Error(code), {code}) }
 const checkId = id => { if(!skillId(id)) bad('METERED_CAPTURE_ID_INVALID'); return id }
 /** Start only a NEW RESPONSE_V2 run, before spawning the engine. Existing plan is recovery work, never dispatch authority. */
-export async function startMeteredRoot(store, { executionId, runId, executionConfigSha256, engineVersion, coveragePolicyVersion,
+export async function startMeteredRoot(store, { executionId, runId, executionConfigSha256, dispatchGroup = null, engineVersion, coveragePolicyVersion,
   rootSourceId, channelNamespace, adapterVersion, checkActive, now = Date.now }) {
   if (store.command.executionId !== checkId(executionId) || store.command.runId !== checkId(runId)
       || store.command.usageMode !== 'RESPONSE_V2' || store.command.captureProtocol !== 'METERED_CAPTURE_V2'
@@ -21,7 +21,7 @@ export async function startMeteredRoot(store, { executionId, runId, executionCon
   // EEXIST (even a crash before PLAN) must not allow a second live writer or erase evidence.
   await mkdir(dir, { mode: 0o700 }); await syncDir(store.directory)
   const plan = first(binding, 'PLAN', [], { captureProtocol: 'METERED_CAPTURE_V2', executionConfigSha256,
-    engineVersion, coveragePolicyVersion, rootSourceId }, now)
+    engineVersion, coveragePolicyVersion, rootSourceId, ...(dispatchGroup ? {dispatchGroup} : {}) }, now)
   await persist(dir, 'plan', plan)
   const epoch = '0', sourceId = rootSourceId
   const source = first(binding, 'SOURCE', [sourceId, epoch], { sourceId, epoch, sourceKind: 'METERED_HTTP_RESPONSES_V1',
