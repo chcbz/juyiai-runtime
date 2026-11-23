@@ -11,7 +11,7 @@ const openRoot = async (t, options = {}, deferred = false) => {
   const directory = await mkdtemp(join(tmpdir(), 'metered-'))
   t.after(() => rm(directory, {recursive:true, force:true}))
   const store = new SkillExecutionStore({rootDirectory:directory,scope:{tenant:'t',owner:'o'},
-    command:{executionProtocolVersion:6,executionId:'exec1',runId:'run1',usageMode:'RESPONSE_V2',captureProtocol:'METERED_CAPTURE_V2',snapshotDigest:'a'.repeat(64)}})
+    command:{executionProtocolVersion:6,executionId:'exec1',runId:'run1',toolPolicyRef:'NATIVE_LOCAL_FILES_V1',usageMode:'RESPONSE_V2',captureProtocol:'METERED_CAPTURE_V2',snapshotDigest:'a'.repeat(64)}})
   const args = { executionId:'exec1',runId:'run1',executionConfigSha256:'c'.repeat(64),engineVersion:'engine1',
     coveragePolicyVersion:'TEST_MODEL_ONLY',rootSourceId:'source_model',channelNamespace:'test_gateway',adapterVersion:'FIXTURE',checkActive:()=>{}, ...options }
   const capture = deferred ? null : await startMeteredRoot(store, args)
@@ -116,14 +116,14 @@ for (const admitted of [false,true]) test(admitted ? 'admitted V2 profile measur
   runtime._spawnAdapter=async args=>{const staged=JSON.parse(await readFile(args.engineState.authPath));assert.match(staged.OPENAI_API_KEY,/^[a-f0-9]{64}$/);assert.notEqual(staged.OPENAI_API_KEY,'upstream-fixture-only');inspected=true;return spawn(args)}
   const binding={schemaVersion:1,requestKey:'metered-request',authorizationId:'exec1',manifestDigest:'sha256:'+store.command.snapshotDigest,requestId:'req-1',turnId:'turn-1',inputPolicyDigest:'policy-1'}
   try {
-    const adapter=await runtime.openNativeExecutionAdapter(join(store.directory,'inputs'),binding.requestKey,binding,{scratchDirectory:join(store.directory,'scratch'),draftsDirectory:join(store.directory,'drafts'),nativeExecution:{executionId:'exec1',tools:[],checkActive(){},callTool(){}},...(admitted?{meteredAdmission:{store,model:"gpt-5.4",effort:null}}:{meteredCapture:capture})})
+    const adapter=await runtime.openNativeExecutionAdapter(join(store.directory,'inputs'),binding.requestKey,binding,{scratchDirectory:join(store.directory,'scratch'),draftsDirectory:join(store.directory,'drafts'),nativeExecution:{executionId:'exec1',tools:[],checkActive(){},callTool(){}},...(admitted?{meteredAdmission:{store,model:'gpt-5.4',effort:'medium',instructionsSha256:skillDigest('fixture launch policy')}}:{meteredCapture:capture})})
     assert.ok(inspected);assert.ok(adapter.readback.credentialIsolation.bootstrapCredentialRemoved);assert.ok(adapter.nativeExecutionIsolation.network.nftDefaultDropReadback)
-    const policy={cwd:'/execution',model:'gpt-5.4'},thread=await adapter.startOrResumeThread(null,policy)
+    const policy={cwd:'/execution',model:'gpt-5.4',effort:'medium',developerInstructions:'fixture launch policy'},thread=await adapter.startOrResumeThread(null,policy)
     await adapter.runTurn({threadId:thread.threadId,clientUserMessageId:'fixture-message',policy,input:[{type:'text',text:'fixture'}]})
     assert.deepEqual(calls,[{path:'/custom/responses',auth:'Bearer upstream-fixture-only',pending:'PENDING'}])
     if(admitted){
       await runtime.suspendAdapter(binding.requestKey)
-      assert.equal((await read('plan')).observation.engineVersion,'codex-cli-0.167.0')
+      const measured=(await read('plan')).observation;assert.equal(measured.engineVersion,'codex-cli-0.167.0');assert.equal(measured.dispatchGroup.version,'NATIVE_DISPATCH_GROUP_V1');assert.match(measured.dispatchGroup.toolConfigSha256,/^[a-f0-9]{64}$/);assert.equal(measured.coveragePolicyVersion,'NATIVE_EXECUTION_UNVERIFIED_V1')
       assert.equal((await read('producer-stopped')).reservedHigh,'1')
       await assert.rejects(read('capture-final-1'),{code:'ENOENT'})
     } else await capture.stopAndDrain()
