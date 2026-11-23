@@ -145,6 +145,7 @@ export const skillConversationHttpScope = (endpoint, options = {}) => {
   const method = (options.method || 'GET').toUpperCase()
   if (endpoint.pathname === '/internal/agent/executions/commands') return method === 'GET' && options.body == null
   const id = '[A-Za-z0-9][A-Za-z0-9._:-]{0,99}'
+  if(method==='GET'&&options.body==null&&new RegExp(`^/internal/agent/executions/${id}/runs/${id}/usage/(?:receipts/${id}|records/[a-f0-9]{64})$`).test(endpoint.pathname))return true
   return method === 'POST' && new RegExp(`^/internal/agent/executions/${id}/runs/${id}/(?:lease(?:/renew)?|inputs(?:/${id}/content)?|effects/${id}/(?:start|result)|resume|outputs/${id}/content|result-commits/${id}|failure|usage|provider-usage)$`).test(endpoint.pathname)
 }
 

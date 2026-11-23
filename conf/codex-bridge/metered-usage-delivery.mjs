@@ -36,7 +36,14 @@ export async function deliverMetered(store,request,batch,sealed=false){
       e.recordId!==skillDigest(['USAGE_RECORD_V2',captureId,kind,identity])||!sha.test(evidenceSha256)||skillDigest(e)!==evidenceSha256||
       expectedRevision!==(kind==='RESPONSE'?'0':null)||receiptId!==skillDigest(['USAGE_RECEIPT_V2',evidenceSha256,expectedRevision]))bad()
     if(has){validateAck(await readPrivate(acks,key),raw);continue}
-    batch.left--;const ack=await request(`/internal/agent/executions/${executionId}/runs/${runId}/usage`,'POST',raw,[200],{requestId:receiptId,callId:receiptId,signal:AbortSignal.timeout(Math.max(1,batch.until-Date.now()))})
+    const path=`/internal/agent/executions/${executionId}/runs/${runId}/usage`,call=()=>({requestId:receiptId,callId:receiptId,signal:AbortSignal.timeout(Math.max(1,batch.until-Date.now()))})
+    batch.left--;let ack
+    try{ack=await request(path,'POST',raw,[200],call())}
+    catch(error){
+      // Transport loss after commit is ambiguous. Read only the same persisted submission; never mint a retry identity.
+      if(error.code!=='SKILL_TRANSPORT_UNKNOWN'||batch.left<=0||Date.now()>=batch.until)throw error
+      batch.left--;ack=await request(`${path}/receipts/${receiptId}`,'GET',undefined,[200],call())
+    }
     validateAck(ack,raw);await persist(acks,key,ack)
   }
   return sealed&&count>=4&&names.includes('plan')&&names.includes('source-0')&&names.includes('source-final-1')&&names.includes('capture-final-1')

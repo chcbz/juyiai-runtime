@@ -35,12 +35,12 @@ export class SkillUsageDelivery {
     const endpoint = new URL(path, `${this.origin}/`)
     if (endpoint.origin !== this.origin || endpoint.pathname !== path || endpoint.search || endpoint.hash) fail('SKILL_API_PATH_INVALID')
     const proof = this.headers(), headers = { ...proof, Accept: 'application/json' }
-    if(call){headers['X-Request-Id']=call.requestId;headers['Idempotency-Key']=call.callId}
+    if(call){headers['X-Request-Id']=call.requestId;if(method==='POST')headers['Idempotency-Key']=call.callId}
     if (body !== undefined && !(body instanceof FormData)) headers['Content-Type'] = 'application/json'
     let response
     try { response = await this.fetch(endpoint, { method, redirect: 'error', headers, ...(call?{signal:call.signal}:{}),
       ...(body === undefined ? {} : { body: body instanceof FormData ? body : JSON.stringify(body) }) }) }
-    catch (cause) { fail('SKILL_TRANSPORT_UNKNOWN', cause) }
+    catch (cause) { if(JSON.stringify(proof)!==JSON.stringify(this.headers()))fail('SKILL_SESSION_CHANGED');fail('SKILL_TRANSPORT_UNKNOWN', cause) }
     if (JSON.stringify(proof) !== JSON.stringify(this.headers())) {
       try { await response?.body?.cancel?.() } catch {}
       fail('SKILL_SESSION_CHANGED')
