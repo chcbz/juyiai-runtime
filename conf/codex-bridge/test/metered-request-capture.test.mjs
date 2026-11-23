@@ -64,7 +64,7 @@ import { connect } from 'node:net'
 import { execFileSync } from 'node:child_process'
 
 test('restricted metered listener: authenticated POST only, durable before TLS upstream, no model CONNECT or redirects', {timeout:15000}, async t=>{
-  const {capture,dir,read}=await openRoot(t)
+  const {capture,dir,read}=await openRoot(t,{engineVersion:'codex-cli-0.167.0',adapterVersion:'RESPONSES_TEXT_TOKENS_V1',coveragePolicyVersion:'TEXT_MODEL_ONLY_V1'})
   const tlsDir=await mkdtemp(join(tmpdir(),'fake-provider-'));t.after(()=>rm(tlsDir,{force:true,recursive:true}))
   const certPath=join(tlsDir,'cert'),keyPath=join(tlsDir,'key')
   execFileSync('/usr/bin/openssl',['req','-x509','-newkey','rsa:2048','-nodes','-keyout',keyPath,'-out',certPath,'-days','1','-subj','/CN=localhost','-addext','subjectAltName=IP:127.0.0.1'],{stdio:'ignore'})
@@ -73,16 +73,17 @@ test('restricted metered listener: authenticated POST only, durable before TLS u
     const chunks=[];for await(const chunk of req) chunks.push(chunk)
     requests.push({path:req.url,headers:req.headers,body:Buffer.concat(chunks).toString(),pending:(await read(`request-${requests.length+1}-1`)).observation.resolution})
     if(requests.length===2){res.writeHead(307,{Location:'https://invalid.example/'});res.end();return}
+    if(requests.length>=3){res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({id:'r'+requests.length,status:'completed',usage:{input_tokens:5,total_tokens:9,output_tokens:4,input_tokens_details:{cached_tokens:2},output_tokens_details:{reasoning_tokens:1}}}));return}
     res.writeHead(200,{'Content-Type':'text/event-stream','Set-Cookie':'private=fixture'});res.write('data: ');res.end('fixture\n\n')
   });await new Promise(resolve=>upstream.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>upstream.close(resolve)))
   const dest=`127.0.0.1:${upstream.address().port}`, origin=`https://${dest}`
   const eg=new RestrictedProviderEgress({providerBaseUrl:`${origin}/custom`,networkConnectTimeoutMs:1000,additionalOrigins:[origin],
     meteredResponses:{capture,ca,getProviderKey:()=>'only-upstream'}});await eg.start();t.after(()=>eg.dispose())
   const token=eg.meteredRoute.sandboxToken(), host=`10.0.2.2:${eg.port}`
-  const post=({method='POST',path='/v1/responses',headers={}}={})=>new Promise((resolve,reject)=>{
+  const post=({method='POST',path='/v1/responses',headers={},body='{"fixture":"正文"}'}={})=>new Promise((resolve,reject)=>{
     const req=httpRequest({hostname:'127.0.0.1',port:eg.port,path,method,headers:{host,authorization:`Bearer ${token}`,'content-type':'application/json','x-secret-fixture':'do-not-forward',...headers}},async res=>{
       const chunks=[];for await(const chunk of res)chunks.push(chunk);resolve({status:res.statusCode,body:Buffer.concat(chunks).toString(),headers:res.headers})
-    });req.once('error',reject);req.end('{"fixture":"正文"}')
+    });req.once('error',reject);req.end(body)
   })
   const tunnel=await new Promise((resolve,reject)=>{const sock=connect(eg.port,'127.0.0.1',()=>sock.write(`CONNECT ${dest} HTTP/1.1\r\nHost: ${dest}\r\n\r\n`));sock.once('error',reject);sock.once('data',buf=>{sock.destroy();resolve(buf.toString())})});assert.match(tunnel,/^HTTP\/1.1 403/)
   assert.equal((await post()).status,502);eg.attestation={measured:true};eg._assertOwner=async()=>{}
@@ -91,8 +92,14 @@ test('restricted metered listener: authenticated POST only, durable before TLS u
   const ok=await post();assert.equal(ok.body,'data: fixture\n\n');assert.equal(ok.headers['set-cookie'],undefined)
   assert.equal(requests[0].pending,'PENDING');assert.equal(requests[0].path,'/custom/responses');assert.equal(requests[0].headers.authorization,'Bearer only-upstream');assert.equal(requests[0].headers['x-secret-fixture'],undefined);assert.equal(requests[0].body,'{"fixture":"正文"}')
   const redirect=await post();assert.equal(redirect.status,502);assert.equal(redirect.headers.location,undefined)
-  await mkdir(join(dir,'request-3-1.json'));assert.equal((await post()).status,502);assert.equal(requests.length,2)
-  for(const name of (await readdir(dir)).filter(n=>!n.startsWith('request-3-'))) {const text=await readFile(join(dir,name),'utf8');for(const secret of [token,'only-upstream','正文']) assert.equal(text.includes(secret),false)}
+  const examples=[{input:'正文'},{input:'正文',tools:[{type:'web_search'}]},{input:[{role:'user',content:[{type:'input_image',image_url:'private-fixture'}]}]}]
+  for(const [i,x] of examples.entries()){const body=JSON.stringify({model:'fixture',...x});const reply=await post({body});assert.equal(reply.status,200);assert.equal(JSON.parse(reply.body).id,'r'+(i+3));assert.equal(requests.at(-1).body,body)}
+  await mkdir(join(dir,'request-6-1.json'));assert.equal((await post()).status,502);assert.equal(requests.length,5)
+  for(const [i,reason] of [null,'REQUEST_PROVIDER_TOOL_OR_UNKNOWN','REQUEST_NON_TEXT_INPUT'].entries()){
+    const req=await read('request-'+(i+3)+'-2'), obs=(await read('response-'+req.observation.sourceAttemptId+'-1')).observation
+    assert.equal(obs.reportedUsage.input_tokens,5);if(reason){assert.equal(obs.measuredQuantities,null);assert.ok(obs.reasonCodes.includes(reason))}else assert.equal(obs.measuredQuantities.tokens.INPUT,'3')
+  }
+  for(const name of (await readdir(dir)).filter(n=>!n.startsWith('request-6-'))) {const text=await readFile(join(dir,name),'utf8');for(const secret of [token,'only-upstream','正文','private-fixture']) assert.equal(text.includes(secret),false)}
   await eg.dispose();assert.throws(()=>eg.meteredRoute.sandboxToken(),/CLOSED/)
 })
 
@@ -108,13 +115,7 @@ for (const admitted of [false,true]) test(admitted ? 'admitted V2 profile measur
   await writeFile(join(sourceHome,'auth.json'),JSON.stringify({auth_mode:'apikey',OPENAI_API_KEY:'upstream-fixture-only'}),{mode:0o600})
   const cert=join(root,'cert'),key=join(root,'key');execFileSync('/usr/bin/openssl',['req','-x509','-newkey','rsa:2048','-nodes','-keyout',key,'-out',cert,'-days','1','-subj','/CN=localhost','-addext','subjectAltName=IP:127.0.0.1'],{stdio:'ignore'})
   const calls=[];const upstream=createHttpsServer({key:await readFile(key),cert:await readFile(cert)},async(req,res)=>{
-    // This upstream is a disposable TLS fixture receiving only its own test turn.
-    // Inspect protocol vocabulary, never prompt strings, tool names, credentials or URLs.
-    const parts=[];for await(const bytes of req)parts.push(bytes);const payload=JSON.parse(Buffer.concat(parts));
-    const kinds=list=>[...new Set((Array.isArray(list)?list:[]).map(x=>x?.type??'(implicit)'))];
-    t.diagnostic('fixture-cost-shape '+JSON.stringify({fields:Object.keys(payload),toolKinds:kinds(payload.tools),itemKinds:kinds(payload.input),
-      itemKeys:[...new Set(payload.input.flatMap(Object.keys))],partKinds:kinds(payload.input.flatMap(x=>Array.isArray(x.content)?x.content:[])),
-      textKeys:Object.keys(payload.text??{}),reasoningKeys:Object.keys(payload.reasoning??{}),toolKeys:[...new Set((payload.tools??[]).flatMap(Object.keys))]}));calls.push({path:req.url,auth:req.headers.authorization,pending:(await read(`request-${calls.length+1}-1`)).observation.resolution})
+    for await(const _ of req){};calls.push({path:req.url,auth:req.headers.authorization,pending:(await read(`request-${calls.length+1}-1`)).observation.resolution})
     res.writeHead(200,{'Content-Type':'text/event-stream'});for(const event of [{type:'response.created',response:{id:'resp-1'}},{type:'response.output_item.done',output_index:0,item:{id:'msg-1',type:'message',role:'assistant',content:[{type:'output_text',text:'fixture complete'}]}},{type:'response.completed',response:{id:'resp-1',status:'completed',usage:{input_tokens:10,output_tokens:2,total_tokens:12,input_tokens_details:{cached_tokens:3},output_tokens_details:{reasoning_tokens:1}}}}])res.write(`data: ${JSON.stringify(event)}\n\n`);res.end()
   });await new Promise(resolve=>upstream.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>upstream.close(resolve)))
   const runtime=new NativeExecutionProfileRuntime({profile:{profileId:'metered-test',agentId:'agent',codexBin:process.env.CYF_CODEX_BIN,codexHome:sourceHome,typedInspectionProviderNetwork:'restricted-proxy',typedInspectionProviderId:'fixture',typedInspectionProviderBaseUrl:`https://127.0.0.1:${upstream.address().port}/custom`,typedInspectionNetworkConnectTimeoutMs:2000,typedInspectionCaBundlePath:cert},materializerRoot,stateRoot,nativeToolchain:measureMinimalNativeExecutionToolchain()})
@@ -292,5 +293,7 @@ test('actual upload classifies tool and input structures without interpreting pr
   const body={model:'fixture',input:[{role:'user',content:[{type:'input_text',text:'密'.repeat(70000)+'{"type":"input_image"}'}]}],tools:[{type:'function',parameters:{properties:{type:{enum:['web_search']}}}}]}
   function read(b){const bytes=Buffer.from(typeof b==='string'?b:JSON.stringify(b)),obs=requestCostScope(256);for(let i=0;i<bytes.length;i+=127)obs.push(bytes.subarray(i,i+127));return obs.finish(true)}
   assert.deepEqual(read(body),[]);assert.deepEqual(read({...body,tools:[{type:'web_search'}]}),['REQUEST_PROVIDER_TOOL_OR_UNKNOWN']);assert.ok(read({...body,input:[{role:'user',content:[{type:'input_image',image_url:'private'}]}]}).includes('REQUEST_NON_TEXT_INPUT'))
-  for(const b of [{...body,tools:[{}]},{...body,previous_response_id:'indirect'},{model:'fixture'},'{"input":"x","model":"x","tools":[],"tools":[]}'])assert.ok(read(b).includes('REQUEST_COST_SCOPE_UNKNOWN'))
+  const ns=tools=>({...body,tools:[{tools,type:'namespace',name:'local'}]});assert.deepEqual(read(ns([{type:'function'}])),[])
+  assert.ok(read(ns([{type:'namespace',tools:[{type:'web_search'}]}])).includes('REQUEST_PROVIDER_TOOL_OR_UNKNOWN'))
+  for(const b of [{...body,tools:[{type:'namespace'}]},{...body,tools:[{tools:[],type:'function'}]},{...body,tools:[{}]},{...body,previous_response_id:'indirect'},{model:'fixture'},'{"input":"x","model":"x","tools":[],"tools":[]}'])assert.ok(read(b).includes('REQUEST_COST_SCOPE_UNKNOWN'))
 })

@@ -18,10 +18,11 @@ export function requestCostScope(budget) {
       if(key==='include'&&kind==='array')return 'includes'
       if(key==='client_metadata'&&kind==='object')return 'skip'
       if(harmlessScalar.has(key)&&!['object','array'].includes(kind))return 'skip'
-    } else if(parent==='tools'&&kind==='object')return 'tool'
-    else if(parent==='tool'){
-      if(key==='type'&&kind==='string')return 'toolType'
-      return 'skip' // sibling fields cannot identify the tool class; its type is mandatory
+    } else if(parent==='tools'&&kind==='object')return {tool:true,namespace:false}
+    else if(parent.tool){
+      if(key==='type'&&kind==='string')return {typeOf:parent}
+      if(key==='tools'&&kind==='array')return 'tools' // validate every nested declaration, regardless of member order
+      if(['name','description'].includes(key)&&kind==='string'||key==='strict'&&kind==='atom'||['parameters','format'].includes(key)&&kind==='object')return 'skip'
     } else if(parent==='input'&&kind==='object')return 'item'
     else if(parent==='item'){
       if(key==='type'&&kind==='string')return 'itemType'
@@ -39,16 +40,17 @@ export function requestCostScope(budget) {
     unknown();return 'skip'
   }
   const enums=new Set(['choice','toolType','itemType','partType','include'])
-  const inspect={value,read:role=>enums.has(role),scalar(role,v){
+  const inspect={value,read:role=>!!role?.typeOf||enums.has(role),scalar(role,v){
     if(role==='choice'&&!['auto','none','required'].includes(v))unknown()
-    if(role==='toolType'&&!['custom','function'].includes(v))flags.add('REQUEST_PROVIDER_TOOL_OR_UNKNOWN')
+    if(role?.typeOf){role.typeOf.namespace=v==='namespace';if(!['namespace','custom','function'].includes(v))flags.add('REQUEST_PROVIDER_TOOL_OR_UNKNOWN')}
     if(role==='itemType'&&v!=='message')unknown()
     if(role==='partType'&&!['input_text','output_text'].includes(v))flags.add('REQUEST_NON_TEXT_INPUT')
     if(role==='include'&&v!=='reasoning.encrypted_content')unknown()
   },close(role,keys){
     if(role==='request'&&(!keys.has('input')||!keys.has('model')))unknown()
     if(role==='item'&&(!keys.has('role')||!keys.has('content')))unknown()
-    if((role==='tool'||role==='part')&&!keys.has('type'))unknown()
+    if(role?.tool&&(!keys.has('type')||role.namespace!==keys.has('tools')))unknown()
+    if(role==='part'&&!keys.has('type'))unknown()
   }}
   parser=projectedJson(false,budget,inspect)
   return {push(chunk){if(!broken)try{parser.push(decoder.decode(chunk,{stream:true}))}catch{broken=true;parser=null}},finish(ended){
