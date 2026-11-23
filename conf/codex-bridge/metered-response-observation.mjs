@@ -2,7 +2,22 @@
 // allowlisted projection escapes this object; a missing category is not zero.
 import { skillId } from './skill-executor.mjs'
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
-const parse = text => JSON.parse(text, (_key, value, context) => typeof value === 'number' && !/^(0|[1-9][0-9]*)$/.test(context?.source ?? '') ? null : value)
+// JSON.parse validates grammar and preserves numeric lexemes in the reviver, but
+// collapses duplicate members. Check decoded member names per object before use.
+function parse(text) {
+  const value = JSON.parse(text, (_key, value, context) => typeof value === 'number' && !/^(0|[1-9][0-9]*)$/.test(context?.source ?? '') ? null : value)
+  const scopes = []
+  for (const [token] of text.matchAll(/"(?:[^"\\]|\\[\s\S])*"[ \t\r\n]*:?|[{}]/g)) {
+    if (token === '{') scopes.push(new Set())
+    else if (token === '}') scopes.pop()
+    else if (token.endsWith(':')) {
+      const key = JSON.parse(token.slice(0, -1)), keys = scopes.at(-1)
+      if (keys.has(key)) throw new Error('AMBIGUOUS_RESPONSE_MEMBER')
+      keys.add(key)
+    }
+  }
+  return value
+}
 const count = value => Number.isSafeInteger(value) && value >= 0
 const fields = {input_tokens:null,output_tokens:null,total_tokens:null,input_tokens_details:['cached_tokens'],output_tokens_details:['reasoning_tokens']}
 function quantities(raw, supported) {

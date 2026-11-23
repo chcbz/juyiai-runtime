@@ -255,3 +255,14 @@ test('dispatch group commits to launch configuration, not an individual command 
   const {read}=await openRoot(t,{dispatchGroup:group});const plan=(await read('plan')).observation
   assert.deepEqual(plan.dispatchGroup,group);assert.equal(plan.executionConfigSha256,'c'.repeat(64));assert.equal(JSON.stringify(plan).includes('/private'),false)
 })
+
+test('ambiguous JSON or SSE members never produce usage even when the last value looks valid',()=>{
+  const valid='{"id":"r1","status":"completed","usage":{"input_tokens":5,"output_tokens":4,"total_tokens":9,"input_tokens_details":{"cached_tokens":2},"output_tokens_details":{"reasoning_tokens":1}}}'
+  for(const type of ['application/json','text/event-stream']) {
+    const read=raw=>{const obs=observeResponse(type,200,4096,true);const wire=type==='application/json'?raw:`data: {"type":"response.completed","response":${raw}}\n\n`;for(const b of Buffer.from(wire))obs.push(Buffer.from([b]));return obs.finish(true)}
+    for(const raw of [valid.replace('"id":','"id":"other","id":'),valid.replace('"input_tokens":','"input_\\u0074okens":0,"input_tokens":'),valid.replace('"cached_tokens":','"cached_tokens":0,"cached_tokens":')]) {
+      const result=read(raw);assert.equal(result.measuredQuantities,null);assert.equal(result.reportedUsage,null);assert.ok(result.reasonCodes.includes('RESPONSE_STREAM_INVALID'))
+    }
+    const control=read(valid.replace('"id":','"irrelevant":[{"id":"{}\\\"id\\\":"},{"id":"ok"}],"id":'));assert.equal(control.measuredQuantities.tokens.INPUT,'3')
+  }
+})
