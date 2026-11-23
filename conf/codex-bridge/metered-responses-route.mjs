@@ -13,13 +13,13 @@ const deny = (res, status) => {
 }
 const one = (req, name) => req.headersDistinct[name]?.length === 1 ? req.headersDistinct[name][0] : null
 export class MeteredResponsesRoute {
-  #temporary = randomBytes(32).toString('hex'); #capture; #upstream; #key; #ca
-  constructor(baseUrl, { capture, getProviderKey, ca }) {
+  #temporary = randomBytes(32).toString('hex'); #capture; #localArtifactCall; #upstream; #key; #ca
+  constructor(baseUrl, { capture, getProviderKey, ca, localArtifactCall }) {
     const url = new URL(baseUrl)
     if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash ||
         typeof capture?.dispatch !== 'function' || typeof capture.stopAdmission !== 'function' || typeof getProviderKey !== 'function') throw Error('METERED_ROUTE_CONFIG_INVALID')
     url.pathname = `${url.pathname.replace(/\/$/, '')}/responses`
-    this.#capture = capture; this.#upstream = url; this.#key = getProviderKey; this.#ca = ca
+    this.#localArtifactCall=localArtifactCall; this.#capture = capture; this.#upstream = url; this.#key = getProviderKey; this.#ca = ca
   }
   // Opaque token is only for the isolated HOME of this run, not metrics or argv.
   sandboxToken() { if (!this.#temporary) throw Error('METERED_ROUTE_CLOSED'); return this.#temporary }
@@ -37,7 +37,7 @@ export class MeteredResponsesRoute {
       const key = this.#key()
       if (typeof key !== 'string' || !key || /[^\x21-\x7e]/.test(key) || key === this.#temporary) throw Error('METERED_ROUTE_CREDENTIAL_INVALID')
       await this.#capture.dispatch(async (_request, finish) => {
-        const scope=requestCostScope(req.readableHighWaterMark);let observer, ended=false, uploaded=false
+        const scope=requestCostScope(req.readableHighWaterMark,this.#localArtifactCall);let observer, ended=false, uploaded=false
         try {
           active()
           const upstream = httpsRequest(this.#upstream, { method:'POST', agent:false, signal:aborted.signal, ca:this.#ca,

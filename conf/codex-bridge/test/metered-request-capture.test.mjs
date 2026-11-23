@@ -113,22 +113,39 @@ import { writeFile } from 'node:fs/promises'
 import { NativeExecutionProfileRuntime } from '../native-execution-runtime.mjs'
 import { measureMinimalNativeExecutionToolchain } from '../native-execution-profile.mjs'
 
-for (const admitted of [false,true]) test(admitted ? 'admitted V2 profile measures the CLI, persists before real TLS and retains suspend watermark without false coverage' : 'real metered Codex native turn uses sealed temporary HOME, measured namespace and one durable request at the TLS fixture',
+for (const admitted of [false,true,'artifact']) test(admitted==='artifact'?'real metered native execution ties its second request to the successful result proposal':admitted ? 'admitted V2 profile measures the CLI, persists before real TLS and retains suspend watermark without false coverage' : 'real metered Codex native turn uses sealed temporary HOME, measured namespace and one durable request at the TLS fixture',
   {skip:process.env.CYF_NATIVE_EXECUTION_ISOLATION_PROBE !== '1',timeout:60000}, async t=>{
   const {capture,read,store}=await openRoot(t,{engineVersion:'codex-cli-0.167.0',adapterVersion:'RESPONSES_TEXT_TOKENS_V1',coveragePolicyVersion:'TEXT_MODEL_ONLY_V1'},admitted), root=await mkdtemp(join(tmpdir(),'mrt-'));t.after(()=>rm(root,{recursive:true,force:true}))
   const privateDir=async name=>{const path=join(root,name);await mkdir(path,{mode:0o700});return path}
   const sourceHome=await privateDir('home'),stateRoot=await privateDir('state'),materializerRoot=await privateDir('materials')
   await writeFile(join(sourceHome,'auth.json'),JSON.stringify({auth_mode:'apikey',OPENAI_API_KEY:'upstream-fixture-only'}),{mode:0o600})
   const cert=join(root,'cert'),key=join(root,'key');execFileSync('/usr/bin/openssl',['req','-x509','-newkey','rsa:2048','-nodes','-keyout',key,'-out',cert,'-days','1','-subj','/CN=localhost','-addext','subjectAltName=IP:127.0.0.1'],{stdio:'ignore'})
-  const calls=[];const upstream=createHttpsServer({key:await readFile(key),cert:await readFile(cert)},async(req,res)=>{
-    for await(const _ of req){};calls.push({path:req.url,auth:req.headers.authorization,pending:(await read(`request-${calls.length+1}-1`)).observation.resolution})
-    res.writeHead(200,{'Content-Type':'text/event-stream'});for(const event of [{type:'response.created',response:{id:'resp-1'}},{type:'response.output_item.done',output_index:0,item:{id:'msg-1',type:'message',role:'assistant',content:[{type:'output_text',text:'fixture complete'}]}},{type:'response.completed',response:{id:'resp-1',status:'completed',usage:{input_tokens:10,output_tokens:2,total_tokens:12,input_tokens_details:{cached_tokens:3},output_tokens_details:{reasoning_tokens:1}}}}])res.write(`data: ${JSON.stringify(event)}\n\n`);res.end()
+  let actualRead=read;const calls=[];const upstream=createHttpsServer({key:await readFile(key),cert:await readFile(cert)},async(req,res)=>{
+    const chunks=[];for await(const c of req)chunks.push(c);const body=JSON.parse(Buffer.concat(chunks));calls.push({path:req.url,auth:req.headers.authorization,pending:(await actualRead(`request-${calls.length+1}-1`)).observation.resolution})
+    const firstTool=admitted==='artifact'&&calls.length===1, id='resp-'+calls.length
+    const item=firstTool?{id:'fc_1',type:'function_call',call_id:'call_local_1',name:'result_propose',arguments:JSON.stringify({summary:'fixture proposal',artifactRefs:[],data:null})}:
+      {id:'msg-1',type:'message',role:'assistant',content:[{type:'output_text',text:'fixture complete'}]}
+    if(admitted==='artifact'&&calls.length===2)calls[1].history=body.input.filter(x=>x.type?.startsWith('function_call')).map(x=>[x.type,x.call_id])
+    res.writeHead(200,{'Content-Type':'text/event-stream'});for(const event of [{type:'response.created',response:{id}},{type:'response.output_item.done',output_index:0,item},{type:'response.completed',response:{id,status:'completed',usage:{input_tokens:10,output_tokens:2,total_tokens:12,input_tokens_details:{cached_tokens:3},output_tokens_details:{reasoning_tokens:1}}}}])res.write(`data: ${JSON.stringify(event)}\n\n`);res.end()
   });await new Promise(resolve=>upstream.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>upstream.close(resolve)))
   const runtime=new NativeExecutionProfileRuntime({profile:{profileId:'metered-test',agentId:'agent',codexBin:process.env.CYF_CODEX_BIN,codexHome:sourceHome,typedInspectionProviderNetwork:'restricted-proxy',typedInspectionProviderId:'fixture',typedInspectionProviderBaseUrl:`https://127.0.0.1:${upstream.address().port}/custom`,typedInspectionNetworkConnectTimeoutMs:2000,typedInspectionCaBundlePath:cert},materializerRoot,stateRoot,nativeToolchain:measureMinimalNativeExecutionToolchain()})
   const spawn=runtime._spawnAdapter.bind(runtime);let inspected=false
   runtime._spawnAdapter=async args=>{const staged=JSON.parse(await readFile(args.engineState.authPath));assert.match(staged.OPENAI_API_KEY,/^[a-f0-9]{64}$/);assert.notEqual(staged.OPENAI_API_KEY,'upstream-fixture-only');inspected=true;return spawn(args)}
   const binding={schemaVersion:1,requestKey:'metered-request',authorizationId:'exec1',manifestDigest:'sha256:'+store.command.snapshotDigest,requestId:'req-1',turnId:'turn-1',inputPolicyDigest:'policy-1'}
   try {
+    if(admitted==='artifact'){
+      const command={...store.command,scope:{kind:'TASK'},commandId:'cmd',messageId:'msg',instruction:'fixture',parameters:{},inputRefs:[],outputs:{mimeTypes:[],artifactsRequired:false,multiple:false,dataSchema:null}}
+      const actual=new SkillExecutionStore({rootDirectory:root,scope:{agentId:'agent'},command})
+      // Read this real execution's source records at the upstream, not the first harness's directory.
+      actualRead=async key=>JSON.parse(await readFile(join(actual.directory,`usage-capture-${skillDigest(['CAPTURE_V2','exec1','run1'])}`,key+'.json')))
+      const {runNativeExecution}=await import('../native-execution.mjs')
+      const result=await runNativeExecution({command,inputs:[],entries:[],store:actual,checkActive(){},profileRuntime:runtime,model:'gpt-5.4',effort:'medium'})
+      assert.equal(result.executionId,'exec1');assert.equal(actual.read('native-selection').revision,'1');assert.equal(calls.length,2)
+      assert.deepEqual(calls.map(x=>x.pending),['PENDING','PENDING']);assert.deepEqual(calls[1].history,[['function_call','call_local_1'],['function_call_output','call_local_1']])
+      for(const seq of [1,2]){const linked=await actualRead(`request-${seq}-2`),o=(await actualRead(`response-${linked.observation.sourceAttemptId}-1`)).observation
+        assert.deepEqual(o.reasonCodes,['BILLING_IDENTITY_UNKNOWN','UNSUPPORTED_COST_SOURCE']);assert.equal(o.reportedUsage.input_tokens,10);assert.equal(o.measuredQuantities,null)}
+      await recoverStoppedMeteredRoot(actual,()=>assert.equal(runtime.activeAdapters.size,0));assert.equal((await actualRead('source-final-1')).observation.requestCount,'2');return
+    }
     const adapter=await runtime.openNativeExecutionAdapter(join(store.directory,'inputs'),binding.requestKey,binding,{scratchDirectory:join(store.directory,'scratch'),draftsDirectory:join(store.directory,'drafts'),nativeExecution:{executionId:'exec1',tools:[],checkActive(){},callTool(){}},...(admitted?{meteredAdmission:{store,model:'gpt-5.4',effort:'medium',instructionsSha256:skillDigest('fixture launch policy')}}:{meteredCapture:capture})})
     assert.ok(inspected);assert.ok(adapter.readback.credentialIsolation.bootstrapCredentialRemoved);assert.ok(adapter.nativeExecutionIsolation.network.nftDefaultDropReadback)
     const policy={cwd:'/execution',model:'gpt-5.4',effort:'medium',developerInstructions:'fixture launch policy'},thread=await adapter.startOrResumeThread(null,policy)
@@ -302,4 +319,12 @@ test('actual upload classifies tool and input structures without interpreting pr
   const ns=tools=>({...body,tools:[{tools,type:'namespace',name:'local'}]});assert.deepEqual(read(ns([{type:'function'}])),[])
   assert.ok(read(ns([{type:'namespace',tools:[{type:'web_search'}]}])).includes('REQUEST_PROVIDER_TOOL_OR_UNKNOWN'))
   for(const b of [{...body,tools:[{type:'namespace'}]},{...body,tools:[{tools:[],type:'function'}]},{...body,tools:[{}]},{...body,previous_response_id:'indirect'},{model:'fixture'},'{"input":"x","model":"x","tools":[],"tools":[]}'])assert.ok(read(b).includes('REQUEST_COST_SCOPE_UNKNOWN'))
+})
+
+test('local tool history requires this execution’s successful call; a matching id cannot hide media',()=>{
+  const check=(item,lookup)=>{const obs=requestCostScope(512,lookup);obs.push(Buffer.from(JSON.stringify({model:'fixture',input:[item]})));return obs.finish(true)}
+  const lookup=id=>id==='x'?'result_propose':undefined, call={type:'function_call',name:'result_propose',arguments:'{}',call_id:'x'},out={type:'function_call_output',call_id:'x',output:'text'}
+  assert.deepEqual(check(call,lookup),[]);assert.deepEqual(check(out,lookup),[])
+  for(const [x,f] of [[call,null],[out,null],[{...call,name:'private'},lookup],[{...out,call_id:'foreign'},lookup]])assert.ok(check(x,f).includes('REQUEST_TOOL_HISTORY_UNBOUND'))
+  assert.ok(check({...out,output:[{type:'input_image',image_url:'private'}]},lookup).includes('REQUEST_NON_TEXT_INPUT'))
 })

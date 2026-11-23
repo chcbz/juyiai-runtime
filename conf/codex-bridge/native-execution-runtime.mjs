@@ -113,7 +113,7 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
         const key = readModelAuthFile(this.profile.codexHome).auth.OPENAI_API_KEY
         const ca = readFileSync(this.providerCaTrust.path)
         if (`sha256:${createHash('sha256').update(ca).digest('hex')}` !== this.providerCaTrust.sha256) fail('METERED_PROVIDER_CA_CHANGED')
-        egress = this.egressFactory({ ...egressOptions, meteredResponses: { capture: slot.meteredCapture, getProviderKey: () => key, ca } })
+        egress = this.egressFactory({ ...egressOptions, meteredResponses: { capture: slot.meteredCapture, localArtifactCall:nativeExecution.localArtifactCall, getProviderKey: () => key, ca } })
         await egress.start(); checkActive()
       }
       phase('request-state-and-skill-view')

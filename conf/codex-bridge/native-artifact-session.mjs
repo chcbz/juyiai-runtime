@@ -33,7 +33,19 @@ export class NativeArtifactSession {
   }
   policy() {
     const tools = nativeArtifactOutputTools(this.command.outputs)
-    return { executionId: this.command.executionId, tools, checkActive: this.checkActive, callTool: ctx => this.callTool(ctx) }
+    if(this.command.usageMode!=='RESPONSE_V2')return {executionId:this.command.executionId,tools,checkActive:this.checkActive,callTool:ctx=>this.callTool(ctx)}
+    // Execution/turn checks and durable DONE/selection belong to callTool. Publish only
+    // after it succeeds. No arguments/results, cross-execution cache or new fsync.
+    const observed=new Map()
+    return {executionId:this.command.executionId,tools,checkActive:this.checkActive,
+      localArtifactCall:id=>observed.get(id),callTool:async ctx=>{
+        const result=await this.callTool(ctx)
+        if(skillId(ctx.callId)){
+          if(observed.size>=256&&!observed.has(ctx.callId))observed.delete(observed.keys().next().value)
+          observed.set(ctx.callId,ctx.tool)
+        }
+        return result
+      }}
   }
   bindTurn({ threadId, turnId }) {
     this.checkActive()

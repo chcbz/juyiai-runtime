@@ -3,7 +3,7 @@
 // tool invocations. Their actual execution still needs its own dispatch/source policy.
 import { projectedJson } from './metered-response-json.mjs'
 const harmlessScalar=new Set(['model','instructions','stream','store','parallel_tool_calls','max_output_tokens','prompt_cache_key','service_tier','temperature','top_p','truncation'])
-export function requestCostScope(budget) {
+export function requestCostScope(budget,localArtifactCall) {
   const flags=new Set(),decoder=new TextDecoder('utf-8',{fatal:true});let parser,broken=false
   const unknown=()=>flags.add('REQUEST_COST_SCOPE_UNKNOWN')
   function value(parent,key,kind){
@@ -23,12 +23,11 @@ export function requestCostScope(budget) {
       if(key==='type'&&kind==='string')return {typeOf:parent}
       if(key==='tools'&&kind==='array')return 'tools' // validate every nested declaration, regardless of member order
       if(['name','description'].includes(key)&&kind==='string'||key==='strict'&&kind==='atom'||['parameters','format'].includes(key)&&kind==='object')return 'skip'
-    } else if(parent==='input'&&kind==='object')return 'item'
-    else if(parent==='item'){
-      if(key==='type'&&kind==='string')return 'itemType'
-      if(key==='content'&&kind==='string')return 'skip'
-      if(key==='content'&&kind==='array')return 'content'
-      if(['role','id','status','phase'].includes(key)&&kind==='string')return 'skip'
+    } else if(parent==='input'&&kind==='object')return {item:true}
+    else if(parent.item){
+      if(['type','call_id','name'].includes(key)&&kind==='string')return {itemField:key,itemOwner:parent}
+      if(['content','output'].includes(key)&&kind==='array')return 'content'
+      if(['role','id','status','phase','arguments','output','content'].includes(key)&&kind==='string')return 'skip'
     } else if(parent==='content'&&kind==='object')return 'part'
     else if(parent==='part'){
       if(key==='type'&&kind==='string')return 'partType'
@@ -39,16 +38,25 @@ export function requestCostScope(budget) {
     else if(parent==='includes'&&kind==='string')return 'include'
     unknown();return 'skip'
   }
-  const enums=new Set(['choice','itemType','partType','include'])
-  const inspect={value,read:role=>!!role?.typeOf||enums.has(role),scalar(role,v){
+  const enums=new Set(['choice','partType','include'])
+  const inspect={value,read:role=>!!role?.typeOf||!!role?.itemOwner||enums.has(role),scalar(role,v){
     if(role==='choice'&&!['auto','none','required'].includes(v))unknown()
     if(role?.typeOf){role.typeOf.namespace=v==='namespace';if(!['namespace','custom','function'].includes(v))flags.add('REQUEST_PROVIDER_TOOL_OR_UNKNOWN')}
-    if(role==='itemType'&&v!=='message')unknown()
+    if(role?.itemOwner)role.itemOwner[role.itemField]=v
     if(role==='partType'&&!['input_text','output_text'].includes(v))flags.add('REQUEST_NON_TEXT_INPUT')
     if(role==='include'&&v!=='reasoning.encrypted_content')unknown()
   },close(role,keys){
     if(role==='request'&&(!keys.has('input')||!keys.has('model')))unknown()
-    if(role==='item'&&(!keys.has('role')||!keys.has('content')))unknown()
+    if(role?.item){
+      const allow=(...fields)=>[...keys].every(k=>fields.includes(k))
+      if(role.type==null||role.type==='message'){
+        if(!allow('type','id','role','status','phase','content')||!keys.has('role')||!keys.has('content'))unknown()
+      } else if(role.type==='function_call'||role.type==='function_call_output'){
+        const call=role.type==='function_call',name=role.call_id&&localArtifactCall?.(role.call_id)
+        if(!name||(call?name!==role.name||!keys.has('arguments')||!allow('type','id','call_id','name','arguments','status'):
+          !keys.has('output')||!allow('type','id','call_id','output','status')))flags.add('REQUEST_TOOL_HISTORY_UNBOUND')
+      } else unknown()
+    }
     if(role?.tool&&(!keys.has('type')||role.namespace!==keys.has('tools')))unknown()
     if(role==='part'&&!keys.has('type'))unknown()
   }}
