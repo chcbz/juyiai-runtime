@@ -2,6 +2,7 @@
 // body logs or automatic retries. Coverage remains pending until source closure.
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { request as httpsRequest } from 'node:https'
+import { requestCostScope } from './metered-request-scope.mjs'
 import { observeResponse } from './metered-response-observation.mjs'
 import { pipeline } from 'node:stream/promises'
 
@@ -36,7 +37,7 @@ export class MeteredResponsesRoute {
       const key = this.#key()
       if (typeof key !== 'string' || !key || /[^\x21-\x7e]/.test(key) || key === this.#temporary) throw Error('METERED_ROUTE_CREDENTIAL_INVALID')
       await this.#capture.dispatch(async (_request, finish) => {
-        let observer, ended=false
+        const scope=requestCostScope(req.readableHighWaterMark);let observer, ended=false, uploaded=false
         try {
           active()
           const upstream = httpsRequest(this.#upstream, { method:'POST', agent:false, signal:aborted.signal, ca:this.#ca,
@@ -46,7 +47,7 @@ export class MeteredResponsesRoute {
           const response = new Promise((resolve,reject)=>{upstream.once('response',resolve);upstream.once('error',reject);
             upstream.once('upgrade',(_res,socket)=>{socket.destroy();reject(Error('METERED_UPGRADE_REJECTED'))})})
           // Both streams use native backpressure. Do not finish uploading before reading a possible early response.
-          await Promise.all([pipeline(req,upstream),response.then(async incoming=>{
+          await Promise.all([pipeline(req,async function* (source){for await(const bytes of source){scope.push(bytes);yield bytes}uploaded=true},upstream),response.then(async incoming=>{
             const status=incoming.statusCode
             if ((status >= 300 && status < 400) || incoming.headers['content-encoding'] && incoming.headers['content-encoding'] !== 'identity') {
               incoming.destroy(); deny(res,502); return
@@ -58,6 +59,8 @@ export class MeteredResponsesRoute {
         } finally {
           // A lost observation must not trigger a model retry after a completed business stream.
           const evidence=observer?.finish(ended) ?? {providerResponseId:null,reportedUsage:null,measuredQuantities:null,actualBillingIdentity:null,reasonCodes:['NO_RESPONSE_EVIDENCE']}
+          const reasons=scope.finish(uploaded)
+          if(reasons.length){evidence.measuredQuantities=null;evidence.reasonCodes.push(...reasons)}
           await finish(evidence)
         }
       })

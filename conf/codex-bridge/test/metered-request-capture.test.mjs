@@ -280,3 +280,11 @@ test('large JSON and multiline SSE discard output values and still validate synt
     assert.ok(!JSON.stringify(result).includes('密'))
   }
 })
+
+import { requestCostScope } from '../metered-request-scope.mjs'
+test('actual upload classifies tool and input structures without interpreting prompt text as control',()=>{
+  const body={model:'fixture',input:[{role:'user',content:[{type:'input_text',text:'密'.repeat(70000)+'{"type":"input_image"}'}]}],tools:[{type:'function',parameters:{properties:{type:{enum:['web_search']}}}}]}
+  function read(b){const bytes=Buffer.from(typeof b==='string'?b:JSON.stringify(b)),obs=requestCostScope(256);for(let i=0;i<bytes.length;i+=127)obs.push(bytes.subarray(i,i+127));return obs.finish(true)}
+  assert.deepEqual(read(body),[]);assert.deepEqual(read({...body,tools:[{type:'web_search'}]}),['REQUEST_PROVIDER_TOOL_OR_UNKNOWN']);assert.ok(read({...body,input:[{role:'user',content:[{type:'input_image',image_url:'private'}]}]}).includes('REQUEST_NON_TEXT_INPUT'))
+  for(const b of [{...body,tools:[{}]},{...body,previous_response_id:'indirect'},{model:'fixture'},'{"input":"x","model":"x","tools":[],"tools":[]}'])assert.ok(read(b).includes('REQUEST_COST_SCOPE_UNKNOWN'))
+})
