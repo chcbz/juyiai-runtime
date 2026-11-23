@@ -34,12 +34,12 @@ export const nativeExecutionProfile = profile => {
 
 export { nativeDispatchGroup } from './native-execution-profile.mjs'
 
-const nativeMeteringRoute = (profile, schema) => {
+const nativeMeteringRoute = (profile, schema, localArtifactOnly) => {
   const channelNamespace = skillDigest(['METERED_PROVIDER_NAMESPACE_V1', profile.typedInspectionProviderId, new URL(profile.typedInspectionProviderBaseUrl).href.replace(/\/$/, '')])
   const engineVersion = /^\d+\.\d+\.\d+$/.test(schema.cliVersion) ? `codex-cli-${schema.cliVersion}` : 'unknown'
-  // Layout covers local tools, skills and allowed network routes; that alone does not attest
-  // every provider-side cost category. Never promote a live run to fixture text-only policy.
-  const coveragePolicyVersion = 'NATIVE_EXECUTION_UNVERIFIED_V1'
+  // Local tool dispatch is known here; actual uploaded shapes and response usage are checked per request.
+  const coveragePolicyVersion = localArtifactOnly === true && engineVersion === 'codex-cli-0.167.0'
+    && new URL(profile.typedInspectionProviderBaseUrl).protocol === 'https:' ? 'NATIVE_LOCAL_ARTIFACT_TEXT_V1' : 'NATIVE_EXECUTION_UNVERIFIED_V1'
   return { channelNamespace, engineVersion, coveragePolicyVersion }
 }
 
@@ -49,13 +49,13 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
   }
   // Only internal dispatch preparation supplies the selected tools/skills and instruction commitment.
   // The executable, model, effort, route, toolchain and loaded model catalogue are profile-owned.
-  prospectiveNativeGroup({skills,skillConfiguration,tools,networkAccess,toolPolicyRef,instructionsSha256}) {
+  prospectiveNativeGroup({skills,skillConfiguration,tools,networkAccess,toolPolicyRef,instructionsSha256,localArtifactOnly}) {
     const profile = this.profile, schema = this.nativeBinaryMeasurement
     if (!this.nativeExecutionDeclaration() || !this.nativeToolchain || profile.typedInspectionProviderNetwork !== 'restricted-proxy'
         || !profile.typedInspectionProviderId || !profile.typedInspectionProviderBaseUrl || !isCurrentAppServerMeasurement(profile,schema)) return null
     return measureProspectiveNativeGroup({skills,skillConfiguration,tools,networkAccess,stateRoot:this.stateRoot,
       toolchain:this.nativeToolchain,modelCatalogSha256:this.nativeModelCatalog?.sha256 ?? null}, {
-      ...nativeMeteringRoute(profile,schema), binarySha256:schema.binarySha256, model:profile.chatModel || profile.codexModel,
+      ...nativeMeteringRoute(profile,schema,localArtifactOnly), binarySha256:schema.binarySha256, model:profile.chatModel || profile.codexModel,
       effort:profile.chatReasoningEffort, toolPolicyRef, instructionsSha256 })
   }
   openNativeExecutionAdapter(inputDirectory, requestKey, requestBinding, { scratchDirectory, draftsDirectory, skills = [], skillConfiguration = [], nativeExecution, meteredCapture = null, meteredAdmission = null, requireExistingState = false } = {}) {
@@ -99,7 +99,9 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
         // A fresh epoch must not take over unknown prior requests or send again during recovery.
         if (requireExistingState) fail('SKILL_RESULT_UNKNOWN')
         const { store, model, effort } = slot.meteredAdmission
-        const { channelNamespace, engineVersion, coveragePolicyVersion } = nativeMeteringRoute(this.profile, schema)
+        const { channelNamespace, engineVersion, coveragePolicyVersion } = nativeMeteringRoute(this.profile, schema, slot.meteredAdmission.localArtifactOnly &&
+          !layout.binding.networkAccess && !layout.binding.networkOrigins.length && !layout.binding.webSearch &&
+          !layout.binding.skills.length && !layout.binding.skillConfiguration.length && typeof nativeExecution.localArtifactCall === 'function')
         try {
           slot.meteredCapture = await startMeteredRoot(store, { executionId:binding.authorizationId, runId:store.command.runId,
             executionConfigSha256:skillDigest([layout.digest,store.commandDigest,engineVersion,channelNamespace,model,effort]),

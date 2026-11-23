@@ -28,7 +28,7 @@ export async function recoverStoppedMeteredRoot(store, assertStopped, clock=Date
   const plan=check(await read('plan'),'PLAN',[],1),sourceId=plan.observation.rootSourceId,epoch='0'
   const source=check(await read('source-0'),'SOURCE',[sourceId,epoch],1),so=source.observation
   yes(skillId(sourceId)&&so.sourceId===sourceId&&so.epoch===epoch&&so.parentSourceRecordId===null&&so.previousEpochSourceRecordId===null)
-  if(plan.observation.coveragePolicyVersion!=='TEXT_MODEL_ONLY_V1'||plan.observation.engineVersion!=='codex-cli-0.167.0'||so.adapterVersion!=='RESPONSES_TEXT_TOKENS_V1'||so.sourceKind!=='METERED_HTTP_RESPONSES_V1')reasons.add('UNSUPPORTED_COST_SOURCE')
+  if(!['TEXT_MODEL_ONLY_V1','NATIVE_LOCAL_ARTIFACT_TEXT_V1'].includes(plan.observation.coveragePolicyVersion)||plan.observation.engineVersion!=='codex-cli-0.167.0'||so.adapterVersion!=='RESPONSES_TEXT_TOKENS_V1'||so.sourceKind!=='METERED_HTTP_RESPONSES_V1')reasons.add('UNSUPPORTED_COST_SOURCE')
   latest.set(source.recordId,tuple(source))
   let high=0n
   for(const name of names){let m
@@ -42,6 +42,7 @@ export async function recoverStoppedMeteredRoot(store, assertStopped, clock=Date
   }
   if(names.has('producer-stopped.json')){const stop=await read('producer-stopped');yes(Object.entries(binding).every(([k,v])=>stop[k]===v)&&dec(stop.reservedHigh)&&BigInt(stop.reservedHigh)>=high&&typeof stop.writeFailed==='boolean');high=BigInt(stop.reservedHigh);if(stop.writeFailed)reasons.add('SOURCE_WRITE_INCOMPLETE')}
   else reasons.add('PRODUCER_WATERMARK_UNCONFIRMED')
+  if(high===0n && plan.observation.coveragePolicyVersion==='NATIVE_LOCAL_ARTIFACT_TEXT_V1')reasons.add('USAGE_INCOMPLETE')
   if(high!==BigInt(reservations.size)||high!==BigInt(requests.size))reasons.add('SEQUENCE_GAP')
   for(const [seq,rev] of requests){yes(reservations.has(seq));const identity=[sourceId,epoch,seq],base=check(await read(`request-${seq}-1`),'REQUEST',identity,1),b=base.observation
     yes(b.sourceId===sourceId&&b.epoch===epoch&&b.sequence===seq&&skillId(b.attemptId)&&b.resolution==='PENDING'&&b.sourceAttemptId===null)

@@ -143,8 +143,8 @@ for (const admitted of [false,true,'artifact']) test(admitted==='artifact'?'real
       assert.equal(result.executionId,'exec1');assert.equal(actual.read('native-selection').revision,'1');assert.equal(calls.length,2)
       assert.deepEqual(calls.map(x=>x.pending),['PENDING','PENDING']);assert.deepEqual(calls[1].history,[['function_call','call_local_1'],['function_call_output','call_local_1']])
       for(const seq of [1,2]){const linked=await actualRead(`request-${seq}-2`),o=(await actualRead(`response-${linked.observation.sourceAttemptId}-1`)).observation
-        assert.deepEqual(o.reasonCodes,['BILLING_IDENTITY_UNKNOWN','UNSUPPORTED_COST_SOURCE']);assert.equal(o.reportedUsage.input_tokens,10);assert.equal(o.measuredQuantities,null)}
-      await recoverStoppedMeteredRoot(actual,()=>assert.equal(runtime.activeAdapters.size,0));assert.equal((await actualRead('source-final-1')).observation.requestCount,'2');return
+        assert.deepEqual(o.reasonCodes,['BILLING_IDENTITY_UNKNOWN']);assert.equal(o.actualBillingIdentity,null);assert.deepEqual(o.measuredQuantities.tokens,{INPUT:'7',CACHED_INPUT:'3',OUTPUT:'2'})}
+      await recoverStoppedMeteredRoot(actual,()=>assert.equal(runtime.activeAdapters.size,0));assert.equal((await actualRead('plan')).observation.coveragePolicyVersion,'NATIVE_LOCAL_ARTIFACT_TEXT_V1');assert.equal((await actualRead('source-final-1')).observation.requestCount,'2');assert.equal((await actualRead('capture-final-1')).observation.closeState,'DRAINED');return
     }
     const adapter=await runtime.openNativeExecutionAdapter(join(store.directory,'inputs'),binding.requestKey,binding,{scratchDirectory:join(store.directory,'scratch'),draftsDirectory:join(store.directory,'drafts'),nativeExecution:{executionId:'exec1',tools:[],checkActive(){},callTool(){}},...(admitted?{meteredAdmission:{store,model:'gpt-5.4',effort:'medium',instructionsSha256:skillDigest('fixture launch policy')}}:{meteredCapture:capture})})
     assert.ok(inspected);assert.ok(adapter.readback.credentialIsolation.bootstrapCredentialRemoved);assert.ok(adapter.nativeExecutionIsolation.network.nftDefaultDropReadback)

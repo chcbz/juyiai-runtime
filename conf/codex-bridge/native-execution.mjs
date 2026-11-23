@@ -17,11 +17,14 @@ const selectedNetworkAccess = configuration => configuration.some(item => item.n
 
 // Trusted, already resolved TASK preparation only: private conversation tools are not task capabilities.
 // An unfrozen output contract/skill selection cannot be priced as if the selection were empty.
+const onlyLocalArtifactTools = (scope, privateTools, entries, configuration, policy) =>
+  scope === 'TASK' && privateTools == null && entries.length === 0 && configuration.length === 0 && policy === NATIVE_LOCAL_FILES_POLICY
 export function compareProspectiveTaskConfiguration(profileRuntime, { scopeKind, outputs, entries, skillConfiguration, toolPolicyRef, privateTools }) {
   if (scopeKind !== 'TASK' || privateTools !== null || !outputs || !Object.hasOwn(outputs,'dataSchema')
       || !Array.isArray(entries) || !Array.isArray(skillConfiguration) || ![NATIVE_LOCAL_FILES_POLICY,NATIVE_SKILL_SCRIPT_POLICY].includes(toolPolicyRef)
       || (skillConfiguration.length && toolPolicyRef !== NATIVE_SKILL_SCRIPT_POLICY) || (toolPolicyRef === NATIVE_SKILL_SCRIPT_POLICY && !entries.length)) return null
   return profileRuntime.prospectiveNativeGroup({ skills:selectedPackages(entries), skillConfiguration,
+    localArtifactOnly:onlyLocalArtifactTools(scopeKind, privateTools, entries, skillConfiguration, toolPolicyRef),
     networkAccess:selectedNetworkAccess(skillConfiguration), tools:nativeArtifactOutputTools(outputs), toolPolicyRef, instructionsSha256 })
 }
 export async function runNativeExecution({ command, inputs, entries, store, checkActive, signal, profileRuntime, model, effort, skillConfiguration = [] }) {
@@ -43,7 +46,7 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
     checkActive()
     const adapter = await profileRuntime.openNativeExecutionAdapter(resolve(store.directory, 'inputs'), requestKey, binding, {
       scratchDirectory: resolve(store.directory, 'scratch'), draftsDirectory: resolve(store.directory, 'drafts'),
-      ...(command.usageMode === 'RESPONSE_V2' ? { meteredAdmission: { store, instructionsSha256, model: model ?? null, effort: effort ?? null } } : {}),
+      ...(command.usageMode === 'RESPONSE_V2' ? { meteredAdmission: { store, instructionsSha256, localArtifactOnly:onlyLocalArtifactTools(command.scope?.kind, command.privateTools, entries, skillConfiguration, command.toolPolicyRef), model: model ?? null, effort: effort ?? null } } : {}),
       skills: selectedPackages(entries),
       skillConfiguration, nativeExecution: { ...session.policy(), networkAccess }, requireExistingState: Boolean(existing)
     })

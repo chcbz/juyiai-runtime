@@ -39,7 +39,7 @@ export async function startMeteredRoot(store, { executionId, runId, executionCon
       if(!sealed)await persist(dir,'producer-stopped',{...binding,reservedHigh:String(next),writeFailed})
     })().catch(error=>{watermark=null;throw error})
   }
-  return Object.freeze({ ...binding, textTokenProtocol:engineVersion==='codex-cli-0.167.0' && adapterVersion==='RESPONSES_TEXT_TOKENS_V1' && coveragePolicyVersion==='TEXT_MODEL_ONLY_V1', stopAdmission() { stopped = true },
+  return Object.freeze({ ...binding, textTokenProtocol:engineVersion==='codex-cli-0.167.0' && adapterVersion==='RESPONSES_TEXT_TOKENS_V1' && ['TEXT_MODEL_ONLY_V1','NATIVE_LOCAL_ARTIFACT_TEXT_V1'].includes(coveragePolicyVersion), stopAdmission() { stopped = true },
     async stopAndDrain(){stopped=true;if(inflight)await (drained??=new Promise(resolve=>{wake=resolve}));if(writeFailed)bad('METERED_CAPTURE_WRITE_INCOMPLETE')},
     // Called only after the owner has joined the engine and closed the egress. No re-opening after this point.
     markStopped,
