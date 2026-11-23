@@ -23,7 +23,7 @@ test('concurrent sends see private, durable PENDING observations linked to the o
   const {capture,dir,read} = await openRoot(t)
   const plan=await read('plan'), source=await read('source-0')
   assert.equal(plan.captureId,skillDigest(['CAPTURE_V2','exec1','run1']))
-  assert.equal(source.observation.sourceId,plan.observation.rootSourceId)
+  assert.equal(plan.observation.snapshotSha256,'a'.repeat(64));assert.equal(source.observation.sourceId,plan.observation.rootSourceId)
   const ids=await Promise.all(Array.from({length:8},()=>capture.dispatch(async request=>{
     const r=await read(`request-${request.sequence}-1`)
     assert.deepEqual(await read(`reserved-${request.sequence}`),{sequence:request.sequence})
@@ -237,7 +237,7 @@ test('native HTTP posts exact revisions and recovers the original lost RESPONSE 
     res.writeHead(200,{'Content-Type':'application/json','X-Request-Id':id});res.end(JSON.stringify({protocolVersion:1,requestId:id,code:'E0',msg:'',data:a}))
   }catch(error){serverError=error;res.destroy()}})
   await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>{server.closeAllConnections();server.close()})
-  const result=await exercisePeer({port:server.address().port,executionId:'exec1',runId:'run1',session:{sessionToken:'rts1_'+'a'.repeat(64),canonicalAgentId:'agent',installationId:'i',hostId:'h',runtimeInstanceId:'rt',sessionGeneration:'1'}})
+  const result=await exercisePeer({snapshotDigest:'a'.repeat(64),port:server.address().port,executionId:'exec1',runId:'run1',session:{sessionToken:'rts1_'+'a'.repeat(64),canonicalAgentId:'agent',installationId:'i',hostId:'h',runtimeInstanceId:'rt',sessionGeneration:'1'}})
   assert.ifError(serverError);assert.equal(result.ackCount,7);assert.equal(stored.size,7)
   assert.deepEqual(log,['PLAN:1','SOURCE:1','REQUEST:1','REQUEST:2','RESPONSE:1','GET','SOURCE_FINAL:1','CAPTURE_FINAL:1','RESPONSE:1'])
 })

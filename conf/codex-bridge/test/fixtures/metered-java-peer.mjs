@@ -12,14 +12,14 @@ import { observeResponse } from '../../metered-response-observation.mjs'
 import { SkillUsageDelivery } from '../../skill-usage-delivery.mjs'
 import { deliverMetered, meteredBatch } from '../../metered-usage-delivery.mjs'
 
-export async function exercisePeer({port, executionId, runId, session}) {
+export async function exercisePeer({port, executionId, runId, snapshotDigest, session}) {
   assert.ok(Number.isInteger(port) && port>0 && port<=65535)
   const origin=`http://127.0.0.1:${port}`, client=new RuntimeV1Client({apiBaseUrl:origin,manifest:{}})
   client.currentSession=session
   const root=await mkdtemp(join(tmpdir(),'metered-api-peer-'))
   try {
     const scope={agentId:session.canonicalAgentId}, store=new SkillExecutionStore({rootDirectory:root,scope,
-      command:{executionProtocolVersion:6,executionId,runId,snapshotDigest:'a'.repeat(64),toolPolicyRef:'NATIVE_LOCAL_FILES_V1',usageMode:'RESPONSE_V2',captureProtocol:'METERED_CAPTURE_V2'}})
+      command:{executionProtocolVersion:6,executionId,runId,snapshotDigest,toolPolicyRef:'NATIVE_LOCAL_FILES_V1',usageMode:'RESPONSE_V2',captureProtocol:'METERED_CAPTURE_V2'}})
     const cap=await startMeteredRoot(store,{executionId,runId,executionConfigSha256:'c'.repeat(64),engineVersion:'fixture',
       coveragePolicyVersion:'TEST_MODEL_ONLY',rootSourceId:'source_model',channelNamespace:'test_gateway',adapterVersion:'FIXTURE',checkActive(){}})
     const observation=observeResponse('application/json',200,4096,false)

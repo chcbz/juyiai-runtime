@@ -13,14 +13,14 @@ export async function startMeteredRoot(store, { executionId, runId, executionCon
   rootSourceId, channelNamespace, adapterVersion, checkActive, now = Date.now }) {
   if (store.command.executionId !== checkId(executionId) || store.command.runId !== checkId(runId)
       || store.command.usageMode !== 'RESPONSE_V2' || store.command.captureProtocol !== 'METERED_CAPTURE_V2'
-      || !skillSha(executionConfigSha256) || typeof checkActive !== 'function') bad('METERED_CAPTURE_BINDING_INVALID')
+      || !skillSha(store.command.snapshotDigest) || !skillSha(executionConfigSha256) || typeof checkActive !== 'function') bad('METERED_CAPTURE_BINDING_INVALID')
   for (const id of [runId, engineVersion, coveragePolicyVersion, rootSourceId, channelNamespace, adapterVersion]) checkId(id)
   const binding = { executionId, runId, captureId: skillDigest(['CAPTURE_V2', executionId, runId]) }
   const dir = resolve(store.directory, `usage-capture-${binding.captureId}`)
   checkActive(); await directory(store.directory)
   // EEXIST (even a crash before PLAN) must not allow a second live writer or erase evidence.
   await mkdir(dir, { mode: 0o700 }); await syncDir(store.directory)
-  const plan = first(binding, 'PLAN', [], { captureProtocol: 'METERED_CAPTURE_V2', executionConfigSha256,
+  const plan = first(binding, 'PLAN', [], { captureProtocol: 'METERED_CAPTURE_V2', snapshotSha256:store.command.snapshotDigest, executionConfigSha256,
     engineVersion, coveragePolicyVersion, rootSourceId, ...(dispatchGroup ? {dispatchGroup} : {}) }, now)
   await persist(dir, 'plan', plan)
   const epoch = '0', sourceId = rootSourceId
