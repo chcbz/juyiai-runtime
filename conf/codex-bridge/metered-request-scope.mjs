@@ -39,7 +39,7 @@ export function requestCostScope(budget) {
     else if(parent==='includes'&&kind==='string')return 'include'
     unknown();return 'skip'
   }
-  const enums=new Set(['choice','toolType','itemType','partType','include'])
+  const enums=new Set(['choice','itemType','partType','include'])
   const inspect={value,read:role=>!!role?.typeOf||enums.has(role),scalar(role,v){
     if(role==='choice'&&!['auto','none','required'].includes(v))unknown()
     if(role?.typeOf){role.typeOf.namespace=v==='namespace';if(!['namespace','custom','function'].includes(v))flags.add('REQUEST_PROVIDER_TOOL_OR_UNKNOWN')}

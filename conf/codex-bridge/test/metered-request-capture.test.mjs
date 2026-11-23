@@ -95,11 +95,17 @@ test('restricted metered listener: authenticated POST only, durable before TLS u
   const examples=[{input:'正文'},{input:'正文',tools:[{type:'web_search'}]},{input:[{role:'user',content:[{type:'input_image',image_url:'private-fixture'}]}]}]
   for(const [i,x] of examples.entries()){const body=JSON.stringify({model:'fixture',...x});const reply=await post({body});assert.equal(reply.status,200);assert.equal(JSON.parse(reply.body).id,'r'+(i+3));assert.equal(requests.at(-1).body,body)}
   await mkdir(join(dir,'request-6-1.json'));assert.equal((await post()).status,502);assert.equal(requests.length,5)
+  await assert.rejects(capture.stopAndDrain(),{code:'METERED_CAPTURE_WRITE_INCOMPLETE'})
   for(const [i,reason] of [null,'REQUEST_PROVIDER_TOOL_OR_UNKNOWN','REQUEST_NON_TEXT_INPUT'].entries()){
     const req=await read('request-'+(i+3)+'-2'), obs=(await read('response-'+req.observation.sourceAttemptId+'-1')).observation
     assert.equal(obs.reportedUsage.input_tokens,5);if(reason){assert.equal(obs.measuredQuantities,null);assert.ok(obs.reasonCodes.includes(reason))}else assert.equal(obs.measuredQuantities.tokens.INPUT,'3')
   }
-  for(const name of (await readdir(dir)).filter(n=>!n.startsWith('request-6-'))) {const text=await readFile(join(dir,name),'utf8');for(const secret of [token,'only-upstream','正文','private-fixture']) assert.equal(text.includes(secret),false)}
+  for(const entry of await readdir(dir,{withFileTypes:true})) {
+    let text=entry.name
+    if(entry.isDirectory()) {assert.match(entry.name,/^(?:request-6-1\.json|response-owner-[a-f0-9]{64})$/);assert.deepEqual(await readdir(join(dir,entry.name)),[])}
+    else {assert.ok(entry.isFile());text+=await readFile(join(dir,entry.name),'utf8')}
+    for(const secret of [token,'only-upstream','正文','private-fixture'])assert.equal(text.includes(secret),false)
+  }
   await eg.dispose();assert.throws(()=>eg.meteredRoute.sandboxToken(),/CLOSED/)
 })
 
