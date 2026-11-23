@@ -108,7 +108,13 @@ for (const admitted of [false,true]) test(admitted ? 'admitted V2 profile measur
   await writeFile(join(sourceHome,'auth.json'),JSON.stringify({auth_mode:'apikey',OPENAI_API_KEY:'upstream-fixture-only'}),{mode:0o600})
   const cert=join(root,'cert'),key=join(root,'key');execFileSync('/usr/bin/openssl',['req','-x509','-newkey','rsa:2048','-nodes','-keyout',key,'-out',cert,'-days','1','-subj','/CN=localhost','-addext','subjectAltName=IP:127.0.0.1'],{stdio:'ignore'})
   const calls=[];const upstream=createHttpsServer({key:await readFile(key),cert:await readFile(cert)},async(req,res)=>{
-    for await(const _ of req){};calls.push({path:req.url,auth:req.headers.authorization,pending:(await read(`request-${calls.length+1}-1`)).observation.resolution})
+    // This upstream is a disposable TLS fixture receiving only its own test turn.
+    // Inspect protocol vocabulary, never prompt strings, tool names, credentials or URLs.
+    const parts=[];for await(const bytes of req)parts.push(bytes);const payload=JSON.parse(Buffer.concat(parts));
+    const kinds=list=>[...new Set((Array.isArray(list)?list:[]).map(x=>x?.type??'(implicit)'))];
+    t.diagnostic('fixture-cost-shape '+JSON.stringify({fields:Object.keys(payload),toolKinds:kinds(payload.tools),itemKinds:kinds(payload.input),
+      itemKeys:[...new Set(payload.input.flatMap(Object.keys))],partKinds:kinds(payload.input.flatMap(x=>Array.isArray(x.content)?x.content:[])),
+      textKeys:Object.keys(payload.text??{}),reasoningKeys:Object.keys(payload.reasoning??{}),toolKeys:[...new Set((payload.tools??[]).flatMap(Object.keys))]}));calls.push({path:req.url,auth:req.headers.authorization,pending:(await read(`request-${calls.length+1}-1`)).observation.resolution})
     res.writeHead(200,{'Content-Type':'text/event-stream'});for(const event of [{type:'response.created',response:{id:'resp-1'}},{type:'response.output_item.done',output_index:0,item:{id:'msg-1',type:'message',role:'assistant',content:[{type:'output_text',text:'fixture complete'}]}},{type:'response.completed',response:{id:'resp-1',status:'completed',usage:{input_tokens:10,output_tokens:2,total_tokens:12,input_tokens_details:{cached_tokens:3},output_tokens_details:{reasoning_tokens:1}}}}])res.write(`data: ${JSON.stringify(event)}\n\n`);res.end()
   });await new Promise(resolve=>upstream.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>upstream.close(resolve)))
   const runtime=new NativeExecutionProfileRuntime({profile:{profileId:'metered-test',agentId:'agent',codexBin:process.env.CYF_CODEX_BIN,codexHome:sourceHome,typedInspectionProviderNetwork:'restricted-proxy',typedInspectionProviderId:'fixture',typedInspectionProviderBaseUrl:`https://127.0.0.1:${upstream.address().port}/custom`,typedInspectionNetworkConnectTimeoutMs:2000,typedInspectionCaBundlePath:cert},materializerRoot,stateRoot,nativeToolchain:measureMinimalNativeExecutionToolchain()})
@@ -131,7 +137,7 @@ for (const admitted of [false,true]) test(admitted ? 'admitted V2 profile measur
     assert.equal(linked.previousEvidenceSha256,(await read('request-1-1')).evidenceSha256);assert.equal(linked.observation.resolution,'RESPONSE')
     assert.equal(response.expectedRevision,'0');assert.equal(response.observation.actualBillingIdentity,null)
     if(admitted){assert.equal(response.observation.measuredQuantities,null);assert.equal(response.observation.reportedUsage.input_tokens,10)}
-    else assert.deepEqual(response.observation.measuredQuantities.tokens,{INPUT:'7',CACHED_INPUT:'3',OUTPUT:'2'})
+    else assert.deepEqual(response.observation.measuredQuantities?.tokens,{INPUT:'7',CACHED_INPUT:'3',OUTPUT:'2'},JSON.stringify(response.observation.reasonCodes))
     await runtime.releaseAdapter(binding.requestKey,{requestBinding:binding})
     if(admitted) await recoverStoppedMeteredRoot(store,()=>{assert.equal(runtime.activeAdapters.size,0)})
     const expected=admitted?'SEALED_INCOMPLETE':'DRAINED'
