@@ -13,7 +13,7 @@ import { skillPackageTreeDigest } from './skill-manifest.mjs'
 
 import { canonicalSha256 } from './chat-runtime.mjs'
 
-import { NATIVE_NEUTRAL_MOUNT_TARGETS, NATIVE_PERMISSION_PROFILE, prepareNativeExecutionLayout, validateNativeExecutionToolchain, verifyNativeExecutionConfig, verifyNativeExecutionSkillCatalog } from './native-execution-profile.mjs'
+import { NATIVE_NEUTRAL_MOUNT_TARGETS, NATIVE_PERMISSION_PROFILE, nativeDispatchGroup, prepareNativeExecutionLayout, validateNativeExecutionToolchain, verifyNativeExecutionConfig, verifyNativeExecutionSkillCatalog } from './native-execution-profile.mjs'
 
 import { IsolatedEngineProfileRuntime, nonblank, fail, sha256, ensurePrivateDirectory, engineStateBinding, stateMarker, emptyMcpCatalog } from './isolated-engine-profile.mjs'
 
@@ -31,20 +31,7 @@ export const nativeExecutionProfile = profile => {
   }
 }
 
-// Compatibility evidence about the local launch, not a provider invoice or a coverage verdict.
-// Call only with the validated layout. Keep the original per-run layout/command commitment separately.
-export function nativeDispatchGroup(binding, {binarySha256, engineVersion, channelNamespace, model, effort, instructionsSha256, toolPolicyRef, coveragePolicyVersion}) {
-  if (!model || !effort || !instructionsSha256 || !toolPolicyRef || engineVersion === 'unknown' || !binarySha256) return null
-  const routeSha256 = skillDigest(['NATIVE_LOCAL_ROUTE_V1', channelNamespace, model])
-  const toolConfigSha256 = skillDigest(['NATIVE_LOCAL_TOOLS_V1', toolPolicyRef, binding.tools,
-    binding.skills.map(x => [x.skillKey,x.packageTreeDigest]), binding.skillConfiguration,
-    binding.toolchain.shell, binding.toolchain.files.map(x => [x.sandboxPath,x.sha256]),
-    binding.networkAccess,binding.networkOrigins,binding.webSearch ?? null])
-  const executionConfigSha256 = skillDigest(['NATIVE_DISPATCH_GROUP_V1',binarySha256,engineVersion,
-    routeSha256,toolConfigSha256,effort,instructionsSha256,binding.modelCatalogSha256 ?? null,
-    binding.sandboxUser,binding.neutralMountTargets,coveragePolicyVersion])
-  return {version:'NATIVE_DISPATCH_GROUP_V1', executionConfigSha256,routeSha256,toolConfigSha256}
-}
+export { nativeDispatchGroup } from './native-execution-profile.mjs'
 
 export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime {
   constructor(options = {}) {

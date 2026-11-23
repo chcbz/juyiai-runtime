@@ -1,3 +1,4 @@
+import { skillDigest } from './skill-executor.mjs'
 // RB-03/08/10: enforce the authorized filesystem view, not task orchestration.
 // Toolchain files are explicitly pinned by the caller; never bind host /usr,
 // /etc, a main HOME, or the trusted execution store into the engine namespace.
@@ -202,26 +203,35 @@ export const measureMinimalNativeExecutionToolchain = ({ nodeBin } = {}) => {
 // They contain no configuration, repository or credential material.
 export const NATIVE_NEUTRAL_MOUNT_TARGETS = Object.freeze(['.git', '.codex', '.agents', '.aws'])
 
-export const prepareNativeExecutionLayout = ({ inputDirectory, scratchDirectory, draftsDirectory, skills = [], skillConfiguration = [], nativeExecution, toolchain, stateRoot, sourceHome }) => {
-  if (!object(nativeExecution) || typeof nativeExecution.executionId !== 'string' || !nativeExecution.executionId.trim()
-      || nativeExecution.executionId.trim() !== nativeExecution.executionId
-      || typeof nativeExecution.checkActive !== 'function' || typeof nativeExecution.callTool !== 'function' || !Array.isArray(nativeExecution.tools)
+// Compatibility evidence about the local launch, not a provider invoice or a coverage verdict.
+// Call only with the validated layout. Keep the original per-run layout/command commitment separately.
+export function nativeDispatchGroup(binding, {binarySha256, engineVersion, channelNamespace, model, effort, instructionsSha256, toolPolicyRef, coveragePolicyVersion}) {
+  if ([model, effort, instructionsSha256, toolPolicyRef, engineVersion, binarySha256, channelNamespace, coveragePolicyVersion]
+      .some(value => typeof value !== 'string' || !value.trim()) || engineVersion === 'unknown') return null
+  const routeSha256 = skillDigest(['NATIVE_LOCAL_ROUTE_V1', channelNamespace, model])
+  const toolConfigSha256 = skillDigest(['NATIVE_LOCAL_TOOLS_V1', toolPolicyRef, binding.tools,
+    binding.skills.map(x => [x.skillKey,x.packageTreeDigest]), binding.skillConfiguration,
+    binding.toolchain.shell, binding.toolchain.files.map(x => [x.sandboxPath,x.sha256]),
+    binding.networkAccess,binding.networkOrigins,binding.webSearch ?? null])
+  const executionConfigSha256 = skillDigest(['NATIVE_DISPATCH_GROUP_V1',binarySha256,engineVersion,
+    routeSha256,toolConfigSha256,effort,instructionsSha256,binding.modelCatalogSha256 ?? null,
+    binding.sandboxUser,binding.neutralMountTargets,coveragePolicyVersion])
+  return {version:'NATIVE_DISPATCH_GROUP_V1', executionConfigSha256,routeSha256,toolConfigSha256}
+}
+
+// Common read-only measurement. Raw configuration and paths remain inside the bridge.
+// Dispatch separately validates the execution directories and the live authorization callbacks.
+const measureNativeConfiguration = ({ skills, skillConfiguration, nativeExecution, toolchain, excludedRoots }) => {
+  if (!Array.isArray(nativeExecution.tools)
       || nativeExecution.tools.some(tool => !object(tool) || tool.type !== 'function' || typeof tool.name !== 'string' || !tool.name.trim() || typeof tool.description !== 'string' || !object(tool.inputSchema))
       || new Set(nativeExecution.tools.map(tool => tool.name)).size !== nativeExecution.tools.length) fail('NATIVE_EXECUTION_BINDING_INVALID')
-  nativeExecution.checkActive()
-  const input = safeDirectory(inputDirectory); const scratch = safeDirectory(scratchDirectory); const drafts = safeDirectory(draftsDirectory)
-  // The trusted store's outputs/ is never a writable mount source (design §5.1).
-  if (basename(input) !== 'inputs' || basename(scratch) !== 'scratch' || basename(drafts) !== 'drafts'
-      || dirname(input) !== dirname(scratch) || dirname(input) !== dirname(drafts)) fail('NATIVE_EXECUTION_DIRECTORY_MAPPING_INVALID')
-  safeDirectory(dirname(input))
-  for (const path of [input, scratch, drafts]) if ([stateRoot, sourceHome].some(root => overlaps(resolve(root), path))) fail('NATIVE_EXECUTION_DIRECTORY_OVERLAP')
   if (!Array.isArray(skills)) fail('NATIVE_EXECUTION_SKILLS_INVALID')
   const keys = new Set()
   const packages = skills.map(skill => {
     if (!object(skill) || typeof skill.skillKey !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(skill.skillKey)
         || keys.has(skill.skillKey) || !hash(skill.packageTreeDigest)) fail('NATIVE_EXECUTION_SKILLS_INVALID')
     const packageRoot = safeDirectory(skill.packageRoot, false)
-    if ([input, scratch, drafts, stateRoot].some(root => overlaps(root, packageRoot))) fail('NATIVE_EXECUTION_DIRECTORY_OVERLAP')
+    if (excludedRoots.some(root => overlaps(root, packageRoot))) fail('NATIVE_EXECUTION_DIRECTORY_OVERLAP')
     if (!lstatSync(resolve(packageRoot, 'SKILL.md')).isFile() || skillPackageTreeDigest(packageRoot) !== skill.packageTreeDigest) fail('NATIVE_EXECUTION_SKILL_PACKAGE_CHANGED')
     keys.add(skill.skillKey)
     return Object.freeze({ skillKey: skill.skillKey, packageRoot, packageTreeDigest: skill.packageTreeDigest })
@@ -239,13 +249,40 @@ export const prepareNativeExecutionLayout = ({ inputDirectory, scratchDirectory,
   const networkOrigins = nativeSkillOrigins(configurations.flatMap(item => item.networkOrigins))
   const networkAccess = nativeExecution.networkAccess === true
   if (networkAccess !== (networkOrigins.length > 0)) fail('NATIVE_SKILL_NETWORK_BINDING_INVALID')
-  const binding = Object.freeze({ schemaVersion: 1, executionId: nativeExecution.executionId,
+  const binding = Object.freeze({
     sandboxUser: { uid: 65534, gid: 65534 }, neutralMountTargets: NATIVE_NEUTRAL_MOUNT_TARGETS,
-    input: directoryIdentity(input), scratch: directoryIdentity(scratch), drafts: directoryIdentity(drafts),
     skills: packages, toolchain: fixedToolchain, tools: structuredClone(nativeExecution.tools), networkAccess, networkOrigins,
     ...(nativeExecution.modelCatalogSha256 ? { modelCatalogSha256: nativeExecution.modelCatalogSha256 } : {}),
     ...(configurations.some(item => item.webSearch === 'live') ? { webSearch: 'live' } : {}),
     skillConfiguration: configurations.map(item => ({ skillKey: item.skillKey, digest: canonicalSha256(item) })) })
+  return { binding, packages, configurations, fixedToolchain }
+}
+
+/** Internal comparison only. No execution identity, authority, price or coverage is issued here. */
+export function measureProspectiveNativeGroup({ skills, skillConfiguration, tools, networkAccess, modelCatalogSha256, toolchain, stateRoot }, settings) {
+  // An absent catalogue decision, unknown skill selection or unknown network policy is not a proven empty one.
+  if (!Array.isArray(skills) || !Array.isArray(skillConfiguration) || typeof networkAccess !== 'boolean'
+      || !(modelCatalogSha256 === null || hash(modelCatalogSha256)) || typeof stateRoot !== 'string' || resolve(stateRoot) !== stateRoot) return null
+  const { binding } = measureNativeConfiguration({ skills, skillConfiguration, nativeExecution: { tools, networkAccess, modelCatalogSha256 },
+    toolchain, excludedRoots: [stateRoot] })
+  return nativeDispatchGroup(binding, settings)
+}
+
+export const prepareNativeExecutionLayout = ({ inputDirectory, scratchDirectory, draftsDirectory, skills = [], skillConfiguration = [], nativeExecution, toolchain, stateRoot, sourceHome }) => {
+  if (!object(nativeExecution) || typeof nativeExecution.executionId !== 'string' || !nativeExecution.executionId.trim()
+      || nativeExecution.executionId.trim() !== nativeExecution.executionId
+      || typeof nativeExecution.checkActive !== 'function' || typeof nativeExecution.callTool !== 'function') fail('NATIVE_EXECUTION_BINDING_INVALID')
+  nativeExecution.checkActive()
+  const input = safeDirectory(inputDirectory); const scratch = safeDirectory(scratchDirectory); const drafts = safeDirectory(draftsDirectory)
+  // The trusted store's outputs/ is never a writable mount source (design §5.1).
+  if (basename(input) !== 'inputs' || basename(scratch) !== 'scratch' || basename(drafts) !== 'drafts'
+      || dirname(input) !== dirname(scratch) || dirname(input) !== dirname(drafts)) fail('NATIVE_EXECUTION_DIRECTORY_MAPPING_INVALID')
+  safeDirectory(dirname(input))
+  for (const path of [input, scratch, drafts]) if ([stateRoot, sourceHome].some(root => overlaps(resolve(root), path))) fail('NATIVE_EXECUTION_DIRECTORY_OVERLAP')
+  const { binding: configuration, packages, configurations, fixedToolchain } = measureNativeConfiguration({
+    skills, skillConfiguration, nativeExecution, toolchain, excludedRoots: [input, scratch, drafts, stateRoot] })
+  const binding = Object.freeze({ schemaVersion: 1, executionId: nativeExecution.executionId,
+    input: directoryIdentity(input), scratch: directoryIdentity(scratch), drafts: directoryIdentity(drafts), ...configuration })
   return Object.freeze({ inputDirectory: input, scratchDirectory: scratch, draftsDirectory: drafts,
     skills: Object.freeze(packages), skillConfiguration: Object.freeze(configurations), toolchain: fixedToolchain, binding, digest: canonicalSha256(binding) })
 }

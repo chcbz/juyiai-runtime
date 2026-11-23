@@ -10,7 +10,7 @@ import { resolve } from 'node:path'
 import { canonicalSha256 } from '../chat-runtime.mjs'
 import { skillPackageTreeDigest } from '../skill-manifest.mjs'
 import { buildTypedInspectionCodexConfig } from '../typed-inspection-profile.mjs'
-import { buildNativeExecutionCodexConfig, loadNativeModelCatalog, nativeFilesystemPermissions, measureMinimalNativeExecutionToolchain, nativeExecutionMountArgs, prepareNativeExecutionLayout, validateNativeExecutionToolchain, verifyNativeExecutionConfig, verifyNativeExecutionSkillCatalog } from '../native-execution-profile.mjs'
+import { measureProspectiveNativeGroup, nativeDispatchGroup, buildNativeExecutionCodexConfig, loadNativeModelCatalog, nativeFilesystemPermissions, measureMinimalNativeExecutionToolchain, nativeExecutionMountArgs, prepareNativeExecutionLayout, validateNativeExecutionToolchain, verifyNativeExecutionConfig, verifyNativeExecutionSkillCatalog } from '../native-execution-profile.mjs'
 
 const sha256 = path => createHash('sha256').update(readFileSync(path)).digest('hex')
 const mkdir = path => { mkdirSync(path, { mode: 0o700 }); chmodSync(path, 0o700); return path }
@@ -767,4 +767,27 @@ test('native startup does not loop or retry permanent, cleanup, execution or dis
     assert.equal(runtime.nativeExecutionMeasurementPending, null)
     assert.deepEqual(runtime.nativeExecutionMeasurementFailure, { stage, code })
   }
+})
+
+test('prospective comparison measures actual installed policy without starting or requiring an execution', () => {
+  const f = fixture()
+  try {
+    const { skills, toolchain, stateRoot, nativeExecution } = f.options
+    const settings = { model:'model', effort:'medium', engineVersion:'engine', instructionsSha256:'instructions',
+      toolPolicyRef:'policy', binarySha256:'binary', channelNamespace:'namespace',coveragePolicyVersion:'unverified' }
+    const skillConfiguration = [{skillKey:skills[0].skillKey, configuration:{key:'synthetic-private'}, networkOrigins:[]}]
+    const launch = prepareNativeExecutionLayout({...f.options,skillConfiguration})
+    const expected = nativeDispatchGroup(launch.binding,settings)
+    rmSync(f.execution,{recursive:true})
+    const options = {skills,toolchain,stateRoot,skillConfiguration,tools:nativeExecution.tools,networkAccess:false,modelCatalogSha256:null}
+    const before = measureProspectiveNativeGroup(options,settings)
+    assert.deepEqual(before,expected); assert.deepEqual(Object.keys(before).sort(),['executionConfigSha256','routeSha256','toolConfigSha256','version'])
+    for (const key of ['skills','skillConfiguration','networkAccess','modelCatalogSha256']) assert.equal(measureProspectiveNativeGroup({...options,[key]:undefined},settings),null)
+    for (const key of Object.keys(settings)) assert.equal(measureProspectiveNativeGroup(options,{...settings,[key]:undefined}),null)
+    assert.notDeepEqual(measureProspectiveNativeGroup({...options,tools:[]},settings),expected)
+    assert.notDeepEqual(measureProspectiveNativeGroup({...options,skillConfiguration:[]},settings),expected)
+    writeFileSync(resolve(skills[0].packageRoot,'SKILL.md'),'changed')
+    assert.throws(() => measureProspectiveNativeGroup(options,settings),/SKILL_PACKAGE_CHANGED/)
+    assert.equal(existsSync(f.execution),false)
+  } finally { f.cleanup() }
 })
