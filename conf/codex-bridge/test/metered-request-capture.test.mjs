@@ -126,6 +126,12 @@ test('real metered Codex native turn uses sealed temporary HOME, measured namesp
     assert.equal(linked.previousEvidenceSha256,(await read('request-1-1')).evidenceSha256);assert.equal(linked.observation.resolution,'RESPONSE')
     assert.equal(response.expectedRevision,'0');assert.equal(response.observation.actualBillingIdentity,null)
     assert.deepEqual(response.observation.measuredQuantities.tokens,{INPUT:'7',CACHED_INPUT:'3',OUTPUT:'2'})
+    await runtime.releaseAdapter(binding.requestKey,{requestBinding:binding})
+    const sourceFinal=await read('source-final-1'),captureFinal=await read('capture-final-1')
+    assert.equal(sourceFinal.observation.closeState,'DRAINED');assert.equal(sourceFinal.observation.requestCount,'1')
+    const tuple=r=>[r.recordId,r.sourceRevision,r.evidenceSha256]
+    assert.equal(sourceFinal.observation.recordsSha256,skillDigest([await read('source-0'),linked,response].map(tuple).sort(([a],[b])=>a<b?-1:1)))
+    assert.equal(captureFinal.observation.sourcesSha256,skillDigest([tuple(sourceFinal)]));assert.equal((await read('usage-capture-finalized')).closeState,'DRAINED')
   } finally {await runtime.dispose()}
 })
 
@@ -147,4 +153,44 @@ test('duplicate provider identity never overwrites a response and an unresolved 
   assert.equal(keys.filter(x=>/^response-[a-f0-9]+-1\.json$/.test(x)).length,1)
   const a=await read('request-1-2'),b=await read('request-2-2');assert.equal(a.observation.sourceAttemptId,b.observation.sourceAttemptId);assert.ok([a,b].some(x=>x.observation.reasonCodes.includes('DUPLICATE_RESPONSE_ID')))
   const u=await read('request-3-2');assert.equal(u.observation.resolution,'UNRESOLVED');assert.equal(u.observation.sourceAttemptId,null)
+})
+
+import { recoverStoppedMeteredRoot } from '../metered-capture-closure.mjs'
+test('quiesced source recovery reuses immutable FINAL, repairs missing marker, never sends or calls pending free',async t=>{
+  const {capture,dir,store,read}=await openRoot(t);let sent=0
+  await capture.dispatch(()=>sent++);await capture.stopAndDrain()
+  await assert.rejects(recoverStoppedMeteredRoot(store,()=>{throw Error('not quiesced')}),/quiesced/)
+  const closed=await recoverStoppedMeteredRoot(store,()=>{});assert.equal(closed.closeState,'SEALED_INCOMPLETE')
+  const one=await read('source-final-1'),two=await read('capture-final-1')
+  assert.equal(one.observation.reservedSequenceHighWatermark,'1');assert.equal(one.observation.responseCount,'0')
+  assert.ok(one.observation.reasonCodes.includes('UNRESOLVED_REQUEST'));assert.ok(one.observation.reasonCodes.includes('PRODUCER_WATERMARK_UNCONFIRMED'))
+  await rm(join(dir,'usage-capture-finalized.json'));assert.deepEqual(await recoverStoppedMeteredRoot(store,()=>{}),closed)
+  assert.deepEqual(await capture.sealStopped(()=>{}),closed);assert.deepEqual(await read('source-final-1'),one);assert.deepEqual(await read('capture-final-1'),two);assert.equal(sent,1)
+  const altered=await read('request-1-1');altered.observation.attemptId='other';await writeFile(join(dir,'request-1-1.json'),JSON.stringify(altered));await assert.rejects(recoverStoppedMeteredRoot(store,()=>{}),{code:'METERED_CAPTURE_SOURCE_CONFLICT'})
+})
+test('a reservation without a persisted REQUEST seals incomplete with high water one and request count zero',async t=>{
+  const {dir,capture,read}=await openRoot(t);await mkdir(join(dir,'request-1-1.json'));await assert.rejects(capture.dispatch(()=>assert.fail('sent')))
+  await rm(join(dir,'request-1-1.json'),{recursive:true});const closed=await capture.sealStopped(()=>{});assert.equal(closed.closeState,'SEALED_INCOMPLETE')
+  const source=(await read('source-final-1')).observation;assert.equal(source.reservedSequenceHighWatermark,'1');assert.equal(source.requestCount,'0');assert.ok(source.reasonCodes.includes('SEQUENCE_GAP'))
+})
+
+import { SkillUsageDelivery } from '../skill-usage-delivery.mjs'
+test('stopped delivery discovers completed scoped V2 without replay, legacy upload, or false ACK on missing PLAN',async t=>{
+  const rootDir=await mkdtemp(join(tmpdir(),'v2-flush-'));t.after(()=>rm(rootDir,{recursive:true,force:true}))
+  const scope={agentId:'agent',tenantId:'tenant',ownerJiacn:'owner'},apiOrigin='https://fixture.invalid'
+  const config={rootDir,apiOrigin,scope,agentId:'agent',runtimeInstanceId:'rt',getRuntimeHeaders:()=>assert.fail('unexpected auth'),fetchFn:()=>assert.fail('unexpected delivery')}
+  const command={executionProtocolVersion:6,executionId:'exec1',runId:'run1',scope:{kind:'TASK',taskId:'task',conversationId:'conv',conversationGeneration:'1'},commandId:'cmd',messageId:'msg',skills:[],snapshotDigest:'a'.repeat(64),parameters:{},instruction:'fixture',inputRefs:[],outputs:{dataSchema:null,mimeTypes:[],multiple:false,artifactsRequired:false},toolPolicyRef:'NATIVE_LOCAL_FILES_V1',usageMode:'RESPONSE_V2',captureProtocol:'METERED_CAPTURE_V2'}
+  const store=new SkillExecutionStore({rootDirectory:join(rootDir,'skill-runs'),scope:{...scope,apiOrigin},command});store.write('attempt',{started:true});store.write('receipt',{done:true})
+  const lane=new SkillUsageDelivery(config);assert.deepEqual(lane.pendingCommands(),[])
+  const missing=await lane.flush();assert.equal(missing.confirmed,false);assert.equal(missing.pending,1);assert.ok(missing.errors.length)
+  const foreign=new SkillUsageDelivery({...config,scope:{...scope,tenantId:'other'}});assert.equal((await foreign.flush()).pending,0)
+  await startMeteredRoot(store,{executionId:'exec1',runId:'run1',executionConfigSha256:'c'.repeat(64),engineVersion:'fixture',coveragePolicyVersion:'fixture',rootSourceId:'root',channelNamespace:'fixture',adapterVersion:'fixture',checkActive(){}})
+  const report=await lane.flush();assert.deepEqual(report,{confirmed:false,captureStates:[{executionId:'exec1',captureState:'FINALIZED',closeState:'SEALED_INCOMPLETE',deliveryState:'PENDING_ACK'}],pending:1,errors:[]});assert.deepEqual(await lane.flush(),report)
+})
+test('stopped seal waits for in-flight response persistence and closes admission first',async t=>{
+  const {capture,dir,read}=await openRoot(t),entered=Promise.withResolvers(),resume=Promise.withResolvers()
+  const work=capture.dispatch(async(_request,finish)=>{entered.resolve();await resume.promise;await finish(observeResponse('application/json',503,512,false).finish(false))})
+  await entered.promise;capture.stopAdmission();const seal=capture.sealStopped(()=>{})
+  try { await assert.rejects(capture.dispatch(()=>assert.fail()),{code:'METERED_CAPTURE_ADMISSION_CLOSED'});assert.ok(!(await readdir(dir)).includes('producer-stopped.json')) } finally {resume.resolve()}
+  await work;await seal;assert.equal((await read('request-1-2')).observation.resolution,'UNRESOLVED');assert.equal((await read('source-final-1')).observation.closeState,'SEALED_INCOMPLETE')
 })

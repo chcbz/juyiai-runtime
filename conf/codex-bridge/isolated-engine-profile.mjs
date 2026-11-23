@@ -427,6 +427,8 @@ export class IsolatedEngineProfileRuntime {
     if (!pending && !active) {
       const suspended = this.suspendedNativeStates?.get(requestKey) || retainedDirectory
       if (expectedDirectory && suspended && suspended !== expectedDirectory) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_CONFLICT')
+      if (suspended && !preserveState && existsSync(resolve(suspended,'native-binding.json')) &&
+          JSON.parse(readFileSync(resolve(suspended,'native-binding.json'),'utf8')).captureId) return true // source retention pending durable ACK
       if (suspended && !preserveState) { rmSync(suspended, { recursive: true, force: true }); this.suspendedNativeStates?.delete(requestKey); return true }
       return Boolean(suspended)
     }
@@ -434,17 +436,22 @@ export class IsolatedEngineProfileRuntime {
       if (pending) {
         pending.preserveState = preserveState; pending.cancelled = true; await pending.promise.catch(() => {})
         const directory = pending.engineState.directory || this.suspendedNativeStates?.get(requestKey)
-        if (!preserveState && directory) { rmSync(directory, { recursive: true, force: true }); this.suspendedNativeStates?.delete(requestKey) }
+        if (!preserveState && directory && !pending.meteredCapture) { rmSync(directory, { recursive: true, force: true }); this.suspendedNativeStates?.delete(requestKey) }
         return true
       }
       if (active.slot) active.slot.cancelled = true
       if (active.engineState.conversationKey) this.chatAdapterLifecycle?.closing(active.adapter)
       try { await active.adapter.shutdown({ timeoutMs: 1000 }) } finally { await active.egress?.dispose() }
+      if (active.slot?.meteredCapture && !preserveState) {
+        await active.slot.meteredCapture.sealStopped(() => {
+          if (!active.adapter.childClosed || !active.egress.lifecycle.signal.aborted || this.activeAdapters.get(requestKey)!==active) fail('METERED_PRODUCER_STOP_UNCONFIRMED')
+        })
+      }
       if (this.activeAdapters.get(requestKey) === active) this.activeAdapters.delete(requestKey)
       const conversationKey = active.engineState.conversationKey
       if (conversationKey && this.conversationOwners?.get(conversationKey) === requestKey) this.conversationOwners.delete(conversationKey)
       if (active.nativeLayout) rmSync(resolve(active.engineState.directory, 'skill-config'), { recursive: true, force: true })
-      if (!preserveState) { rmSync(active.engineState.directory, { recursive: true, force: true }); this.suspendedNativeStates?.delete(requestKey) }
+      if (!preserveState && !active.slot?.meteredCapture) { rmSync(active.engineState.directory, { recursive: true, force: true }); this.suspendedNativeStates?.delete(requestKey) }
       else {
         this.suspendedNativeStates ||= new Map()
         this.suspendedNativeStates.set(requestKey, active.engineState.directory)

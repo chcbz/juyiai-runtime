@@ -1,3 +1,5 @@
+import { parseSkillJson } from './skill-manifest.mjs'
+import { recoverStoppedMeteredRoot } from './metered-capture-closure.mjs'
 import { pendingProviderUsage } from './provider-usage-receipts.mjs'
 import { pendingNativeUsage, acknowledgeNativeUsage } from './native-usage-receipts.mjs'
 import { readNativeJson } from './native-json.mjs'
@@ -55,6 +57,7 @@ export class SkillUsageDelivery {
   resetPendingDiscovery() { this.pendingExecutionIds = null }
 
   pendingCommands() {
+    this.pendingMetered = []
     this.pendingCommandErrors = []
     this.pendingUsage = []; this.pendingUsageErrors = []
     const subject = resolve(this.root, skillDigest({ ...this.scope, apiOrigin: this.origin }))
@@ -74,7 +77,15 @@ export class SkillUsageDelivery {
       try {
         const stat = fstatSync(fd)
         if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.geteuid() || (stat.mode & 0o077)) fail('SKILL_STORE_UNSAFE')
-        try { command = parseSkillCommand(readFileSync(fd)) } catch (error) {
+        try {
+          const saved = parseSkillJson(readFileSync(fd))
+          command = parseSkillCommand(saved)
+          // These fields bind already persisted evidence. They do not authorize execution.
+          if (saved.usageMode === 'RESPONSE_V2' || saved.captureProtocol === 'METERED_CAPTURE_V2') {
+            if (saved.usageMode !== 'RESPONSE_V2' || saved.captureProtocol !== 'METERED_CAPTURE_V2') fail('SKILL_COMMAND_INVALID')
+            Object.assign(command, { usageMode: saved.usageMode, captureProtocol: saved.captureProtocol })
+          }
+        } catch (error) {
           // Historical commands without a current authority binding are not executable.
           // Preserve them and report their failure, but do not starve unrelated current work.
           if (error?.code !== 'SKILL_COMMAND_INVALID') throw error
@@ -85,6 +96,11 @@ export class SkillUsageDelivery {
       if (command.executionId !== id) fail('SKILL_STORE_IDENTITY_CONFLICT')
       const store = new SkillExecutionStore({ rootDirectory: this.root, scope: { ...this.scope, apiOrigin: this.origin }, command })
       try {
+        const metered=command.usageMode==='RESPONSE_V2'
+        if (metered) {
+          this.pendingMetered.push({store,command}); unresolved.add(id)
+          continue // source recovery only, never enqueue as runnable or bill through legacy delivery
+        }
         const usage = pendingNativeUsage(store)
         for (const item of [...(usage ? [usage] : []), ...pendingProviderUsage(store)]) { this.pendingUsage.push({ command, store, ...item }); unresolved.add(id) }
       } catch (error) {
@@ -137,9 +153,20 @@ export class SkillUsageDelivery {
     }
     this.resetPendingDiscovery()
     this.pendingCommands()
+    // Only flush() is called by the stopped subject under its QUIESCED writer gate.
+    // Discovery alone (also used live) is never permission to close a producer.
+    const captureStates=[]
+    for(const {store,command} of this.pendingMetered){
+      try {
+        const marker=await recoverStoppedMeteredRoot(store,()=>{
+          if(store.commandDigest!==skillDigest(command)) fail('SKILL_STORE_IDENTITY_CONFLICT')
+        })
+        captureStates.push({executionId:command.executionId,captureState:'FINALIZED',closeState:marker.closeState,deliveryState:'PENDING_ACK'})
+      }catch(error){errors.push({executionId:command.executionId,code:error?.code||'METERED_CAPTURE_RECOVERY_FAILED'})}
+    }
     const remainingErrors = [...this.pendingUsageErrors,
       ...this.pendingCommandErrors.map(({ executionId, error }) => ({ executionId, code: error.code }))]
-    return { confirmed: !errors.length && !remainingErrors.length && !this.pendingUsage.length,
-      pending: this.pendingUsage.length, errors: errors.length ? errors : remainingErrors }
+    return { confirmed: !errors.length && !remainingErrors.length && !this.pendingUsage.length && !this.pendingMetered.length,
+      ...(captureStates.length?{captureStates}:{}),pending: this.pendingUsage.length+this.pendingMetered.length, errors: errors.length ? errors : remainingErrors }
   }
 }

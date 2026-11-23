@@ -392,6 +392,8 @@ export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   "native-output-format.mjs",
   "native-office-format.mjs",
   "native-execution.mjs",
+  "metered-capture-files.mjs",
+  "metered-capture-closure.mjs",
   "metered-request-capture.mjs",
   "metered-responses-route.mjs",
   "metered-response-observation.mjs",
