@@ -128,23 +128,38 @@ for (const admitted of [false,true,'artifact']) test(admitted==='artifact'?'real
     if(admitted==='artifact'&&calls.length===2)calls[1].history=body.input.filter(x=>x.type?.startsWith('function_call')).map(x=>[x.type,x.call_id])
     res.writeHead(200,{'Content-Type':'text/event-stream'});for(const event of [{type:'response.created',response:{id}},{type:'response.output_item.done',output_index:0,item},{type:'response.completed',response:{id,status:'completed',usage:{input_tokens:10,output_tokens:2,total_tokens:12,input_tokens_details:{cached_tokens:3},output_tokens_details:{reasoning_tokens:1}}}}])res.write(`data: ${JSON.stringify(event)}\n\n`);res.end()
   });await new Promise(resolve=>upstream.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>upstream.close(resolve)))
-  const runtime=new NativeExecutionProfileRuntime({profile:{profileId:'metered-test',agentId:'agent',codexBin:process.env.CYF_CODEX_BIN,codexHome:sourceHome,typedInspectionProviderNetwork:'restricted-proxy',typedInspectionProviderId:'fixture',typedInspectionProviderBaseUrl:`https://127.0.0.1:${upstream.address().port}/custom`,typedInspectionNetworkConnectTimeoutMs:2000,typedInspectionCaBundlePath:cert},materializerRoot,stateRoot,nativeToolchain:measureMinimalNativeExecutionToolchain()})
+  const runtime=new NativeExecutionProfileRuntime({profile:{profileId:'metered-test',agentId:'agent',chatModel:'gpt-5.4',chatReasoningEffort:'medium',codexBin:process.env.CYF_CODEX_BIN,codexHome:sourceHome,typedInspectionProviderNetwork:'restricted-proxy',typedInspectionProviderId:'fixture',typedInspectionProviderBaseUrl:`https://127.0.0.1:${upstream.address().port}/custom`,typedInspectionNetworkConnectTimeoutMs:2000,typedInspectionCaBundlePath:cert},materializerRoot,stateRoot,nativeToolchain:measureMinimalNativeExecutionToolchain()})
   const spawn=runtime._spawnAdapter.bind(runtime);let inspected=false
-  runtime._spawnAdapter=async args=>{const staged=JSON.parse(await readFile(args.engineState.authPath));assert.match(staged.OPENAI_API_KEY,/^[a-f0-9]{64}$/);assert.notEqual(staged.OPENAI_API_KEY,'upstream-fixture-only');inspected=true;return spawn(args)}
+  runtime._spawnAdapter=async args=>{if(args.nativeExecution.executionId!=='exec1')return spawn(args);const staged=JSON.parse(await readFile(args.engineState.authPath));assert.match(staged.OPENAI_API_KEY,/^[a-f0-9]{64}$/);assert.notEqual(staged.OPENAI_API_KEY,'upstream-fixture-only');inspected=true;return spawn(args)}
   const binding={schemaVersion:1,requestKey:'metered-request',authorizationId:'exec1',manifestDigest:'sha256:'+store.command.snapshotDigest,requestId:'req-1',turnId:'turn-1',inputPolicyDigest:'policy-1'}
   try {
     if(admitted==='artifact'){
-      const command={...store.command,scope:{kind:'TASK'},commandId:'cmd',messageId:'msg',instruction:'fixture',parameters:{},inputRefs:[],outputs:{mimeTypes:[],artifactsRequired:false,multiple:false,dataSchema:null}}
+      const scope={kind:'TASK',taskId:'task',conversationId:'42',conversationGeneration:'1'}
+      const command={...store.command,runId:'run-exec1',snapshotDigest:skillDigest({executionProtocolVersion:6,scope}),scope,commandId:'cmd',messageId:'msg',instruction:'fixture',parameters:{},inputRefs:[],outputs:{mimeTypes:[],artifactsRequired:false,multiple:false,dataSchema:null}}
       const actual=new SkillExecutionStore({rootDirectory:root,scope:{agentId:'agent'},command})
       // Read this real execution's source records at the upstream, not the first harness's directory.
-      actualRead=async key=>JSON.parse(await readFile(join(actual.directory,`usage-capture-${skillDigest(['CAPTURE_V2','exec1','run1'])}`,key+'.json')))
-      const {runNativeExecution}=await import('../native-execution.mjs')
+      actualRead=async key=>JSON.parse(await readFile(join(actual.directory,`usage-capture-${skillDigest(['CAPTURE_V2',command.executionId,command.runId])}`,key+'.json')))
+      const {runNativeExecution,compareProspectiveTaskConfiguration}=await import('../native-execution.mjs')
+      // Independent deployment measurement: no PLAN or source records exist yet.
+      assert.ok(await runtime.measureNativeExecution(),JSON.stringify(runtime.nativeExecutionMeasurementFailure))
+      const group=compareProspectiveTaskConfiguration(runtime,{scopeKind:'TASK',outputs:command.outputs,entries:[],skillConfiguration:[],privateTools:null,toolPolicyRef:command.toolPolicyRef})
+      assert.ok(group);assert.equal(calls.length,0);await assert.rejects(actualRead('plan'),{code:'ENOENT'})
+      const channel=skillDigest(['METERED_PROVIDER_NAMESPACE_V1','fixture',`https://127.0.0.1:${upstream.address().port}/custom`])
+      const admission=skillDigest(['NATIVE_LOCAL_ARTIFACT_TEXT_V1','codex-cli-0.167.0','RESPONSES_TEXT_TOKENS_V1',group.executionConfigSha256,group.routeSha256,group.toolConfigSha256,channel])
       const result=await runNativeExecution({command,inputs:[],entries:[],store:actual,checkActive(){},profileRuntime:runtime,model:'gpt-5.4',effort:'medium'})
       assert.equal(result.executionId,'exec1');assert.equal(actual.read('native-selection').revision,'1');assert.equal(calls.length,2)
       assert.deepEqual(calls.map(x=>x.pending),['PENDING','PENDING']);assert.deepEqual(calls[1].history,[['function_call','call_local_1'],['function_call_output','call_local_1']])
       for(const seq of [1,2]){const linked=await actualRead(`request-${seq}-2`),o=(await actualRead(`response-${linked.observation.sourceAttemptId}-1`)).observation
         assert.deepEqual(o.reasonCodes,['BILLING_IDENTITY_UNKNOWN']);assert.equal(o.actualBillingIdentity,null);assert.deepEqual(o.measuredQuantities.tokens,{INPUT:'7',CACHED_INPUT:'3',OUTPUT:'2'})}
-      await recoverStoppedMeteredRoot(actual,()=>assert.equal(runtime.activeAdapters.size,0));assert.equal((await actualRead('plan')).observation.coveragePolicyVersion,'NATIVE_LOCAL_ARTIFACT_TEXT_V1');assert.equal((await actualRead('source-final-1')).observation.requestCount,'2');assert.equal((await actualRead('capture-final-1')).observation.closeState,'DRAINED');return
+      await recoverStoppedMeteredRoot(actual,()=>assert.equal(runtime.activeAdapters.size,0));assert.equal((await actualRead('plan')).observation.coveragePolicyVersion,'NATIVE_LOCAL_ARTIFACT_TEXT_V1');assert.equal((await actualRead('source-final-1')).observation.requestCount,'2');assert.equal((await actualRead('capture-final-1')).observation.closeState,'DRAINED')
+      assert.deepEqual((await actualRead('plan')).observation.dispatchGroup,group);assert.equal((await actualRead('source-0')).observation.channelNamespace,channel)
+      if(process.env.CYF_TEST_EXPORT_NATIVE_CAPTURE==='1'){
+        const keys=['plan','source-0','source-final-1','capture-final-1'];for(const seq of [1,2])keys.push(`request-${seq}-1`,`request-${seq}-2`,`response-${(await actualRead(`request-${seq}-2`)).observation.sourceAttemptId}-1`)
+        // Only transport records from this synthetic test; no headers, HOME, messages, tool arguments or result files.
+        const records=Object.fromEntries(await Promise.all(keys.map(async key=>[key,await actualRead(key)])))
+        await writeFile(join(tmpdir(),'local-artifact-test-evidence.json'),JSON.stringify({admission,records}),{mode:0o600,flag:'wx'})
+      }
+      return
     }
     const adapter=await runtime.openNativeExecutionAdapter(join(store.directory,'inputs'),binding.requestKey,binding,{scratchDirectory:join(store.directory,'scratch'),draftsDirectory:join(store.directory,'drafts'),nativeExecution:{executionId:'exec1',tools:[],checkActive(){},callTool(){}},...(admitted?{meteredAdmission:{store,model:'gpt-5.4',effort:'medium',instructionsSha256:skillDigest('fixture launch policy')}}:{meteredCapture:capture})})
     assert.ok(inspected);assert.ok(adapter.readback.credentialIsolation.bootstrapCredentialRemoved);assert.ok(adapter.nativeExecutionIsolation.network.nftDefaultDropReadback)
