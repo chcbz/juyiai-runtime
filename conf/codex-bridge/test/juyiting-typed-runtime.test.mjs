@@ -701,7 +701,7 @@ test('claimed bootstrap uses isolated turn; ordinary delta resumes the original 
 // A real CLI call, but never a real provider or credential. Explicit LOCAL builder selector supplies the fixed binary.
 test('managed text discussion drives real isolated CLI through the source ledger and loopback TLS', {skip:process.env.CYF_NATIVE_EXECUTION_ISOLATION_PROBE!=='1'}, async t=>{
   const {mkdirSync,writeFileSync,readdirSync}=await import('node:fs'), {execFileSync}=await import('node:child_process')
-  const {createServer}=await import('node:https'),{resolveManagedRuntimeProfile}=await import('../agent-client.mjs')
+  const {createServer}=await import('node:https'),{resolveManagedRuntimeProfile,normalizeInboundMessage}=await import('../agent-client.mjs')
   const {parseManagedChatScopes}=await import('../managed-chat-scope-config.mjs'), {TypedInspectionProfileRuntime}=await import('../typed-inspection-profile.mjs')
   const {recoverStoppedDiscussionCapture}=await import('../metered-request-capture.mjs')
   const root=mkdtempSync(resolve(tmpdir(),'managed-discussion-'));let server,runtime
@@ -710,7 +710,9 @@ test('managed text discussion drives real isolated CLI through the source ledger
   writeFileSync(resolve(home,'auth.json'),JSON.stringify({auth_mode:'apikey',OPENAI_API_KEY:'discussion-loopback-only'}),{mode:0o600})
   execFileSync('/usr/bin/openssl',['req','-x509','-newkey','rsa:2048','-nodes','-keyout',file('key'),'-out',file('ca'),'-days','1','-subj','/CN=localhost','-addext','subjectAltName=IP:127.0.0.1'],{stdio:'ignore'})
   const agentId='agt_'+'1'.repeat(32), generation='hri_00000000-0000-0000-0000-000000000001'
-  const m=mutateTypedMessage((m,f)=>{m.agentId=m.targetAgentId=f.targetAgentId=f.task.assignedAgentId=agentId;f.task.assignedAgentIds=f.participantAgentIds=[agentId];f.typedDeliberation={schemaVersion:5,availableActions:[],availableSources:[],inspectedSourceRefIds:[]};f.taskUsageCapture={protocol:'METERED_CAPTURE_V2',captureId:canonicalSha256(['CAPTURE_V2',m.turnId,m.dispatchId]).slice(7)};f.contextDelivery={schemaVersion:1,mode:'BOOTSTRAP',afterMessageId:'0',throughMessageId:'1',baseTurnId:null,engineThreadId:null}})
+  const wire=mutateTypedMessage((m,f)=>{m.agentId=m.targetAgentId=f.targetAgentId=f.task.assignedAgentId=agentId;f.task.assignedAgentIds=f.participantAgentIds=[agentId];f.typedDeliberation={schemaVersion:5,availableActions:[],availableSources:[],inspectedSourceRefIds:[]};f.taskUsageCapture={protocol:'METERED_CAPTURE_V2',captureId:canonicalSha256(['CAPTURE_V2',m.turnId,m.dispatchId]).slice(7)};f.contextDelivery={schemaVersion:1,mode:'BOOTSTRAP',afterMessageId:'0',throughMessageId:'1',baseTurnId:null,engineThreadId:null}})
+  // The wire has JSON semantics. The processor fingerprints the original decoded frame, not fixture-only undefined properties.
+  const m=normalizeInboundMessage(JSON.stringify(wire))
   let calls=0,parent;const dir=()=>resolve(parent,'usage-capture-'+m.factsManifest.taskUsageCapture.captureId), observations=[]
   server=createServer({key:readFileSync(file('key')),cert:readFileSync(file('ca'))},async(req,res)=>{
     try{
