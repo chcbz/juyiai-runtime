@@ -606,6 +606,11 @@ test('metered text discussion stages only a route token without native execution
   const config = readFileSync(resolve(state.codexHome, 'config.toml'), 'utf8')
   for (const line of ['sandbox_mode = "read-only"', 'web_search = "disabled"', 'supports_websockets = false', 'respect_system_proxy = true', 'base_url = "http://10.0.2.2:4321/v1"']) assert.ok(config.includes(line))
   assert.ok(!config.includes(profile.typedInspectionProviderBaseUrl))
+  const ordinaryConfig=buildTypedInspectionCodexConfig(profile)
+  assert.equal(state.memoryConfigDigest, 'sha256:'+createHash('sha256').update(ordinaryConfig).digest('hex'))
+  assert.notEqual(state.configDigest,state.memoryConfigDigest)
+  const other=stageCodexHome({...profile,typedInspectionProviderBaseUrl:'https://another.invalid/v1'},root,{meteredDiscussion:true,meteredEgress:route})
+  assert.notEqual(state.memoryConfigDigest,other.memoryConfigDigest)
   for (const [p, opts] of [[profile, {}], [profile, { nativeExecution: true, meteredEgress: route }],
     [{ ...profile, typedInspectionSupportedInputs: [{ carrier: 'LOCAL_FILE' }] }, { meteredEgress: route }],
     [{ ...profile, typedInspectionProviderNetwork: 'direct' }, { meteredEgress: route }]]) {

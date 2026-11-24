@@ -8,7 +8,7 @@ import { PassThrough } from 'node:stream'
 import { AppServerAdapter } from '../app-server-adapter.mjs'
 import { CODEX_APP_SERVER_SCHEMA_CONTRACTS } from './fixtures/recorded-app-server-schemas.mjs'
 import { typedDeliberationAdapterReady } from '../juyiting-typed-outcome.mjs'
-import { runFastChat as nativeFastChat, recoverActionChat, MESSAGE_TYPES } from '../agent-client.mjs'
+import { runFastChat as nativeFastChat, runClaimedDiscussion, recoverActionChat, MESSAGE_TYPES } from '../agent-client.mjs'
 import { canonicalSha256, validateChatDispatch, PersistentChatInbox } from '../chat-runtime.mjs'
 import { buildActionOutcomeContract } from '../juyiting-action-outcome.mjs'
 
@@ -677,4 +677,23 @@ test('ordinary warm CHAT recovery reads the original native turn without model r
   assert.equal(store.get(key).state, 'RECOVERY_REQUIRED')
   assert.equal(store.get(key).recoveryMessageId, 'newer-message')
   assert.equal(runs, 1)
+})
+
+test('claimed bootstrap uses isolated turn; ordinary delta resumes the original thread, unknown recovery cannot replay', async () => {
+  const first=mutateTypedMessage((m,f)=>{f.taskUsageCapture={protocol:'METERED_CAPTURE_V2',captureId:canonicalSha256(['CAPTURE_V2',m.turnId,m.dispatchId]).slice(7)};f.contextDelivery={schemaVersion:1,mode:'BOOTSTRAP',afterMessageId:'0',throughMessageId:'1',baseTurnId:null,engineThreadId:null}})
+  const second=mutateTypedMessage((m,f)=>{m.turnId+='-b';m.dispatchId+='-b';m.messageId+='-b';m.dedupeKey+='-b';f.contextDelivery={schemaVersion:1,mode:'DELTA',afterMessageId:'1',throughMessageId:'2',baseTurnId:first.turnId,engineThreadId:'original'}})
+  const store=bindingStore(), prior=[], record={}, frames=[];let closed=0, opens=0
+  const adapter={closed:false,readback:measuredReadback(),typedInspectionEngineState:{conversationKey:'conversation',chatWorkdir:'/conversation/chat',configDigest:'physical-port',memoryConfigDigest:'logical-provider'},
+    startOrResumeThread:async p=>{prior.push(p);return p || {threadId:'original'}},runTurn:async options=>{
+      assert.ok(!options.input.includes('taskUsageCapture'));return {threadId:'original',turnId:'native-'+prior.length,finishReason:'completed',content:JSON.stringify(fixture.outcomes[0])}}}
+  const controls={openDiscussion:async()=>{opens++;return {adapter,conversationKey:'conversation',message:first,close:async()=>{closed++}}},markPrepared:x=>record.preparation=x,
+    isCancelled:()=>false,markFinalPrepared:x=>record.finalPrepared=x,markFinalPublication:()=>{},markRunning:()=>{}}
+  const catalog=(data,status=200)=>({apiOrigin:'https://example.invalid',nativeFetch:async()=>new Response(JSON.stringify({protocolVersion:1,requestId:'r1',code:'E0',msg:'ok',data}),{status,headers:{'X-Request-Id':'r1'}})})
+  const opts={controls,runtime:{},bindingStore:store,current:()=>true,sendProtocolFn:(...args)=>{frames.push(args);return true}}
+  for(const c of [catalog(null,404),catalog({schemaVersion:'1',tools:[],skills:[{}]})]) await assert.rejects(runClaimedDiscussion(profile,first,{...opts,catalog:c}),/CATALOG_REQUIRED|ROUTE_UNAVAILABLE/)
+  assert.equal(opens,0);await runClaimedDiscussion(profile,first,{...opts,catalog:catalog({schemaVersion:'1',tools:[],skills:[]})});assert.equal(closed,1);assert.ok(record.finalPrepared)
+  const ordinary={...adapter,typedInspectionEngineState:{...adapter.typedInspectionEngineState,memoryConfigDigest:undefined,configDigest:'logical-provider'}}
+  await runFastChat(profile,second,{adapter:ordinary,conversationRuntime:{canShareChatProvider:()=>true,openWarmChatAdapter:async()=>ordinary,finishWarmChatAdapter:async()=>{}},bindingStore:store,controls:{...controls,markPrepared:()=>{}},sendProtocolFn:()=>true})
+  assert.equal(store.values.size,1);assert.deepEqual(prior.map(x=>x?.threadId),[undefined,'original'])
+  assert.equal((await recoverActionChat(profile,first,{preparation:record.preparation},{controls,profileRuntime:{openWarmChatAdapter:()=>assert.fail('unmetered recovery')}})).reconciliationStatus,'ACCEPTANCE_UNKNOWN')
 })

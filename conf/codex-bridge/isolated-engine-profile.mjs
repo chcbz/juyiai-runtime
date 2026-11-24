@@ -159,7 +159,7 @@ const stageCodexHome = (profile, stateRoot, { nativeExecution = false, meteredDi
   renameSync(temporary, configPath); fsyncDirectory(codexHome)
   const bytes = meteredEgress ? Buffer.from(JSON.stringify({ auth_mode:'apikey', OPENAI_API_KEY:meteredEgress.meteredRoute.sandboxToken() })) : readModelAuthFile(profile.codexHome).bytes
   stageCredentialBytes(bytes, resolve(codexHome, 'auth.json'))
-  return { codexHome, modelCatalogPath, meteredBaseUrl, authPath: resolve(codexHome, 'auth.json'), configDigest: `sha256:${sha256(Buffer.from(config))}` }
+  return { codexHome, modelCatalogPath, meteredBaseUrl, ...(meteredDiscussion ? { memoryConfigDigest: `sha256:${sha256(Buffer.from(buildTypedInspectionCodexConfig(profile)))}` } : {}), authPath: resolve(codexHome, 'auth.json'), configDigest: `sha256:${sha256(Buffer.from(config))}` }
 }
 const engineStateBinding = value => {
   const keys = ['schemaVersion', 'requestKey', 'authorizationId', 'manifestDigest', 'requestId', 'turnId', 'inputPolicyDigest']

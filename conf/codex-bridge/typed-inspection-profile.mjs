@@ -44,7 +44,7 @@ export class TypedInspectionProfileRuntime extends IsolatedEngineProfileRuntime 
       ...stageCodexHome(this.profile, directory, { meteredDiscussion: Boolean(meteredEgress), meteredEgress }) }
   }
   // Only the durable inbox supplies the message. Never publish this adapter to the shared profile.
-  async openDiscussionAdapter(inbox, key) {
+  async openDiscussionAdapter(inbox, key, current = () => true) {
     const { message } = inbox.discussionCaptureSubject(key, false)
     const facts = message.contextSnapshot.facts, profile = this.profile
     if (this.disposed || message.targetAgentId !== profile.agentId || usesChatFiles(profile) ||
@@ -59,7 +59,7 @@ export class TypedInspectionProfileRuntime extends IsolatedEngineProfileRuntime 
     this.discussions ||= new Map(); this.conversationOwners ||= new Map()
     this.conversationOwners.set(conversation, slot); this.discussions.set(conversation, slot)
     const checkActive = () => {
-      if (this.disposed || slot.closing || this.conversationOwners.get(conversation) !== slot) fail('CHAT_METERED_ROUTE_UNAVAILABLE')
+      if (!current() || this.disposed || slot.closing || this.conversationOwners.get(conversation) !== slot) fail('CHAT_METERED_ROUTE_UNAVAILABLE')
     }
     slot.start = (async () => {
       const schema = await this.measureBinary(profile); checkActive()
