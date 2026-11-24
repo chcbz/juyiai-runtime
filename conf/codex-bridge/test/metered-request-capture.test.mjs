@@ -486,6 +486,7 @@ test('durable discussion source keeps original turn/dispatch/context across rest
   await new Promise((ok,fail)=>{const req=httpRequest({hostname:'127.0.0.1',port:eg.port,path:'/v1/responses',method:'POST',headers:{host:`10.0.2.2:${eg.port}`,authorization:`Bearer ${eg.meteredRoute.sandboxToken()}`,'content-type':'application/json'}},res=>{
     res.resume();res.on('end',()=>res.statusCode===200?ok():fail(Error(`HTTP ${res.statusCode}`)))
   });req.on('error',fail);req.end(JSON.stringify({model:'fixture',input:'private test input'}))})
+  await cap.stopAndDrain() // HTTP body completion is not a durable usage ACK.
   await eg.dispose()
   const request=JSON.parse(await readFile(join(dir,'request-1-2.json')));assert.equal(request.observation.resolution,'RESPONSE')
   const response=JSON.parse(await readFile(join(dir,`response-${request.observation.sourceAttemptId}-1.json`)))
