@@ -587,7 +587,7 @@ test('durable discussion source keeps original turn/dispatch/context across rest
   counts({sources:2,acknowledged:1,pending:1,unverified:0},2)
   assert.equal(firstClose.runId,extra.m.dispatchId);assert.equal(firstClose.closeState,'SEALED_INCOMPLETE')
   await assert.rejects(startDiscussionCapture(expires,key,opts),/CHAT_CAPTURE_STATE_INVALID/)
-  const {writeFile}=await import('node:fs/promises');await writeFile(join(parent,'discussion-binding.json'),JSON.stringify({...binding,dispatchId:'different'}))
+  await writeFile(join(parent,'discussion-binding.json'),JSON.stringify({...binding,dispatchId:'different'}))
   await assert.rejects(recoverStoppedDiscussionCapture(expires,key,()=>{}),{code:'METERED_CAPTURE_SOURCE_CONFLICT'});assert.equal(sent,1)
 
 })
