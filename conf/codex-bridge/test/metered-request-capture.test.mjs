@@ -567,7 +567,7 @@ test('durable discussion source keeps original turn/dispatch/context across rest
     const sourceBytes=await fs.readFile(sourceAck)
     try{await fs.writeFile(sourceAck,planBytes);await assert.rejects(inspect(),{code:'METERED_USAGE_RECEIPT_CONFLICT'})}
     finally{await fs.writeFile(sourceAck,sourceBytes)}
-  }finally{await fs.writeFile(planAck,planBytes)}
+  }finally{await fs.writeFile(planAck,planBytes,{mode:0o600})}
   try{await fs.writeFile(planAck,await fs.readFile(sourceAck));assert.equal((await stopped.flush()).confirmed,false)}
   finally{await fs.writeFile(planAck,planBytes)}
   const {deliverDiscussionMetered,discussionBatch}=await import('../metered-usage-delivery.mjs')
