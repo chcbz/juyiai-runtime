@@ -23,7 +23,8 @@ export function compareProspectiveTaskConfiguration(profileRuntime, { scopeKind,
   if (scopeKind !== 'TASK' || privateTools !== null || !outputs || !Object.hasOwn(outputs,'dataSchema')
       || !Array.isArray(entries) || !Array.isArray(skillConfiguration) || ![NATIVE_LOCAL_FILES_POLICY,NATIVE_SKILL_SCRIPT_POLICY].includes(toolPolicyRef)
       || (skillConfiguration.length && toolPolicyRef !== NATIVE_SKILL_SCRIPT_POLICY) || (toolPolicyRef === NATIVE_SKILL_SCRIPT_POLICY && !entries.length)) return null
-  return profileRuntime.prospectiveNativeGroup({ preparedLocalBudget, skills:selectedPackages(entries), skillConfiguration,
+  return profileRuntime.prospectiveNativeGroup({ preparedLocalBudget,
+    ...(preparedLocalBudget ? {profileTools:nativeArtifactOutputTools({dataSchema:null})} : {}), skills:selectedPackages(entries), skillConfiguration,
     localArtifactOnly:onlyLocalArtifactTools(scopeKind, privateTools, entries, skillConfiguration, toolPolicyRef),
     networkAccess:selectedNetworkAccess(skillConfiguration), tools:nativeArtifactOutputTools(outputs), toolPolicyRef, instructionsSha256 })
 }

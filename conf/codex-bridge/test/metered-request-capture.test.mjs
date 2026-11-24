@@ -143,6 +143,11 @@ for (const admitted of [false,true,'artifact','empty']) test(admitted==='empty'?
       // Independent deployment measurement: no PLAN or source records exist yet.
       assert.ok(await runtime.measureNativeExecution(),JSON.stringify(runtime.nativeExecutionMeasurementFailure))
       const group=compareProspectiveTaskConfiguration(runtime,{scopeKind:'TASK',outputs:command.outputs,entries:[],skillConfiguration:[],privateTools:null,toolPolicyRef:command.toolPolicyRef})
+      const compare=outputs=>compareProspectiveTaskConfiguration(runtime,{scopeKind:'TASK',outputs,entries:[],skillConfiguration:[],privateTools:null,toolPolicyRef:command.toolPolicyRef},true)
+      const sampled=compare(command.outputs),answer=compare({...command.outputs,dataSchema:{type:'object'}})
+      assert.match(sampled.profileSha256,/^[0-9a-f]{64}$/);assert.equal(sampled.executionConfigSha256,group.executionConfigSha256)
+      assert.notEqual(answer.toolConfigSha256,sampled.toolConfigSha256);assert.equal(answer.profileSha256,sampled.profileSha256)
+      const effort=runtime.profile.chatReasoningEffort;try {runtime.profile.chatReasoningEffort='high';assert.notEqual(compare(command.outputs).profileSha256,sampled.profileSha256)}finally{runtime.profile.chatReasoningEffort=effort}
       assert.ok(group);assert.equal(calls.length,0);await assert.rejects(actualRead('plan'),{code:'ENOENT'})
       const channel=skillDigest(['METERED_PROVIDER_NAMESPACE_V1','fixture',`https://127.0.0.1:${upstream.address().port}/custom`])
       const admission=skillDigest(['NATIVE_LOCAL_ARTIFACT_TEXT_V1','codex-cli-0.167.0','RESPONSES_TEXT_TOKENS_V1',group.executionConfigSha256,group.routeSha256,group.toolConfigSha256,channel])

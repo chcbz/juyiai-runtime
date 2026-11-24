@@ -2106,7 +2106,15 @@ test('prepared local task measurement is correlation and session bound without c
   for(const wrong of [{sessionGeneration:'999'},{agentId:'foreign'},{hostId:undefined},{commandId:'unexpected'},{preparationKind:'PRIVATE'},{outputs:{}}])socket.receive({...request,data:{...request.data,...wrong}});
   assert.equal(state.preparedReads,undefined);socket.receive(request);
   let reply=socket.sent.at(-1);assert.equal(reply.messageType,'runtime.task.configuration.measured');assert.equal(reply.measurement,null);assert.equal(reply.correlationId,'prep-message');assert.equal(reply.requestId,'prep-request');assert.equal(reply.intentSha256,intentSha256);
-  state.preparedGroup={version:'NATIVE_DISPATCH_GROUP_V1',executionConfigSha256:'a'.repeat(64),toolConfigSha256:'b'.repeat(64),routeSha256:'c'.repeat(64),privatePath:'/not-public'};
+  state.preparedGroup={version:'NATIVE_DISPATCH_GROUP_V1',executionConfigSha256:'a'.repeat(64),toolConfigSha256:'b'.repeat(64),routeSha256:'c'.repeat(64),profileSha256:'d'.repeat(64),privatePath:'/not-public'};
   socket.receive(request);reply=socket.sent.at(-1);assert.equal(reply.measurement.capturePolicyVersion,'NATIVE_LOCAL_ARTIFACT_TEXT_V1');assert.equal(reply.measurement.privatePath,undefined);assert.equal(reply.measurement.routeSha256,'c'.repeat(64));
   assert.deepEqual(state.preparedReads,[outputs,outputs]);assert.deepEqual(state.accepted,[]);
+  assert.deepEqual(reply.configurationEpoch,{sequence:'2',profileSha256:'d'.repeat(64)});
+  const heartbeat=async()=>{await c.executors[0].heartbeat();return socket.sent.filter(f=>f.messageType==='agent.presence').at(-1).configurationEpoch};
+  assert.deepEqual(await heartbeat(),reply.configurationEpoch);
+  state.preparedGroup=null;assert.deepEqual(await heartbeat(),{sequence:'3',profileSha256:null});
+  assert.deepEqual(await heartbeat(),{sequence:'3',profileSha256:null});
+  state.preparedGroup={...reply.measurement,profileSha256:'d'.repeat(64)};socket.receive(request);
+  assert.deepEqual(socket.sent.at(-1).configurationEpoch,{sequence:'4',profileSha256:'d'.repeat(64)});
+  assert.deepEqual(state.accepted,[]);
 });

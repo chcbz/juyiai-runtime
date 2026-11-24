@@ -262,13 +262,19 @@ const measureNativeConfiguration = ({ skills, skillConfiguration, nativeExecutio
 }
 
 /** Internal comparison only. No execution identity, authority, price or coverage is issued here. */
-export function measureProspectiveNativeGroup({ skills, skillConfiguration, tools, networkAccess, modelCatalogSha256, toolchain, stateRoot, verifiedOnly = false }, settings) {
+export function measureProspectiveNativeGroup({ skills, skillConfiguration, tools, networkAccess, modelCatalogSha256, toolchain, stateRoot, verifiedOnly = false, profileTools }, settings) {
   // An absent catalogue decision, unknown skill selection or unknown network policy is not a proven empty one.
   if (!Array.isArray(skills) || !Array.isArray(skillConfiguration) || typeof networkAccess !== 'boolean'
       || !(modelCatalogSha256 === null || hash(modelCatalogSha256)) || typeof stateRoot !== 'string' || resolve(stateRoot) !== stateRoot) return null
   const { binding } = measureNativeConfiguration({ skills, skillConfiguration, nativeExecution: { tools, networkAccess, modelCatalogSha256 },
     toolchain, verifiedOnly, excludedRoots: [stateRoot] })
-  return nativeDispatchGroup(binding, settings)
+  const group = nativeDispatchGroup(binding, settings)
+  if (!verifiedOnly || !group) return group
+  // Both commitments derive from the same verified measurement. Normalize only the task-specific
+  // output contract. A profile epoch is NOT a dispatch group: never persist it in the actual-use PLAN.
+  if (!Array.isArray(profileTools) || skills.length || skillConfiguration.length || networkAccess) return null
+  const baseline = nativeDispatchGroup({...binding,tools:profileTools},settings)
+  return {...group,profileSha256:skillDigest(['PREPARED_LOCAL_PROFILE_V1',baseline.executionConfigSha256])}
 }
 
 export const prepareNativeExecutionLayout = ({ inputDirectory, scratchDirectory, draftsDirectory, skills = [], skillConfiguration = [], nativeExecution, toolchain, stateRoot, sourceHome }) => {
