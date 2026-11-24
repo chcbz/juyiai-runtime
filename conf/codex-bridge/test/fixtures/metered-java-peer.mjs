@@ -43,17 +43,27 @@ export async function exercisePeer({port, executionId, runId, snapshotDigest, se
   } finally {await rm(root,{recursive:true,force:true})}
 }
 // The Java parent supplies the frozen Chat payload and an issued device session. No workspace command.
-async function discussionPeer({discussion,port,session,rotate}){
-  const {PersistentChatInbox,validateChatDispatch}=await import('../../chat-runtime.mjs')
+async function discussionPeer({discussion,port,session,rotate,cutover}){
+  const {PersistentChatInbox,validateChatDispatch,durableChatKey}=await import('../../chat-runtime.mjs')
   const {startDiscussionCapture}=await import('../../metered-request-capture.mjs')
   const {ChatUsageDelivery}=await import('../../chat-usage-delivery.mjs')
   assert.ok(Number.isInteger(port)&&port>0&&port<=65535)
   const m=validateChatDispatch(discussion),apiOrigin=`http://127.0.0.1:${port}`
   const client=new RuntimeV1Client({apiBaseUrl:apiOrigin,manifest:{}});client.currentSession=session
-  const rootDir=await mkdtemp(join(tmpdir(),'discussion-api-peer-'))
+  const rootDir=cutover?join(tmpdir(),'cutover-inbox'):await mkdtemp(join(tmpdir(),'discussion-api-peer-'))
   try{
     const profile={agentId:session.canonicalAgentId},scope={...profile,clientId:m.clientId,tenantId:m.tenantId}
     const inbox=new PersistentChatInbox({rootDir,profile});inbox.initialize()
+    if(cutover==='resume'){
+      // New OS process; recovery must discover the sealed original without starting a model or accepting another dispatch.
+      const key=durableChatKey(m), lane=new ChatUsageDelivery({inbox,apiOrigin,scope,nativeFetch:client.nativeFetch.bind(client)})
+      const audit=await lane.flush();assert.equal(audit.confirmed,true);assert.equal(audit.pending,0)
+      assert.deepEqual(audit.captureStates,[{key,capture:'SEALED',delivery:'ACKNOWLEDGED',coverage:'INCOMPLETE'}])
+      const parent=join(inbox.dir,`discussion-source-${key}`),captureId=m.contextSnapshot.facts.taskUsageCapture.captureId
+      const dir=join(parent,`usage-acks-${captureId}`),files=await readdir(dir);assert.equal(files.length,7)
+      const ack=JSON.parse(await readFile(join(dir,files.find(f=>/^response-[a-f0-9]{64}-1\.json$/.test(f)))))
+      return {receiptId:ack.receiptId,revision:ack.ledger.revision,ackCount:files.length}
+    }
     const {key}=await inbox.accept(m);assert.ok(inbox.claim(key));const {parent}=inbox.discussionCaptureSubject(key,false)
     const cap=await startDiscussionCapture(inbox,key,{executionConfigSha256:'c'.repeat(64),engineVersion:'fixture',rootSourceId:'discussion',channelNamespace:'test_gateway',adapterVersion:'FIXTURE',checkActive(){}})
     const obs=observeResponse('application/json',200,4096,false);obs.push(Buffer.from('{"id":"discussion_response_1","status":"completed"}'))
@@ -63,6 +73,7 @@ async function discussionPeer({discussion,port,session,rotate}){
     let discarded=false
     const cfg={inbox,apiOrigin,scope,nativeFetch:async(url,options)=>{
       const response=await client.nativeFetch(url,options)
+      if(cutover==='stop' && response.headers.get('X-Fixture-Stop-After-Commit')==='yes'){assert.equal(response.status,200);process.exit(75)}
       if(rotate && response.headers.get('X-Fixture-Drop-Committed')==='yes'){
         assert.equal(response.status,200);assert.equal(discarded,false);discarded=true
         await response.arrayBuffer();throw new TypeError('fixture: receipt lost before delivery')
@@ -84,7 +95,7 @@ async function discussionPeer({discussion,port,session,rotate}){
     const ack=JSON.parse(await readFile(join(dir,files.find(f=>/^response-[a-f0-9]{64}-1\.json$/.test(f)))))
     assert.equal(ack.ledger.status,'PENDING_USAGE');assert.equal(ack.ledger.costYuan,null)
     return {receiptId:ack.receiptId,revision:ack.ledger.revision,ackCount:files.length}
-  }finally{await rm(rootDir,{recursive:true,force:true})}
+  }finally{if(!cutover)await rm(rootDir,{recursive:true,force:true})}
 }
 if(process.argv[1] && import.meta.url===pathToFileURL(process.argv[1]).href){
   try {const chunks=[];for await(const c of process.stdin)chunks.push(c);const input=JSON.parse(Buffer.concat(chunks));console.log(JSON.stringify(await (input.discussion?discussionPeer:exercisePeer)(input)))}
