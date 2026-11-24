@@ -145,9 +145,10 @@ export const buildTypedInspectionCodexConfig = (profile, meteredBaseUrl = null) 
   const config = `approval_policy = "never"\nsandbox_mode = "read-only"\nweb_search = "disabled"\n${providerConfig(profile, meteredBaseUrl)}${systemProxy}`
   return usesChatFiles(profile) ? buildChatFileCodexConfig(config) : config
 }
-const stageCodexHome = (profile, stateRoot, { nativeExecution = false, webSearch = 'disabled', modelCatalog = null, meteredEgress = null } = {}) => {
+const stageCodexHome = (profile, stateRoot, { nativeExecution = false, meteredDiscussion = false, webSearch = 'disabled', modelCatalog = null, meteredEgress = null } = {}) => {
   const codexHome = ensurePrivateDirectory(resolve(stateRoot, 'codex-home')); ensurePrivateDirectory(resolve(stateRoot, 'home'))
-  if (meteredEgress && (!nativeExecution || !meteredEgress.meteredRoute || !profile.typedInspectionProviderId)) fail('METERED_PROVIDER_CONFIG_INVALID')
+  if (meteredDiscussion && (nativeExecution || !meteredEgress || usesChatFiles(profile) || profile.typedInspectionProviderNetwork !== 'restricted-proxy')) fail('METERED_PROVIDER_CONFIG_INVALID')
+  if (meteredEgress && (!(nativeExecution || meteredDiscussion) || !meteredEgress.meteredRoute || !profile.typedInspectionProviderId)) fail('METERED_PROVIDER_CONFIG_INVALID')
   const meteredBaseUrl = meteredEgress ? `${meteredEgress.proxyUrl}/v1` : null
   const modelCatalogPath = nativeExecution && modelCatalog ? stateMarker(codexHome, JSON.parse(modelCatalog.text), 'model-catalog.json') : null
   const readOnlyConfig = (modelCatalogPath ? 'model_catalog_json = "/state/codex-home/model-catalog.json"\n' : '') + buildTypedInspectionCodexConfig(nativeExecution ? { ...profile, typedInspectionSupportedInputs: [] } : profile, meteredBaseUrl)
@@ -198,7 +199,7 @@ const verifyBwrapIdentity = identity => {
   if (!lexical.isFile() || lexical.isSymbolicLink() || String(lexical.dev) !== identity.dev || String(lexical.ino) !== identity.ino || String(lexical.size) !== identity.size || `sha256:${sha256(readFileSync(identity.path))}` !== identity.sha256) fail('TYPED_INSPECTION_BWRAP_IDENTITY_DRIFT')
 }
 const snapshotDirectory = measurement => dirname(dirname(measurement.snapshotPath))
-const sandboxArgs = ({ snapshot, stateRoot, stateMountPath = '/state', chatWorkdir = '/inputs', inputDirectory, networkMode, proxyUrl = '', caTrust = null, nativeView = null, chatToolchain = null }) => {
+const sandboxArgs = ({ snapshot, stateRoot, stateMountPath = '/state', chatWorkdir = '/inputs', inputDirectory, networkMode, proxyUrl = '', meteredBaseUrl = null, caTrust = null, nativeView = null, chatToolchain = null }) => {
   const args = ['--unshare-all']
   args.push('--die-with-parent', '--new-session', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp',
     '--dir', '/runtime', '--ro-bind', snapshot, '/runtime', '--dir', '/inputs', '--ro-bind', inputDirectory, '/inputs')
@@ -214,7 +215,7 @@ const sandboxArgs = ({ snapshot, stateRoot, stateMountPath = '/state', chatWorkd
       '--dir', '/tmp/chat-files', '--setenv', 'TMPDIR', '/tmp/chat-files', '--setenv', 'SHELL', chatToolchain.shell, '--remount-ro', '/')
   }
   args.push('--setenv', 'HOME', `${stateMountPath}/home`, '--setenv', 'CODEX_HOME', `${stateMountPath}/codex-home`, '--setenv', 'PATH', nativeView || chatToolchain ? '/runtime/bin:/usr/bin:/bin' : '/runtime/bin')
-  if (networkMode === 'provider-restricted') args.push('--setenv', 'HTTP_PROXY', proxyUrl, '--setenv', 'HTTPS_PROXY', proxyUrl, '--setenv', 'http_proxy', proxyUrl, '--setenv', 'https_proxy', proxyUrl, '--setenv', 'NO_PROXY', nativeView?.engineState.meteredBaseUrl ? '10.0.2.2' : '', '--setenv', 'no_proxy', nativeView?.engineState.meteredBaseUrl ? '10.0.2.2' : '', '--setenv', 'SSL_CERT_FILE', PROVIDER_CA_SANDBOX_PATH, '--setenv', 'NODE_EXTRA_CA_CERTS', PROVIDER_CA_SANDBOX_PATH)
+  if (networkMode === 'provider-restricted') args.push('--setenv', 'HTTP_PROXY', proxyUrl, '--setenv', 'HTTPS_PROXY', proxyUrl, '--setenv', 'http_proxy', proxyUrl, '--setenv', 'https_proxy', proxyUrl, '--setenv', 'NO_PROXY', meteredBaseUrl ? '10.0.2.2' : '', '--setenv', 'no_proxy', meteredBaseUrl ? '10.0.2.2' : '', '--setenv', 'SSL_CERT_FILE', PROVIDER_CA_SANDBOX_PATH, '--setenv', 'NODE_EXTRA_CA_CERTS', PROVIDER_CA_SANDBOX_PATH)
   else args.push('--unsetenv', 'HTTP_PROXY', '--unsetenv', 'HTTPS_PROXY', '--unsetenv', 'ALL_PROXY', '--unsetenv', 'http_proxy', '--unsetenv', 'https_proxy', '--unsetenv', 'all_proxy')
   args.push('--chdir', nativeView ? '/execution' : chatWorkdir, '/runtime/bin/codex')
   return args
@@ -357,7 +358,7 @@ export class IsolatedEngineProfileRuntime {
     const stateDirectory = engineState.conversationDirectory || engineState.directory
     if (!within(this.stateRoot, stateDirectory) || realpathSync(stateDirectory) !== stateDirectory) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_INVALID')
     const args = sandboxArgs({ snapshot: snapshotDirectory(schemaMeasurement), stateRoot: stateDirectory,
-      stateMountPath: engineState.sandboxStatePath || '/state', chatWorkdir: engineState.chatWorkdir || '/inputs', inputDirectory: input, networkMode, proxyUrl, caTrust: this.providerCaTrust, nativeView, chatToolchain: !nativeView && usesChatFiles(this.profile) ? this.nativeToolchain : null })
+      stateMountPath: engineState.sandboxStatePath || '/state', chatWorkdir: engineState.chatWorkdir || '/inputs', inputDirectory: input, networkMode, proxyUrl, meteredBaseUrl: engineState.meteredBaseUrl, caTrust: this.providerCaTrust, nativeView, chatToolchain: !nativeView && usesChatFiles(this.profile) ? this.nativeToolchain : null })
     const spawnWrapped = (_binary, commandArgs, options) => {
       verifyBwrapIdentity(this.bwrap)
       if (nativeView) {

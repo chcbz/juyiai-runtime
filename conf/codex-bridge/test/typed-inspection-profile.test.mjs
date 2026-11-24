@@ -1,3 +1,4 @@
+import { stageCodexHome } from '../isolated-engine-profile.mjs'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import test from 'node:test'
@@ -592,5 +593,22 @@ test('missing recovery state never evicts a healthy idle chat process', async t 
     assert.equal(closed, 0); assert.ok(runtime.warmChatAdapters.has(conversationKey))
     assert.equal(runtime.idleWarmChatKey, conversationKey)
     assert.equal(runtime.pendingInspectionKeys.size, 0)
+  }
+})
+
+test('metered text discussion stages only a route token without native execution or provider auth', t => {
+  const { root, runtime } = conversationStateFixture(t)
+  const profile = { ...runtime.profile, typedInspectionProviderNetwork: 'restricted-proxy' }
+  rmSync(resolve(profile.codexHome, 'auth.json')) // No host key is available to staging.
+  const route = { proxyUrl: 'http://10.0.2.2:4321', meteredRoute: { sandboxToken: () => 'temporary-fixture' } }
+  const state = stageCodexHome(profile, root, { meteredDiscussion: true, meteredEgress: route })
+  assert.equal(JSON.parse(readFileSync(state.authPath)).OPENAI_API_KEY, 'temporary-fixture')
+  const config = readFileSync(resolve(state.codexHome, 'config.toml'), 'utf8')
+  for (const line of ['sandbox_mode = "read-only"', 'web_search = "disabled"', 'supports_websockets = false', 'respect_system_proxy = true', 'base_url = "http://10.0.2.2:4321/v1"']) assert.ok(config.includes(line))
+  assert.ok(!config.includes(profile.typedInspectionProviderBaseUrl))
+  for (const [p, opts] of [[profile, {}], [profile, { nativeExecution: true, meteredEgress: route }],
+    [{ ...profile, typedInspectionSupportedInputs: [{ carrier: 'LOCAL_FILE' }] }, { meteredEgress: route }],
+    [{ ...profile, typedInspectionProviderNetwork: 'direct' }, { meteredEgress: route }]]) {
+    assert.throws(() => stageCodexHome(p, root, { ...opts, meteredDiscussion: true }), /METERED_PROVIDER_CONFIG_INVALID/)
   }
 })
