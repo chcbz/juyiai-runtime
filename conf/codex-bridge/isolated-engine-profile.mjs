@@ -349,6 +349,12 @@ export class IsolatedEngineProfileRuntime {
       directory, markerPath, created, bindingDigest, binding, conversationKey }
   }
 
+  _meteredEgress(options, capture, localArtifactCall) {
+    const key = readModelAuthFile(this.profile.codexHome).auth.OPENAI_API_KEY
+    const ca = readFileSync(this.providerCaTrust.path)
+    if (`sha256:${sha256(ca)}` !== this.providerCaTrust.sha256) fail('METERED_PROVIDER_CA_CHANGED')
+    return this.egressFactory({ ...options, meteredResponses: { capture, localArtifactCall, getProviderKey: () => key, ca } })
+  }
   async _spawnAdapter({ inputDirectory, engineState, schemaMeasurement, networkMode = 'isolated', proxyUrl = '', nativeView = null, nativeExecution = null }) {
     if (Boolean(nativeView) !== Boolean(nativeExecution)) fail('NATIVE_EXECUTION_BINDING_INVALID')
     if (!nativeView && usesChatFiles(this.profile)) this.nativeToolchain = validateNativeExecutionToolchain(this.nativeToolchain)

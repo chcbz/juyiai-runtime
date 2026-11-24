@@ -1,7 +1,6 @@
 import { isCurrentAppServerMeasurement } from './app-server-adapter.mjs'
 import { startMeteredRoot, resumeStoppedMeteredRoot } from './metered-request-capture.mjs'
 import { skillDigest, skillId } from './skill-executor.mjs'
-import { readModelAuthFile } from './model-auth.mjs'
 import { BROWSER_PROBE } from './native-browser-toolchain.mjs'
 import { DOCUMENT_MIMES, DOCUMENT_PROBE, PDF_PROBE } from './native-document-toolchain.mjs'
 import { spawn } from 'node:child_process'
@@ -121,10 +120,7 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
       }
       if (slot.meteredCapture) {
         phase('metered-egress-start')
-        const key = readModelAuthFile(this.profile.codexHome).auth.OPENAI_API_KEY
-        const ca = readFileSync(this.providerCaTrust.path)
-        if (`sha256:${createHash('sha256').update(ca).digest('hex')}` !== this.providerCaTrust.sha256) fail('METERED_PROVIDER_CA_CHANGED')
-        egress = this.egressFactory({ ...egressOptions, meteredResponses: { capture: slot.meteredCapture, localArtifactCall:nativeExecution.localArtifactCall, getProviderKey: () => key, ca } })
+        egress = this._meteredEgress(egressOptions, slot.meteredCapture, nativeExecution.localArtifactCall)
         await egress.start(); checkActive()
       }
       phase('request-state-and-skill-view')

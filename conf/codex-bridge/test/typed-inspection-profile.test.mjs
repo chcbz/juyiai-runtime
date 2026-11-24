@@ -612,3 +612,45 @@ test('metered text discussion stages only a route token without native execution
     assert.throws(() => stageCodexHome(p, root, { ...opts, meteredDiscussion: true }), /METERED_PROVIDER_CONFIG_INVALID/)
   }
 })
+
+test('discussion adapters never share an engine or cross a pending source watermark', async t => {
+  const { root, runtime } = conversationStateFixture(t)
+  const { PersistentChatInbox, validateChatDispatch } = await import('../chat-runtime.mjs')
+  const wire = JSON.parse(readFileSync(new URL('../contracts/api-hosted-wire-v1.json', import.meta.url)))
+  Object.assign(runtime.profile, { agentId:wire.targetAgentId, profileId:'fixture', typedInspectionProviderNetwork:'restricted-proxy' })
+  runtime.materializerRoot = root
+  runtime.providerCaTrust = { path:resolve(root,'ca'), sha256:'sha256:'+createHash('sha256').update('fixture').digest('hex') }; writeFileSync(runtime.providerCaTrust.path,'fixture')
+  const inbox = new PersistentChatInbox({ rootDir:root, profile:runtime.profile }); inbox.initialize()
+  const enroll = async suffix => {
+    const m = structuredClone(wire); m.route='CHAT'; m.turnId+=suffix; m.dispatchId+=suffix; m.dedupeKey+=suffix
+    const f=m.factsManifest; f.participantAgentIds=[m.targetAgentId]; f.typedDeliberation={schemaVersion:5}; f.contextDelivery={schemaVersion:1,mode:'BOOTSTRAP',afterMessageId:'0',throughMessageId:'1',baseTurnId:null,engineThreadId:null}
+    f.taskUsageCapture={protocol:'METERED_CAPTURE_V2',captureId:canonicalSha256(['CAPTURE_V2',m.turnId,m.dispatchId]).slice(7)}
+    m.contextSnapshot.facts=f;m.contextHash=m.contextSnapshot.contextHash=canonicalSha256({sourceVector:m.sourceVector,facts:f})
+    const { key }=await inbox.accept(validateChatDispatch(m));inbox.claim(key);return key
+  }
+  const routes=[], engines=[]; runtime.measureBinary=async()=>({binarySha256:'a'.repeat(64),cliVersion:'0.167.0'})
+  runtime.chatAdapterLifecycle={ready:()=>assert.fail('must not publish shared adapter')}
+  runtime.egressFactory=({meteredResponses})=>{
+    const n=routes.length, lifecycle=new AbortController();routes.push(meteredResponses.capture)
+    assert.equal(meteredResponses.getProviderKey(),'synthetic-test-only')
+    return {lifecycle,proxyUrl:`http://10.0.2.2:${8700+n}`,meteredRoute:{sandboxToken:()=>`temporary-${n}`},start:async()=>{},bindOwner:async()=>{},attach:async()=>{},dispose:async()=>lifecycle.abort()}
+  }
+  runtime._spawnAdapter=async({engineState,networkMode,nativeExecution})=>{
+    assert.equal(networkMode,'provider-restricted');assert.equal(nativeExecution,undefined)
+    assert.equal(JSON.parse(readFileSync(engineState.authPath)).OPENAI_API_KEY,`temporary-${engines.length}`)
+    const a={typedInspectionEngineState:engineState,child:{},childClosed:false,readback:{tools:{data:[]}},shutdown:async()=>{a.childClosed=true}};engines.push(a);return a
+  }
+  runtime._initializeAndSeal=async a=>rmSync(a.typedInspectionEngineState.authPath)
+  const a=await enroll('-a'), b=await enroll('-b'), first=await runtime.openDiscussionAdapter(inbox,a)
+  assert.equal(routes[0].runId,first.message.dispatchId);await assert.rejects(runtime.openDiscussionAdapter(inbox,b),/CONVERSATION_IN_USE/)
+  const held=Promise.withResolvers(), admitted=Promise.withResolvers();const pending=routes[0].dispatch(async()=>{admitted.resolve();await held.promise});await admitted.promise
+  const closing=first.close();await assert.rejects(runtime.openWarmChatAdapter(first.conversationKey,'ordinary'),/CONVERSATION_IN_USE/)
+  await assert.rejects(runtime.openDiscussionAdapter(inbox,b),/CONVERSATION_IN_USE/);held.resolve();await pending;await closing
+  await assert.rejects(runtime.openDiscussionAdapter(inbox,a),{code:'EEXIST'});assert.equal(engines.length,1)
+  const second=await runtime.openDiscussionAdapter(inbox,b);assert.equal(first.conversationKey,second.conversationKey);assert.notEqual(first.adapter,second.adapter)
+  assert.equal(routes[1].runId,second.message.dispatchId);await first.close();assert.equal(second.adapter.childClosed,false)
+  await assert.rejects(routes[0].dispatch(()=>assert.fail('closed source')),/ADMISSION_CLOSED/)
+  second.adapter.shutdown=async()=>{};await assert.rejects(second.close(),/STOP_UNCONFIRMED/)
+  await assert.rejects(runtime.openWarmChatAdapter(second.conversationKey,'late'),/CONVERSATION_IN_USE/)
+  second.adapter.childClosed=true;await runtime.dispose();assert.equal(runtime.conversationOwners.size,0)
+})

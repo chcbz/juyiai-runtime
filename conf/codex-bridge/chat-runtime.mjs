@@ -634,7 +634,7 @@ export class PersistentChatInbox {
         try { mkdirSync(parent,{mode:0o700}); directoryFsync(this.dir) }
         catch (error) { if (error.code !== 'EEXIST') throw error }
       }
-      return {parent, subject:{executionId:message.turnId, runId:message.dispatchId, snapshotDigest:message.contextHash.slice(7)}}
+      return {parent, message, subject:{executionId:message.turnId, runId:message.dispatchId, snapshotDigest:message.contextHash.slice(7)}}
     })
   }
   claimPreEngineInspection(key) {

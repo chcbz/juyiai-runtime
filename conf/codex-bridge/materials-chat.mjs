@@ -2,7 +2,7 @@ import { completedContextReceipt } from './chat-context-delivery.mjs'
 import { prepareImageDerivative } from './image-input-file.mjs'
 /** Authorized materials in the original CHAT turn. Reuses the existing byte
  * materializer, measured carrier isolation and durable CHAT inbox; no new lane. */
-import { buildTypedInspectionCodexConfig } from './typed-inspection-profile.mjs'
+import { buildTypedInspectionCodexConfig } from './isolated-engine-profile.mjs'
 import { canonicalSha256, chatTaskAuthorityDigest } from './chat-runtime.mjs'
 import { buildTypedInspectionNativeInputs, finalizeTypedInspectionInputReceipt } from './typed-inspection-input-carriers.mjs'
 const fail = code => { throw Object.assign(new Error(code), { code }) }
