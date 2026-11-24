@@ -42,12 +42,13 @@ export async function deliverDiscussionMetered(inbox,key,scope,request,batch,onS
   // fields for this pass; no observations/bodies on the retry queue or across calls.
   const expectations=new Map()
   const marker=await verifySealedSubject(parent,subject,r=>{
-    const {schemaVersion,executionId,runId,captureId,recordId,sourceRevision,receiptId,evidenceSha256,kind,expectedRevision}=r
+    const {recordId,sourceRevision,receiptId,evidenceSha256,kind}=r
     const epoch=r.observation.epoch??'0'
     const key=kind==='REQUEST'?`request-${r.observation.sequence}-${sourceRevision}`:kind==='RESPONSE'?`response-${r.observation.sourceAttemptId}-1`:
       kind==='SOURCE'?`source-${epoch}`:kind==='SOURCE_FINAL'?'source-final-1':kind==='CAPTURE_FINAL'?'capture-final-1':'plan'
-    expectations.set(epoch==='0'?key:`epoch-${epoch}-${key}`,{schemaVersion,executionId,runId,captureId,recordId,sourceRevision,receiptId,evidenceSha256,kind,expectedRevision,
-      observation:kind==='RESPONSE'?{sourceAttemptId:r.observation.sourceAttemptId}:null})
+    // Copy verified SHA bytes; retaining slices of parsed JSON strings can keep their larger
+    // backing strings alive. All other ACK fields come from the verified subject and file key.
+    expectations.set(epoch==='0'?key:`epoch-${epoch}-${key}`,Buffer.from(recordId+receiptId+evidenceSha256,'hex'))
   }), {executionId,runId,snapshotDigest}=subject
   onSealed?.(marker)
   const path=`/internal/agent/chat/dispatches/${runId}/turns/${executionId}/contexts/${snapshotDigest}/captures/${marker.captureId}/usage`
@@ -68,10 +69,15 @@ async function deliverSubject(parent,executionId,runId,path,request,batch,sealed
     const has=saved.has(`${ackKey}.json`);if(has&&!sealed)continue
     const audited=expectations?.get(ackKey)
     if(expectations){if(!audited)bad();checked++}
-    if(has&&audited){validateAck(await readPrivate(acks,ackKey),audited);continue}
+    if(has&&audited){
+      validateAck(await readPrivate(acks,ackKey),{schemaVersion:2,executionId,runId,captureId,kind,
+        recordId:audited.toString('hex',0,32),receiptId:audited.toString('hex',32,64),evidenceSha256:audited.toString('hex',64,96),
+        sourceRevision:kind==='REQUEST'?match[2]:'1',expectedRevision:kind==='RESPONSE'?'0':null,
+        observation:kind==='RESPONSE'?{sourceAttemptId:match[1]}:null});continue
+    }
     if(!has&&(batch.left<=0||remainingMs(batch)<=0))return false
     const raw=await readPrivate(entry.dir,key),{receiptId,expectedRevision,evidenceSha256,...e}=raw
-    if(audited&&raw.receiptId!==audited.receiptId)bad()
+    if(audited&&raw.receiptId!==audited.toString('hex',32,64))bad()
     const o=e.observation,identity=kind==='PLAN'||kind==='CAPTURE_FINAL'?[]:kind==='RESPONSE'?[match[1]]:kind==='REQUEST'?[o.sourceId,o.epoch,match[1]]:[o.sourceId,o.epoch]
     if((!global&&o.epoch!==entry.epoch)||e.kind!==kind||e.schemaVersion!==2||e.executionId!==executionId||e.runId!==runId||e.captureId!==captureId||e.sourceRevision!==(kind==='REQUEST'?match[2]:'1')||
       e.recordId!==skillDigest(['USAGE_RECORD_V2',captureId,kind,identity])||!sha.test(evidenceSha256)||skillDigest(e)!==evidenceSha256||
