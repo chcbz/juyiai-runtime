@@ -42,7 +42,32 @@ export async function exercisePeer({port, executionId, runId, snapshotDigest, se
     return {captureId:cap.captureId,receiptId:ack.receiptId,attemptId:ack.ledger.attemptId,revision:ack.ledger.revision,ackCount:files.length}
   } finally {await rm(root,{recursive:true,force:true})}
 }
+// The Java parent supplies the frozen Chat payload and an issued device session. No workspace command.
+async function discussionPeer({discussion,port,session}){
+  const {PersistentChatInbox,validateChatDispatch}=await import('../../chat-runtime.mjs')
+  const {startDiscussionCapture}=await import('../../metered-request-capture.mjs')
+  const {ChatUsageDelivery}=await import('../../chat-usage-delivery.mjs')
+  assert.ok(Number.isInteger(port)&&port>0&&port<=65535)
+  const m=validateChatDispatch(discussion),apiOrigin=`http://127.0.0.1:${port}`
+  const client=new RuntimeV1Client({apiBaseUrl:apiOrigin,manifest:{}});client.currentSession=session
+  const rootDir=await mkdtemp(join(tmpdir(),'discussion-api-peer-'))
+  try{
+    const profile={agentId:session.canonicalAgentId},scope={...profile,clientId:m.clientId,tenantId:m.tenantId}
+    const inbox=new PersistentChatInbox({rootDir,profile});inbox.initialize()
+    const {key}=await inbox.accept(m);assert.ok(inbox.claim(key));const {parent}=inbox.discussionCaptureSubject(key,false)
+    const cap=await startDiscussionCapture(inbox,key,{executionConfigSha256:'c'.repeat(64),engineVersion:'fixture',rootSourceId:'discussion',channelNamespace:'test_gateway',adapterVersion:'FIXTURE',checkActive(){}})
+    const obs=observeResponse('application/json',200,4096,false);obs.push(Buffer.from('{"id":"discussion_response_1","status":"completed"}'))
+    await cap.dispatch((_req,finish)=>finish(obs.finish(true)));await cap.sealStopped(()=>{});inbox.complete(inbox.findByKey(key))
+    const cfg={inbox,apiOrigin,scope,nativeFetch:client.nativeFetch.bind(client)}
+    const lane=new ChatUsageDelivery(cfg);assert.deepEqual(await lane.deliver(),[])
+    const audit=await new ChatUsageDelivery(cfg).flush();assert.ok(audit.confirmed);assert.equal(audit.captureStates[0].coverage,'INCOMPLETE')
+    const dir=join(parent,`usage-acks-${cap.captureId}`),files=await readdir(dir);assert.equal(files.length,7)
+    const ack=JSON.parse(await readFile(join(dir,files.find(f=>/^response-[a-f0-9]{64}-1\.json$/.test(f)))))
+    assert.equal(ack.ledger.status,'PENDING_USAGE');assert.equal(ack.ledger.costYuan,null)
+    return {receiptId:ack.receiptId,revision:ack.ledger.revision,ackCount:files.length}
+  }finally{await rm(rootDir,{recursive:true,force:true})}
+}
 if(process.argv[1] && import.meta.url===pathToFileURL(process.argv[1]).href){
-  try {const chunks=[];for await(const c of process.stdin)chunks.push(c);console.log(JSON.stringify(await exercisePeer(JSON.parse(Buffer.concat(chunks)))))}
+  try {const chunks=[];for await(const c of process.stdin)chunks.push(c);const input=JSON.parse(Buffer.concat(chunks));console.log(JSON.stringify(await (input.discussion?discussionPeer:exercisePeer)(input)))}
   catch {console.error('Metered API peer verification failed');process.exitCode=1}
 }
