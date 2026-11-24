@@ -74,6 +74,11 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
       if (!turn) session.bindTurn({ threadId: thread.threadId, turnId: recovered.turnId })
       return session.finalize({ threadId: thread.threadId, turnId: recovered.turnId, finishReason: 'completed' }, receipts)
     }
+    if (existing && command.usageMode==='RESPONSE_V2') {
+      // Only the never-attempted path can reach here; load the exact original thread, not a new one.
+      const resumed=await adapter.startOrResumeThread(existing,policy)
+      if(resumed.threadId!==existing.threadId)fail('SKILL_RESULT_UNKNOWN')
+    }
     const input = [{ type: 'text', text: JSON.stringify({ instruction: command.instruction, parameters: command.parameters,
       files: inputs.map(item => ({ inputRef: item.inputRef, path: `/inputs/${item.inputRef}`, contentMimeType: item.contentMimeType })), outputs: command.outputs }) }]
     // Native visual carriers are original files, not inferred from file names.

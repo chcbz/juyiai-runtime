@@ -1,5 +1,5 @@
 import { isCurrentAppServerMeasurement } from './app-server-adapter.mjs'
-import { startMeteredRoot } from './metered-request-capture.mjs'
+import { startMeteredRoot, resumeStoppedMeteredRoot } from './metered-request-capture.mjs'
 import { skillDigest } from './skill-executor.mjs'
 import { readModelAuthFile } from './model-auth.mjs'
 import { BROWSER_PROBE } from './native-browser-toolchain.mjs'
@@ -96,18 +96,24 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
       const schema = await this.measureBinary(this.profile); checkActive()
       const egressOptions = { providerBaseUrl: this.profile.typedInspectionProviderBaseUrl, networkConnectTimeoutMs: this.profile.typedInspectionNetworkConnectTimeoutMs, additionalOrigins: layout.binding.networkOrigins }
       if (slot.meteredAdmission) {
-        // A fresh epoch must not take over unknown prior requests or send again during recovery.
-        if (requireExistingState) fail('SKILL_RESULT_UNKNOWN')
         const { store, model, effort } = slot.meteredAdmission
+        let mode=null
+        if(requireExistingState){
+          const thread=store.read('native-thread'),attempt=store.read('native-start-attempt')
+          if(typeof thread?.threadId!=='string'||!thread.threadId||
+              (attempt&&(attempt.threadId!==thread.threadId||attempt.clientUserMessageId!==store.command.messageId)))fail('SKILL_RESULT_UNKNOWN')
+          mode=attempt?'RECONCILE_ONLY':'BEFORE_FIRST_TURN'
+        }
         const { channelNamespace, engineVersion, coveragePolicyVersion } = nativeMeteringRoute(this.profile, schema, slot.meteredAdmission.localArtifactOnly &&
           !layout.binding.networkAccess && !layout.binding.networkOrigins.length && !layout.binding.webSearch &&
           !layout.binding.skills.length && !layout.binding.skillConfiguration.length && typeof nativeExecution.localArtifactCall === 'function')
         try {
-          slot.meteredCapture = await startMeteredRoot(store, { executionId:binding.authorizationId, runId:store.command.runId,
+          const options = { executionId:binding.authorizationId, runId:store.command.runId,
             executionConfigSha256:skillDigest([layout.digest,store.commandDigest,engineVersion,channelNamespace,model,effort]),
             dispatchGroup:nativeDispatchGroup(layout.binding,{binarySha256:schema.binarySha256,engineVersion,channelNamespace,model,effort,
               instructionsSha256:slot.meteredAdmission.instructionsSha256,toolPolicyRef:store.command.toolPolicyRef,coveragePolicyVersion}),
-            engineVersion,coveragePolicyVersion,rootSourceId:'source_model',channelNamespace,adapterVersion:'RESPONSES_TEXT_TOKENS_V1',checkActive })
+            engineVersion,coveragePolicyVersion,rootSourceId:'source_model',channelNamespace,adapterVersion:'RESPONSES_TEXT_TOKENS_V1',checkActive }
+          slot.meteredCapture=mode===null?await startMeteredRoot(store,options):await resumeStoppedMeteredRoot(store,options,mode)
         } catch (error) { if (error.code === 'EEXIST') fail('SKILL_RESULT_UNKNOWN'); throw error }
       }
       if (slot.meteredCapture) {

@@ -161,8 +161,8 @@ for (const admitted of [false,true,'artifact']) test(admitted==='artifact'?'real
       }
       return
     }
-    const adapter=await runtime.openNativeExecutionAdapter(join(store.directory,'inputs'),binding.requestKey,binding,{scratchDirectory:join(store.directory,'scratch'),draftsDirectory:join(store.directory,'drafts'),nativeExecution:{executionId:'exec1',tools:[],checkActive(){},callTool(){}},...(admitted?{meteredAdmission:{store,model:'gpt-5.4',effort:'medium',instructionsSha256:skillDigest('fixture launch policy')}}:{meteredCapture:capture})})
-    assert.ok(inspected);assert.ok(adapter.readback.credentialIsolation.bootstrapCredentialRemoved);assert.ok(adapter.nativeExecutionIsolation.network.nftDefaultDropReadback)
+    const openAdapter=(restore=false)=>runtime.openNativeExecutionAdapter(join(store.directory,'inputs'),binding.requestKey,binding,{requireExistingState:restore,scratchDirectory:join(store.directory,'scratch'),draftsDirectory:join(store.directory,'drafts'),nativeExecution:{executionId:'exec1',tools:[],checkActive(){},callTool(){}},...(admitted?{meteredAdmission:{store,model:'gpt-5.4',effort:'medium',instructionsSha256:skillDigest('fixture launch policy')}}:{meteredCapture:capture})})
+    const adapter=await openAdapter();assert.ok(inspected);assert.ok(adapter.readback.credentialIsolation.bootstrapCredentialRemoved);assert.ok(adapter.nativeExecutionIsolation.network.nftDefaultDropReadback)
     const policy={cwd:'/execution',model:'gpt-5.4',effort:'medium',developerInstructions:'fixture launch policy'},thread=await adapter.startOrResumeThread(null,policy)
     await adapter.runTurn({threadId:thread.threadId,clientUserMessageId:'fixture-message',policy,input:[{type:'text',text:'fixture'}]})
     assert.deepEqual(calls,[{path:'/custom/responses',auth:'Bearer upstream-fixture-only',pending:'PENDING'}])
@@ -170,6 +170,11 @@ for (const admitted of [false,true,'artifact']) test(admitted==='artifact'?'real
       await runtime.suspendAdapter(binding.requestKey)
       const measured=(await read('plan')).observation;assert.equal(measured.engineVersion,'codex-cli-0.167.0');assert.equal(measured.dispatchGroup.version,'NATIVE_DISPATCH_GROUP_V1');assert.match(measured.dispatchGroup.toolConfigSha256,/^[a-f0-9]{64}$/);assert.equal(measured.coveragePolicyVersion,'NATIVE_EXECUTION_UNVERIFIED_V1')
       assert.equal((await read('producer-stopped')).reservedHigh,'1')
+      store.write('native-thread',{threadId:thread.threadId});store.write('native-start-attempt',{threadId:thread.threadId,clientUserMessageId:store.command.messageId})
+      const again=await openAdapter(true);const state=await again.request('thread/read',{threadId:thread.threadId,includeTurns:true});assert.equal(state.thread.id,thread.threadId)
+      const active=runtime.activeAdapters.get(binding.requestKey);await assert.rejects(active.slot.meteredCapture.dispatch(()=>assert.fail('reconciliation sent a request')),{code:'METERED_CAPTURE_ADMISSION_CLOSED'})
+      await runtime.suspendAdapter(binding.requestKey);assert.equal(calls.length,1)
+      assert.equal((await read('epoch-1/source-1')).observation.previousEpochSourceRecordId,(await read('source-0')).recordId);assert.equal((await read('epoch-1/producer-stopped')).reservedHigh,'0')
       await assert.rejects(read('capture-final-1'),{code:'ENOENT'})
     } else await capture.stopAndDrain()
     const linked=await read('request-1-2'), response=await read(`response-${linked.observation.sourceAttemptId}-1`)
@@ -184,7 +189,7 @@ for (const admitted of [false,true,'artifact']) test(admitted==='artifact'?'real
     assert.equal(sourceFinal.observation.closeState,expected);assert.equal(sourceFinal.observation.requestCount,'1')
     const tuple=r=>[r.recordId,r.sourceRevision,r.evidenceSha256]
     assert.equal(sourceFinal.observation.recordsSha256,skillDigest([await read('source-0'),linked,response].map(tuple).sort(([a],[b])=>a<b?-1:1)))
-    assert.equal(captureFinal.observation.sourcesSha256,skillDigest([tuple(sourceFinal)]));assert.equal((await read('usage-capture-finalized')).closeState,expected)
+    assert.equal(captureFinal.observation.sourcesSha256,skillDigest((admitted?[tuple(sourceFinal),tuple(await read('epoch-1/source-final-1'))]:[tuple(sourceFinal)]).sort(([a],[b])=>a<b?-1:1)));assert.equal((await read('usage-capture-finalized')).closeState,expected)
   } finally {await runtime.dispose()}
 })
 
@@ -360,4 +365,15 @@ test('stopped recovery links two epochs, retains unresolved prior requests and a
   assert.deepEqual(await recoverStoppedMeteredRoot(store,()=>{}),marker)
   const seen=new Set();const post=async(path,method,r)=>{assert.equal(method,'POST');assert.ok(!seen.has(r.receiptId));seen.add(r.receiptId);return Object.fromEntries([...['schemaVersion','executionId','runId','captureId','receiptId','recordId','sourceRevision','evidenceSha256'].map(k=>[k,r[k]]),['acceptedAt',5],['acceptance','DURABLE'],['ledger',null]])}
   const send=()=>deliverMetered(store,post,{left:2,until:Date.now()+5000},true);assert.equal(await send(),false);assert.equal(await send(),false);assert.equal(await send(),false);assert.equal(await send(),true);assert.equal(seen.size,7);assert.equal(await send(),true)
+})
+
+test('only a stopped matching capture before any first turn can admit a new provider call in its successor',async t=>{
+  const {resumeStoppedMeteredRoot:resume}=await import('../metered-request-capture.mjs');const {store,args,capture,dir,read}=await openRoot(t)
+  const open=(a=args)=>resume(store,a,'BEFORE_FIRST_TURN');await assert.rejects(open(),{code:'SKILL_RESULT_UNKNOWN'})
+  await capture.markStopped(()=>{});await assert.rejects(open({...args,channelNamespace:'different'}),{code:'SKILL_RESULT_UNKNOWN'})
+  await assert.rejects(open({...args,executionConfigSha256:'0'.repeat(64)}),{code:'SKILL_RESULT_UNKNOWN'});assert.ok(!(await readdir(dir)).includes('epoch-1'))
+  const next=await open();const old=await read('source-0');assert.equal((await read('epoch-1/source-1')).observation.previousEpochSourceRecordId,old.recordId)
+  await next.dispatch(async request=>{assert.equal(request.epoch,'1');assert.equal(request.sequence,'1');assert.equal((await read('epoch-1/request-1-1')).observation.resolution,'PENDING')})
+  await next.markStopped(()=>{});await assert.rejects(open(),{code:'SKILL_RESULT_UNKNOWN'});const marker=await recoverStoppedMeteredRoot(store,()=>{})
+  assert.equal(marker.closeState,'SEALED_INCOMPLETE');await assert.rejects(resume(store,args,'RECONCILE_ONLY'),{code:'SKILL_RESULT_UNKNOWN'});assert.ok(!(await readdir(dir)).includes('epoch-2'))
 })
