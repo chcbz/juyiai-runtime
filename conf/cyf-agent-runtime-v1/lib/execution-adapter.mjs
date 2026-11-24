@@ -237,6 +237,24 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
               if (managementFacts) logger('runtime-management-not-admitted', { ...managementFacts, code: 'CHANNEL_NOT_CONFIRMED' });
               return;
             }
+            // Read-only, task preparation only. No command ingress, durable ACK, engine startup or remote action.
+            if (frame.messageType === 'runtime.task.configuration.probe') {
+              const keys=['messageType','messageId','requestId','installationId','tenantId','clientId','agentId','hostId','runtimeInstanceId','sessionGeneration','intentSha256','preparationKind','outputs'];
+              if (!ready() || !executor.comparePreparedLocalTask || Object.keys(frame).some(k=>!keys.includes(k)) || frame.agentId!==session.canonicalAgentId
+                  || ['installationId','tenantId','clientId','hostId','runtimeInstanceId','sessionGeneration'].some(k=>frame[k]!==session[k])
+                  || frame.preparationKind!=='TASK_NATIVE_LOCAL_FILES_V1' || typeof frame.intentSha256!=='string' || !/^[0-9a-f]{64}$/.test(frame.intentSha256)
+                  || !frame.outputs || !Object.hasOwn(frame.outputs,'dataSchema') || !Array.isArray(frame.outputs.mimeTypes)
+                  || typeof frame.outputs.multiple!=='boolean' || typeof frame.outputs.artifactsRequired!=='boolean'
+                  || Buffer.byteLength(bytes)>16384 || (frame.outputs.dataSchema!==null && (typeof frame.outputs.dataSchema!=='object'||Array.isArray(frame.outputs.dataSchema)))) return;
+              let measurement=null;
+              try {
+                const group=executor.comparePreparedLocalTask(frame.outputs);
+                if(group?.version==='NATIVE_DISPATCH_GROUP_V1' && ['executionConfigSha256','routeSha256','toolConfigSha256'].every(k=>typeof group[k]==='string' && /^[0-9a-f]{64}$/.test(group[k])))
+                  measurement={version:group.version,executionConfigSha256:group.executionConfigSha256,routeSha256:group.routeSha256,toolConfigSha256:group.toolConfigSha256,capturePolicyVersion:'NATIVE_LOCAL_ARTIFACT_TEXT_V1'};
+              } catch { /* drift or unavailable: never infer a configuration */ }
+              send({messageType:'runtime.task.configuration.measured',messageId:randomUUID(),requestId:frame.requestId,correlationId:frame.messageId,intentSha256:frame.intentSha256,measurement});
+              return;
+            }
             // This is a lossy scheduling hint, never an executable command or durable ACK.
             if (frame.messageType === 'runtime.work.available') {
               if (frame.notificationVersion !== 1 || frame.lane !== 'NATIVE_CONVERSATION' || !nativeWorkEnabled

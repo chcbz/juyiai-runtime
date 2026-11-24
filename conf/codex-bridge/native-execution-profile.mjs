@@ -221,7 +221,7 @@ export function nativeDispatchGroup(binding, {binarySha256, engineVersion, chann
 
 // Common read-only measurement. Raw configuration and paths remain inside the bridge.
 // Dispatch separately validates the execution directories and the live authorization callbacks.
-const measureNativeConfiguration = ({ skills, skillConfiguration, nativeExecution, toolchain, excludedRoots }) => {
+const measureNativeConfiguration = ({ skills, skillConfiguration, nativeExecution, toolchain, excludedRoots, verifiedOnly = false }) => {
   if (!Array.isArray(nativeExecution.tools)
       || nativeExecution.tools.some(tool => !object(tool) || tool.type !== 'function' || typeof tool.name !== 'string' || !tool.name.trim() || typeof tool.description !== 'string' || !object(tool.inputSchema))
       || new Set(nativeExecution.tools.map(tool => tool.name)).size !== nativeExecution.tools.length) fail('NATIVE_EXECUTION_BINDING_INVALID')
@@ -236,7 +236,10 @@ const measureNativeConfiguration = ({ skills, skillConfiguration, nativeExecutio
     keys.add(skill.skillKey)
     return Object.freeze({ skillKey: skill.skillKey, packageRoot, packageTreeDigest: skill.packageTreeDigest })
   }).sort((a, b) => a.skillKey.localeCompare(b.skillKey))
-  const fixedToolchain = validateNativeExecutionToolchain(toolchain)
+  const fixedToolchain = verifiedOnly ? (() => {
+    if (!verifiedToolchains.has(toolchain) || !sameState(verifiedToolchains.get(toolchain), toolchainState(toolchain))) fail('NATIVE_EXECUTION_TOOLCHAIN_DRIFT')
+    return toolchain
+  })() : validateNativeExecutionToolchain(toolchain)
   if (!Array.isArray(skillConfiguration)) fail('NATIVE_SKILL_CONFIG_INVALID')
   const configured = new Set()
   const configurations = skillConfiguration.map(item => {
@@ -259,12 +262,12 @@ const measureNativeConfiguration = ({ skills, skillConfiguration, nativeExecutio
 }
 
 /** Internal comparison only. No execution identity, authority, price or coverage is issued here. */
-export function measureProspectiveNativeGroup({ skills, skillConfiguration, tools, networkAccess, modelCatalogSha256, toolchain, stateRoot }, settings) {
+export function measureProspectiveNativeGroup({ skills, skillConfiguration, tools, networkAccess, modelCatalogSha256, toolchain, stateRoot, verifiedOnly = false }, settings) {
   // An absent catalogue decision, unknown skill selection or unknown network policy is not a proven empty one.
   if (!Array.isArray(skills) || !Array.isArray(skillConfiguration) || typeof networkAccess !== 'boolean'
       || !(modelCatalogSha256 === null || hash(modelCatalogSha256)) || typeof stateRoot !== 'string' || resolve(stateRoot) !== stateRoot) return null
   const { binding } = measureNativeConfiguration({ skills, skillConfiguration, nativeExecution: { tools, networkAccess, modelCatalogSha256 },
-    toolchain, excludedRoots: [stateRoot] })
+    toolchain, verifiedOnly, excludedRoots: [stateRoot] })
   return nativeDispatchGroup(binding, settings)
 }
 

@@ -45,7 +45,7 @@ import { isManagementMessage } from './skill-management-wire.mjs'
 import { SkillInstallManager, WORK_RESULT_RECEIPT_TYPE, defaultSkillInstallStateRoot } from './skill-install-manager.mjs'
 import { materialProfileFromInputCarriers } from './skill-config-candidate.mjs'
 import { SkillConversationLane } from './skill-conversation.mjs'
-import { nativeExecutionRequestBinding, runNativeExecution } from './native-execution.mjs'
+import { compareProspectiveTaskConfiguration, nativeExecutionRequestBinding, runNativeExecution } from './native-execution.mjs'
 import { initializeNativeToolchain } from './native-document-toolchain.mjs'
 import { loadNativeSkillConfiguration } from './native-skill-config.mjs'
 import { createLocalScriptRunner } from './skill-runners/local-script.mjs'
@@ -6312,6 +6312,12 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
         },
         bindSkillSession: binding => bindMeasuredSkillSession(entry.state, binding),
         bindWorkNotifications: version => { entry.state.nativeWorkNotifications = version === 1 ? 1 : null },
+        comparePreparedLocalTask: outputs => {
+          const runtime=entry.state?.nativeExecutionProfileRuntime
+          if (!runtime || entry.closed || entry.state.disposed || entry.state.profileClosing) return null
+          return compareProspectiveTaskConfiguration(runtime,{scopeKind:'TASK',outputs,entries:[],skillConfiguration:[],
+            toolPolicyRef:'NATIVE_LOCAL_FILES_V1',privateTools:null},true)
+        },
         nativeWorkAvailable: () => { entry.state.conversationNativeWakeup?.wake() },
         matchesSkillManagementAck: envelope => entry.state?.skillInstallManager.matchesDurableAckEnvelope(envelope) === true,
         matchesSkillInstallResult: envelope => entry.state?.skillInstallManager.matchesDurableResultEnvelope(envelope) === true,

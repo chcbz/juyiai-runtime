@@ -39,7 +39,7 @@ export function toAgentWire(privateMessage, session = null) {
     if (!Number.isSafeInteger(data[key]) || data[key] < 0) invalid()
   }
   rename(data, 'installationId', 'runtimeInstallationId')
-  if (type === 'connection.pong') {
+  if (type === 'connection.pong' || type === 'runtime.task.configuration.measured') {
     const correlationId = data.correlationId; delete data.correlationId
     return validateMessage({ protocolVersion: 1, requestId, messageType: type, messageId, data, correlationId, code: 'E0', msg: 'ok' })
   }
@@ -50,6 +50,7 @@ export function fromAgentWire(text) {
   if (isManagementMessage(message)) return parseManagementMessage(text)
   if (!object(message.data)) invalid()
   const data = { ...message.data }; if (retiredManagement(data)) invalid()
+  if (message.messageType === 'runtime.task.configuration.probe' && (message.correlationId !== undefined || ['requestId','correlationId','code','msg'].some(k=>Object.hasOwn(data,k)))) invalid()
   if (['messageType', 'messageId', 'protocolVersion', 'type', 'channel', 'installationId'].some(key => Object.hasOwn(data, key))) invalid()
   for (const key of revisions) if (Object.hasOwn(data, key) && !decimal(data[key])) invalid()
   rename(data, 'runtimeInstallationId', 'installationId')

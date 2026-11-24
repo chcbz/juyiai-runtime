@@ -562,6 +562,7 @@ async function channelFixture(t, { ackRegistration = true, nativeWorkNotificatio
             return true;
           },
           bindWorkNotifications: version => { state.workNotificationVersion = version; },
+          comparePreparedLocalTask: outputs => { (state.preparedReads ||= []).push(outputs);return state.preparedGroup; },
           nativeWorkAvailable: () => { state.workHints = (state.workHints || 0) + 1; },
           bindWorkspaceFileWorkNotifications: version => { state.fileWorkNotificationVersion = version; },
           workspaceFileWorkAvailable: () => { state.fileWorkHints = (state.fileWorkHints || 0) + 1; },
@@ -2096,3 +2097,16 @@ test('current delivery dependencies retain their explicit pinned versions', asyn
   // Source/pin assertions only; no install, wheel import, format or ABI PASS.
 });
 
+
+test('prepared local task measurement is correlation and session bound without command admission',async t=>{
+  const c=await channelFixture(t,{});await c.executors[0].activate();const socket=c.sockets[0],state=c.states()[0];
+  const fence=nativeWorkHint(socket.sent[0]).data;delete fence.notificationVersion;delete fence.lane;
+  const outputs={mimeTypes:['text/plain'],multiple:true,artifactsRequired:true,dataSchema:null},intentSha256='f'.repeat(64);
+  const request={protocolVersion:1,requestId:'prep-request',messageType:'runtime.task.configuration.probe',messageId:'prep-message',data:{...fence,outputs,intentSha256,preparationKind:'TASK_NATIVE_LOCAL_FILES_V1'}};
+  for(const wrong of [{sessionGeneration:'999'},{agentId:'foreign'},{hostId:undefined},{commandId:'unexpected'},{preparationKind:'PRIVATE'},{outputs:{}}])socket.receive({...request,data:{...request.data,...wrong}});
+  assert.equal(state.preparedReads,undefined);socket.receive(request);
+  let reply=socket.sent.at(-1);assert.equal(reply.messageType,'runtime.task.configuration.measured');assert.equal(reply.measurement,null);assert.equal(reply.correlationId,'prep-message');assert.equal(reply.requestId,'prep-request');assert.equal(reply.intentSha256,intentSha256);
+  state.preparedGroup={version:'NATIVE_DISPATCH_GROUP_V1',executionConfigSha256:'a'.repeat(64),toolConfigSha256:'b'.repeat(64),routeSha256:'c'.repeat(64),privatePath:'/not-public'};
+  socket.receive(request);reply=socket.sent.at(-1);assert.equal(reply.measurement.capturePolicyVersion,'NATIVE_LOCAL_ARTIFACT_TEXT_V1');assert.equal(reply.measurement.privatePath,undefined);assert.equal(reply.measurement.routeSha256,'c'.repeat(64));
+  assert.deepEqual(state.preparedReads,[outputs,outputs]);assert.deepEqual(state.accepted,[]);
+});

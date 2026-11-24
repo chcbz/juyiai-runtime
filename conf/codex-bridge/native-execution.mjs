@@ -19,11 +19,11 @@ const selectedNetworkAccess = configuration => configuration.some(item => item.n
 // An unfrozen output contract/skill selection cannot be priced as if the selection were empty.
 const onlyLocalArtifactTools = (scope, privateTools, entries, configuration, policy) =>
   scope === 'TASK' && privateTools == null && entries.length === 0 && configuration.length === 0 && policy === NATIVE_LOCAL_FILES_POLICY
-export function compareProspectiveTaskConfiguration(profileRuntime, { scopeKind, outputs, entries, skillConfiguration, toolPolicyRef, privateTools }) {
+export function compareProspectiveTaskConfiguration(profileRuntime, { scopeKind, outputs, entries, skillConfiguration, toolPolicyRef, privateTools }, preparedLocalBudget=false) {
   if (scopeKind !== 'TASK' || privateTools !== null || !outputs || !Object.hasOwn(outputs,'dataSchema')
       || !Array.isArray(entries) || !Array.isArray(skillConfiguration) || ![NATIVE_LOCAL_FILES_POLICY,NATIVE_SKILL_SCRIPT_POLICY].includes(toolPolicyRef)
       || (skillConfiguration.length && toolPolicyRef !== NATIVE_SKILL_SCRIPT_POLICY) || (toolPolicyRef === NATIVE_SKILL_SCRIPT_POLICY && !entries.length)) return null
-  return profileRuntime.prospectiveNativeGroup({ skills:selectedPackages(entries), skillConfiguration,
+  return profileRuntime.prospectiveNativeGroup({ preparedLocalBudget, skills:selectedPackages(entries), skillConfiguration,
     localArtifactOnly:onlyLocalArtifactTools(scopeKind, privateTools, entries, skillConfiguration, toolPolicyRef),
     networkAccess:selectedNetworkAccess(skillConfiguration), tools:nativeArtifactOutputTools(outputs), toolPolicyRef, instructionsSha256 })
 }
