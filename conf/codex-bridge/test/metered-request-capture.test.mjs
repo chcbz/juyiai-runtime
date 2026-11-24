@@ -128,17 +128,18 @@ for (const admitted of [false,true,'artifact','answer','empty']) test(admitted==
     if(['artifact','answer'].includes(admitted)&&calls.length===2)calls[1].history=body.input.filter(x=>x.type?.startsWith('function_call')).map(x=>[x.type,x.call_id])
     res.writeHead(200,{'Content-Type':'text/event-stream'});for(const event of [{type:'response.created',response:{id}},{type:'response.output_item.done',output_index:0,item},{type:'response.completed',response:{id,status:'completed',usage:{input_tokens:10,output_tokens:2,total_tokens:12,input_tokens_details:{cached_tokens:3},output_tokens_details:{reasoning_tokens:1}}}}])res.write(`data: ${JSON.stringify(event)}\n\n`);res.end()
   });await new Promise(resolve=>upstream.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>upstream.close(resolve)))
-  const runtime=new NativeExecutionProfileRuntime({profile:{profileId:'metered-test',agentId:'agent',chatModel:'gpt-5.4',chatReasoningEffort:'medium',codexBin:process.env.CYF_CODEX_BIN,codexHome:sourceHome,typedInspectionProviderNetwork:'restricted-proxy',typedInspectionProviderId:'fixture',typedInspectionProviderBaseUrl:`https://127.0.0.1:${upstream.address().port}/custom`,typedInspectionNetworkConnectTimeoutMs:2000,typedInspectionCaBundlePath:cert},materializerRoot,stateRoot,nativeToolchain:measureMinimalNativeExecutionToolchain()})
+  const runtime=new NativeExecutionProfileRuntime({profile:{profileId:'metered-test',agentId:admitted==='answer'?'agt_00000000000000000000000000000002':'agent',chatModel:'gpt-5.4',chatReasoningEffort:'medium',codexBin:process.env.CYF_CODEX_BIN,codexHome:sourceHome,typedInspectionProviderNetwork:'restricted-proxy',typedInspectionProviderId:'fixture',typedInspectionProviderBaseUrl:`https://127.0.0.1:${upstream.address().port}/custom`,typedInspectionNetworkConnectTimeoutMs:2000,typedInspectionCaBundlePath:cert},materializerRoot,stateRoot,nativeToolchain:measureMinimalNativeExecutionToolchain()})
   const spawn=runtime._spawnAdapter.bind(runtime);let inspected=false
   runtime._spawnAdapter=async args=>{if(args.nativeExecution.executionId!=='exec1')return spawn(args);const staged=JSON.parse(await readFile(args.engineState.authPath));assert.match(staged.OPENAI_API_KEY,/^[a-f0-9]{64}$/);assert.notEqual(staged.OPENAI_API_KEY,'upstream-fixture-only');inspected=true;return spawn(args)}
   const binding={schemaVersion:1,requestKey:'metered-request',authorizationId:'exec1',manifestDigest:'sha256:'+store.command.snapshotDigest,requestId:'req-1',turnId:'turn-1',inputPolicyDigest:'policy-1'}
   try {
     if(['artifact','answer','empty'].includes(admitted)){
-      const scope={kind:'TASK',taskId:'task',conversationId:'42',conversationGeneration:'1'}
-      // Match Agent NativeTaskPreparation.Output(ANSWER); don't derive a contract from the completed run.
-      const dataSchema=admitted==='answer'?{$schema:'https://json-schema.org/draft/2020-12/schema',type:'object',properties:{answer:{type:'string',minLength:1,pattern:'\\S'}},required:['answer'],additionalProperties:false}:null
-      const command={...store.command,runId:'run-exec1',snapshotDigest:skillDigest({executionProtocolVersion:6,scope}),scope,commandId:'cmd',messageId:'msg',instruction:'fixture',parameters:{},inputRefs:[],outputs:{mimeTypes:[],artifactsRequired:false,multiple:false,dataSchema}}
-      const actual=new SkillExecutionStore({rootDirectory:root,scope:{agentId:'agent'},command})
+      const scope={kind:'TASK',taskId:admitted==='answer'?'billing-task':'task',conversationId:'42',conversationGeneration:'1'}
+      // Actual Java request exported by the signed selection integration, not reconstructed from PLAN.
+      const wire=admitted==='answer'?await readFile(new URL('./fixtures/selected-answer-probe.json',import.meta.url)):null
+      const probe=wire?JSON.parse(wire):null
+      const command={...store.command,runId:'run-exec1',snapshotDigest:skillDigest({executionProtocolVersion:6,scope}),scope,commandId:'cmd',messageId:'msg',instruction:'fixture',parameters:{},inputRefs:[],outputs:probe?probe.data.outputs:{mimeTypes:[],artifactsRequired:false,multiple:false,dataSchema:null}}
+      const actual=new SkillExecutionStore({rootDirectory:root,scope:{agentId:runtime.profile.agentId},command})
       // Read this real execution's source records at the upstream, not the first harness's directory.
       actualRead=async key=>JSON.parse(await readFile(join(actual.directory,`usage-capture-${skillDigest(['CAPTURE_V2',command.executionId,command.runId])}`,key+'.json')))
       const {runNativeExecution,compareProspectiveTaskConfiguration}=await import('../native-execution.mjs')
@@ -146,9 +147,18 @@ for (const admitted of [false,true,'artifact','answer','empty']) test(admitted==
       assert.ok(await runtime.measureNativeExecution(),JSON.stringify(runtime.nativeExecutionMeasurementFailure))
       const group=compareProspectiveTaskConfiguration(runtime,{scopeKind:'TASK',outputs:command.outputs,entries:[],skillConfiguration:[],privateTools:null,toolPolicyRef:command.toolPolicyRef})
       const compare=outputs=>compareProspectiveTaskConfiguration(runtime,{scopeKind:'TASK',outputs,entries:[],skillConfiguration:[],privateTools:null,toolPolicyRef:command.toolPolicyRef},true)
-      const sampled=compare(command.outputs),alternate=compare({...command.outputs,dataSchema:dataSchema?null:{type:'object'}})
+      const sampled=compare(command.outputs),alternate=compare({...command.outputs,dataSchema:command.outputs.dataSchema?null:{type:'object'}})
       assert.match(sampled.profileSha256,/^[0-9a-f]{64}$/);assert.equal(sampled.executionConfigSha256,group.executionConfigSha256)
       assert.notEqual(alternate.toolConfigSha256,sampled.toolConfigSha256);assert.equal(alternate.profileSha256,sampled.profileSha256)
+      let selectedReply=null
+      if(probe){
+        const {channelFixture}=await import('../../cyf-agent-runtime-v1/test/channel-fixture.mjs')
+        const peer=await channelFixture(t,{firstIdentity:{tenantId:'0',clientId:'billing-client',canonicalAgentId:'agt_00000000000000000000000000000002',installationId:'inst'},hostId:'host',instanceId:'boot',previousGeneration:0,comparePrepared:compare})
+        await peer.executors[0].activate();const socket=peer.sockets[0];socket.emit('message',wire)
+        selectedReply=JSON.parse(socket.measuredWire);assert.equal(selectedReply.correlationId,probe.messageId);assert.equal(selectedReply.requestId,probe.requestId)
+        assert.equal(selectedReply.data.intentSha256,probe.data.intentSha256);assert.deepEqual(peer.states()[0].preparedReads,[command.outputs]);assert.deepEqual(peer.states()[0].accepted,[])
+        assert.equal(selectedReply.data.configurationEpoch.profileSha256,sampled.profileSha256)
+      }
       const effort=runtime.profile.chatReasoningEffort;try {runtime.profile.chatReasoningEffort='high';assert.notEqual(compare(command.outputs).profileSha256,sampled.profileSha256)}finally{runtime.profile.chatReasoningEffort=effort}
       assert.ok(group);assert.equal(calls.length,0);await assert.rejects(actualRead('plan'),{code:'ENOENT'})
       const channel=skillDigest(['METERED_PROVIDER_NAMESPACE_V1','fixture',`https://127.0.0.1:${upstream.address().port}/custom`])
@@ -167,7 +177,7 @@ for (const admitted of [false,true,'artifact','answer','empty']) test(admitted==
       if(admitted==='answer'){
         assert.deepEqual(result.result.data,{answer:'fixture answer'});assert.deepEqual(result.result.artifacts,[])
         const measured=(await actualRead('plan')).observation.dispatchGroup
-        for(const key of ['version','executionConfigSha256','routeSha256','toolConfigSha256'])assert.equal(measured[key],sampled[key],key)
+        for(const key of ['version','executionConfigSha256','routeSha256','toolConfigSha256'])assert.equal(measured[key],selectedReply.data.measurement[key],key)
       }
       assert.equal(result.executionId,'exec1');assert.equal(actual.read('native-selection').revision,'1');assert.equal(calls.length,2)
       assert.deepEqual(calls.map(x=>x.pending),['PENDING','PENDING']);assert.deepEqual(calls[1].history,[['function_call','call_local_1'],['function_call_output','call_local_1']])
@@ -175,6 +185,10 @@ for (const admitted of [false,true,'artifact','answer','empty']) test(admitted==
         assert.deepEqual(o.reasonCodes,['BILLING_IDENTITY_UNKNOWN']);assert.equal(o.actualBillingIdentity,null);assert.deepEqual(o.measuredQuantities.tokens,{INPUT:'7',CACHED_INPUT:'3',OUTPUT:'2'})}
       await recoverStoppedMeteredRoot(actual,()=>assert.equal(runtime.activeAdapters.size,0));assert.equal((await actualRead('plan')).observation.coveragePolicyVersion,'NATIVE_LOCAL_ARTIFACT_TEXT_V1');assert.equal((await actualRead('source-final-1')).observation.requestCount,'2');assert.equal((await actualRead('capture-final-1')).observation.closeState,'DRAINED')
       assert.deepEqual((await actualRead('plan')).observation.dispatchGroup,group);assert.equal((await actualRead('source-0')).observation.channelNamespace,channel)
+      if(selectedReply && process.env.CYF_TEST_EXPORT_NATIVE_CAPTURE==='1'){
+        const plan=(await actualRead('plan')).observation
+        await writeFile(join(tmpdir(),'selected-answer-peer.json'),JSON.stringify({reply:selectedReply,dispatchGroup:plan.dispatchGroup,coverage:plan.coveragePolicyVersion}),{mode:0o600,flag:'wx'})
+      }
       if(admitted==='artifact'&&process.env.CYF_TEST_EXPORT_NATIVE_CAPTURE==='1'){
         const keys=['plan','source-0','source-final-1','capture-final-1'];for(const seq of [1,2])keys.push(`request-${seq}-1`,`request-${seq}-2`,`response-${(await actualRead(`request-${seq}-2`)).observation.sourceAttemptId}-1`)
         // Only transport records from this synthetic test; no headers, HOME, messages, tool arguments or result files.
