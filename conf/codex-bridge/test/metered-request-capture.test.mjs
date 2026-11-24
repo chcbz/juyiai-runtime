@@ -160,10 +160,11 @@ for (const admitted of [false,true,'artifact','answer','file','empty']) test(adm
       const {runNativeExecution,compareProspectiveTaskConfiguration}=await import('../native-execution.mjs')
       // Independent deployment measurement: no PLAN or source records exist yet.
       assert.ok(await runtime.measureNativeExecution(),JSON.stringify(runtime.nativeExecutionMeasurementFailure))
-      const group=compareProspectiveTaskConfiguration(runtime,{scopeKind:'TASK',outputs:command.outputs,entries:[],skillConfiguration:[],privateTools:null,toolPolicyRef:command.toolPolicyRef})
+      const comparisonOutputs=admitted==='file'?{...command.outputs,dataSchema:null}:command.outputs
+      const group=compareProspectiveTaskConfiguration(runtime,{scopeKind:'TASK',outputs:comparisonOutputs,entries:[],skillConfiguration:[],privateTools:null,toolPolicyRef:command.toolPolicyRef})
       const compare=outputs=>compareProspectiveTaskConfiguration(runtime,{scopeKind:'TASK',outputs,entries:[],skillConfiguration:[],privateTools:null,toolPolicyRef:command.toolPolicyRef},true)
-      const sampled=compare(command.outputs),alternate=compare({...command.outputs,dataSchema:command.outputs.dataSchema?null:{type:'object'}})
-      assert.match(sampled.profileSha256,/^[0-9a-f]{64}$/);assert.equal(sampled.executionConfigSha256,group.executionConfigSha256)
+      const sampled=compare(comparisonOutputs),alternate=compare({...comparisonOutputs,dataSchema:comparisonOutputs.dataSchema?null:{type:'object'}})
+      assert.ok(group && sampled && alternate,'expected resolved prospective comparison');assert.match(sampled.profileSha256,/^[0-9a-f]{64}$/);assert.equal(sampled.executionConfigSha256,group.executionConfigSha256)
       assert.notEqual(alternate.toolConfigSha256,sampled.toolConfigSha256);assert.equal(alternate.profileSha256,sampled.profileSha256)
       let selectedReply=null
       if(probe){
@@ -174,7 +175,7 @@ for (const admitted of [false,true,'artifact','answer','file','empty']) test(adm
         assert.equal(selectedReply.data.intentSha256,probe.data.intentSha256);assert.deepEqual(peer.states()[0].preparedReads,[command.outputs]);assert.deepEqual(peer.states()[0].accepted,[])
         assert.equal(selectedReply.data.configurationEpoch.profileSha256,sampled.profileSha256)
       }
-      const effort=runtime.profile.chatReasoningEffort;try {runtime.profile.chatReasoningEffort='high';assert.notEqual(compare(command.outputs).profileSha256,sampled.profileSha256)}finally{runtime.profile.chatReasoningEffort=effort}
+      const effort=runtime.profile.chatReasoningEffort;try {runtime.profile.chatReasoningEffort='high';assert.notEqual(compare(comparisonOutputs).profileSha256,sampled.profileSha256)}finally{runtime.profile.chatReasoningEffort=effort}
       assert.ok(group);assert.equal(calls.length,0);await assert.rejects(actualRead('plan'),{code:'ENOENT'})
       const channel=skillDigest(['METERED_PROVIDER_NAMESPACE_V1','fixture',`https://127.0.0.1:${upstream.address().port}/custom`])
       const admission=skillDigest(['NATIVE_LOCAL_ARTIFACT_TEXT_V1','codex-cli-0.167.0','RESPONSES_TEXT_TOKENS_V1',group.executionConfigSha256,group.routeSha256,group.toolConfigSha256,channel])
@@ -197,7 +198,7 @@ for (const admitted of [false,true,'artifact','answer','file','empty']) test(adm
           const linked=await actualRead(`request-${seq}-2`);const o=(await actualRead(`response-${linked.observation.sourceAttemptId}-1`)).observation
           assert.equal(o.reportedUsage.input_tokens,10);assert.equal(o.actualBillingIdentity,null)
           if(seq===1)assert.deepEqual(o.measuredQuantities.tokens,{INPUT:'7',CACHED_INPUT:'3',OUTPUT:'2'})
-          else {assert.equal(o.measuredQuantities,null);assert.ok(o.reasonCodes.some(x=>x==='REQUEST_TOOL_HISTORY_UNBOUND'||x==='REQUEST_SCOPE_UNKNOWN'),JSON.stringify(o.reasonCodes))}
+          else {assert.equal(o.measuredQuantities,null);assert.ok(o.reasonCodes.some(x=>x==='REQUEST_TOOL_HISTORY_UNBOUND'||x==='REQUEST_COST_SCOPE_UNKNOWN'),JSON.stringify(o.reasonCodes))}
         }
         await recoverStoppedMeteredRoot(actual,()=>assert.equal(runtime.activeAdapters.size,0));assert.deepEqual((await actualRead('plan')).observation.dispatchGroup,group)
         const close=(await actualRead('capture-final-1')).observation;assert.equal(close.closeState,'SEALED_INCOMPLETE');assert.ok(close.reasonCodes.includes('USAGE_INCOMPLETE'));return
