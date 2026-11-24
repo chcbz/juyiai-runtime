@@ -618,6 +618,12 @@ export class PersistentChatInbox {
     if (!/^[a-f0-9]{64}$/.test(key)) throw new Error('CHAT_CAPTURE_BINDING_INVALID')
     return this._withLock(() => {
       const item = this.findByKey(key)
+      const parent = resolve(this.dir, `discussion-source-${key}`)
+      if (recovering && (!item || item.state === 'ledger')) {
+        // Terminal dedupe has its own retention. Neither a compact marker nor absence may start an engine.
+        const marker = item ? this._validateDedupeMarker(key,item.record) : null
+        return { parent, retainedOnly:true, marker }
+      }
       if (!item || (recovering ? !['recovery','archive'].includes(item.state) :
           item.state !== 'processing' || item.record.state !== 'STARTING')) throw new Error('CHAT_CAPTURE_STATE_INVALID')
       const message = validateChatDispatch(fingerprintSource(item.record.message))
@@ -628,13 +634,12 @@ export class PersistentChatInbox {
           facts.participantAgentIds.length !== 1 || facts.participantAgentIds[0] !== this.profile.agentId ||
           enrollment?.protocol !== 'METERED_CAPTURE_V2' || enrollment.captureId !==
             canonicalSha256(['CAPTURE_V2',message.turnId,message.dispatchId]).slice(7)) throw new Error('CHAT_CAPTURE_BINDING_INVALID')
-      const parent = resolve(this.dir, `discussion-source-${key}`)
       if (!recovering) {
         // Do not chmod or follow an existing entry (including a link). openSubject verifies the private directory.
         try { mkdirSync(parent,{mode:0o700}); directoryFsync(this.dir) }
         catch (error) { if (error.code !== 'EEXIST') throw error }
       }
-      return {parent, message, subject:{executionId:message.turnId, runId:message.dispatchId, snapshotDigest:message.contextHash.slice(7)}}
+      return {parent, message, fingerprint:item.record.fingerprint, subject:{executionId:message.turnId, runId:message.dispatchId, snapshotDigest:message.contextHash.slice(7)}}
     })
   }
   claimPreEngineInspection(key) {

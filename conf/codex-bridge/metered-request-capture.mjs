@@ -1,8 +1,9 @@
 /** Source-side only. The owner must hold the original execution writer fence.
  * No provider URL, credential, prompt, response body or replay callback is stored. */
-import { mkdir, lstat } from 'node:fs/promises'
+import { mkdir, lstat, open } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { durableChatKey } from './chat-runtime.mjs'
 import { skillDigest, skillId, skillSha } from './skill-executor.mjs'
 import { first, persist, directory, syncDir, readPrivate, rootEpochDirectories } from './metered-capture-files.mjs'
 import { closeMeteredSubject } from './metered-capture-closure.mjs'
@@ -22,7 +23,7 @@ function openRoot(store, options, mode) {
   return openSubject(store.directory,store.command,options,mode)
 }
 async function openSubject(parent, subject, { executionId, runId, executionConfigSha256, dispatchGroup = null, engineVersion, coveragePolicyVersion,
-  rootSourceId, channelNamespace, adapterVersion, checkActive, deferUntilThread = false, now = Date.now }, mode) {
+  rootSourceId, channelNamespace, adapterVersion, checkActive, deferUntilThread = false, now = Date.now }, mode, onClaim = null) {
   if (subject.executionId !== checkId(executionId) || subject.runId !== checkId(runId)
       || !skillSha(subject.snapshotDigest) || !skillSha(executionConfigSha256) || typeof checkActive !== 'function') bad('METERED_CAPTURE_BINDING_INVALID')
   for (const id of [runId, engineVersion, coveragePolicyVersion, rootSourceId, channelNamespace, adapterVersion]) checkId(id)
@@ -37,6 +38,7 @@ async function openSubject(parent, subject, { executionId, runId, executionConfi
   if(mode===null){
     // EEXIST never grants a second fresh writer, even if the original PLAN write failed.
     await mkdir(root,{mode:0o700});await syncDir(parent)
+    if(onClaim)await onClaim()
     await persist(root,'plan',first(binding,'PLAN',[],planFacts,now))
   }else{
     const requireResume=ok=>{if(!ok)bad('SKILL_RESULT_UNKNOWN')}
@@ -129,12 +131,32 @@ async function openSubject(parent, subject, { executionId, runId, executionConfi
 // Internal source owner only. Never infer capture enrollment from a thread event or a deterministic ID alone.
 // This lane records observations, not COMPLETE: shared adapters and material egress are not yet attested.
 export async function startDiscussionCapture(inbox, key, options) {
-  const {parent, subject} = inbox.discussionCaptureSubject(key, false)
+  const origin = inbox.discussionCaptureSubject(key, false), {parent, subject} = origin
+  if(discussionKey(origin.message)!==key)bad('METERED_CAPTURE_SOURCE_CONFLICT')
+  const bind = async () => {
+    const facts = discussionBinding(key,origin.message,origin.fingerprint)
+    // Claimed root is exclusive. Never replace another snapshot; a torn write cannot pass validation.
+    await directory(parent)
+    const f = await open(resolve(parent,'discussion-binding.json'),'wx',0o600)
+    try { await f.writeFile(JSON.stringify({...facts,digest:skillDigest(facts)})); await f.sync() } finally { await f.close() }
+    await syncDir(parent)
+  }
   return openSubject(parent, subject, {...options, executionId:subject.executionId, runId:subject.runId,
-    dispatchGroup:null, coveragePolicyVersion:'CHAT_SOURCE_UNVERIFIED_V1'}, null)
+    dispatchGroup:null, coveragePolicyVersion:'CHAT_SOURCE_UNVERIFIED_V1'}, null, bind)
 }
+// No prompt, full message, tool data or price. Retain these original identity fields alongside unacknowledged usage.
+const discussionKey = m => durableChatKey({dedupeKey:`${m.tenantId}:${m.ownerJiacn}:${m.clientId}:${m.dispatchId}`})
+const discussionBinding = (key,m,fingerprint) => ({schemaVersion:1,key,fingerprint,
+  ...Object.fromEntries(['tenantId','ownerJiacn','clientId','requestId','turnId','dispatchId','targetAgentId','contextHash'].map(k=>[k,m[k]]))})
 export async function recoverStoppedDiscussionCapture(inbox, key, assertStopped) {
   await assertStopped()
-  const {parent, subject} = inbox.discussionCaptureSubject(key, true)
-  return closeMeteredSubject(parent, subject, assertStopped)
+  const original = inbox.discussionCaptureSubject(key, true), {parent} = original
+  const {digest,...facts} = await readPrivate(parent,'discussion-binding')
+  const expected = discussionBinding(key,original.message || original.marker?.message || facts,
+    original.fingerprint || original.marker?.fingerprint || facts.fingerprint)
+  if (facts.schemaVersion!==1 || facts.key!==key || facts.targetAgentId!==inbox.profile.agentId ||
+      !/^sha256:[0-9a-f]{64}$/.test(facts.fingerprint) || !/^sha256:[0-9a-f]{64}$/.test(facts.contextHash) ||
+      digest!==skillDigest(facts) || digest!==skillDigest(expected) ||
+      discussionKey(facts)!==key) bad('METERED_CAPTURE_SOURCE_CONFLICT')
+  return closeMeteredSubject(parent,{executionId:facts.turnId,runId:facts.dispatchId,snapshotDigest:facts.contextHash.slice(7)},assertStopped)
 }

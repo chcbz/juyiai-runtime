@@ -457,8 +457,8 @@ test('durable discussion source keeps original turn/dispatch/context across rest
   const rootDir = await mkdtemp(join(tmpdir(),'discussion-capture-')); t.after(()=>rm(rootDir,{recursive:true,force:true}))
   const wire = JSON.parse(await readFile(new URL('../contracts/api-hosted-wire-v1.json', import.meta.url),'utf8'))
   const profile = {agentId:wire.targetAgentId}, inbox = new PersistentChatInbox({rootDir,profile}); inbox.initialize()
-  const admit = async enrolled => {
-    const m=structuredClone(wire);m.route='CHAT';m.dispatchId += enrolled ? '-new' : '-old';m.dedupeKey += enrolled ? '-new' : '-old'
+  const admit = async (enrolled, suffix = enrolled ? '-new' : '-old') => {
+    const m=structuredClone(wire);m.route='CHAT';m.dispatchId += suffix;m.dedupeKey += suffix
     m.factsManifest.participantAgentIds=[m.targetAgentId]
     if(enrolled)m.factsManifest.taskUsageCapture={protocol:'METERED_CAPTURE_V2',captureId:skillDigest(['CAPTURE_V2',m.turnId,m.dispatchId])}
     m.contextSnapshot.facts=m.factsManifest;m.contextHash=m.contextSnapshot.contextHash=canonicalSha256({sourceVector:m.sourceVector,facts:m.factsManifest})
@@ -497,6 +497,23 @@ test('durable discussion source keeps original turn/dispatch/context across rest
   assert.equal(JSON.parse(await readFile(join(dir,'plan.json'))).observation.snapshotSha256,m.contextHash.slice(7))
   assert.deepEqual(await recoverStoppedDiscussionCapture(restarted,key,()=>{}),closed)
   assert.ok(JSON.parse(await readFile(join(dir,'capture-final-1.json'))).observation.reasonCodes.includes('UNSUPPORTED_COST_SOURCE'))
+  // Use the existing terminal and retention routines, not manual removal of the business record.
+  const expires=new PersistentChatInbox({rootDir,profile,archiveMaxFiles:0,dedupeRetentionMs:0});expires.initialize()
+  expires.complete(expires.findByKey(key));assert.equal(expires.findByKey(key).state,'ledger')
+  assert.deepEqual(await recoverStoppedDiscussionCapture(expires,key,()=>{}),closed)
+  const binding=JSON.parse(await readFile(join(parent,'discussion-binding.json')))
+  assert.deepEqual(Object.keys(binding).sort(),['schemaVersion','key','fingerprint','tenantId','ownerJiacn','clientId','requestId','turnId','dispatchId','targetAgentId','contextHash','digest'].sort())
+  // Dedupe expiration is strictly older than the GC cutoff; pin only the GC clock for this synchronous pass.
+  const extra=await admit(true,'-pruned'), extraCap=await startDiscussionCapture(inbox,extra.key,opts);await extraCap.markStopped(()=>{})
+  expires.complete(expires.findByKey(extra.key));assert.equal(expires.findByKey(extra.key).state,'ledger')
+  const now=Date.now;try{Date.now=()=>now()+1000;expires.initialize()}finally{Date.now=now}
+  assert.equal(expires.findByKey(key),null);assert.deepEqual(await recoverStoppedDiscussionCapture(expires,key,()=>{}),closed)
+  assert.equal(expires.findByKey(extra.key),null);const firstClose=await recoverStoppedDiscussionCapture(expires,extra.key,()=>{})
+  assert.equal(firstClose.runId,extra.m.dispatchId);assert.equal(firstClose.closeState,'SEALED_INCOMPLETE')
+  await assert.rejects(startDiscussionCapture(expires,key,opts),/CHAT_CAPTURE_STATE_INVALID/)
+  const {writeFile}=await import('node:fs/promises');await writeFile(join(parent,'discussion-binding.json'),JSON.stringify({...binding,dispatchId:'different'}))
+  await assert.rejects(recoverStoppedDiscussionCapture(expires,key,()=>{}),{code:'METERED_CAPTURE_SOURCE_CONFLICT'});assert.equal(sent,1)
+
 })
 test('stopped recovery cannot finalize a different frozen dispatch snapshot for the same run', async t=>{
   const {store,capture,dir}=await openRoot(t);await capture.markStopped(()=>{})
