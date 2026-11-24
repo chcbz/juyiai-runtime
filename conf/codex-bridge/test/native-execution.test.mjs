@@ -235,3 +235,10 @@ test('recovered evidence preserves source data and does not overwrite an earlier
   assert.deepEqual(f.store.read('native-usage-recovered').usageEvidence, usageEvidence)
   assert.equal(f.runs(), 1)
 })
+
+test('local-result-only recovery cannot open a new engine and rejects a terminal for another turn',async t=>{
+  const f=fixture(t);const readOnly={...f.request,mayStartTurn:false};await assert.rejects(runNativeExecution(readOnly),{code:'SKILL_RESULT_UNKNOWN'});assert.deepEqual(f.events,[])
+  f.store.write('native-thread',{threadId:'thread1'});await assert.rejects(runNativeExecution(readOnly),{code:'SKILL_RESULT_UNKNOWN'});assert.deepEqual(f.events,[])
+  f.store.write('native-start-attempt',{threadId:'thread1',clientUserMessageId:f.command.messageId});f.store.write('native-turn',{executionId:f.command.executionId,threadId:'thread1',turnId:'original'})
+  f.adapter.reconcileTurn=async()=>({status:'TERMINAL',terminalStatus:'completed',turnId:'wrong'});await assert.rejects(runNativeExecution(readOnly),{code:'SKILL_RESULT_UNKNOWN'});assert.equal(f.runs(),0);assert.equal(f.store.read('native-usage-recovered'),null)
+})

@@ -200,7 +200,7 @@ export class SkillConversationLane extends SkillUsageDelivery {
     let resume = null
     const ctx = {
       registry: this.registry,
-      runNative: request => { if (typeof this.runNative !== 'function') fail('SKILL_NATIVE_ADAPTER_MISSING'); return this.runNative({ ...request, store, checkActive: checkLease, signal: executionAbort.signal }) },
+      runNative: request => { if (typeof this.runNative !== 'function') fail('SKILL_NATIVE_ADAPTER_MISSING'); return this.runNative({ ...request, store, mayStartTurn: !resume || resume.allowedWork.includes('EXECUTE'), checkActive: checkLease, signal: executionAbort.signal }) },
       claimOrResume: async () => {
         const attempted = store.read('attempt')
         // Write before claim; lost lease reply must use resume, not a new claim.

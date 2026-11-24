@@ -27,7 +27,7 @@ export function compareProspectiveTaskConfiguration(profileRuntime, { scopeKind,
     localArtifactOnly:onlyLocalArtifactTools(scopeKind, privateTools, entries, skillConfiguration, toolPolicyRef),
     networkAccess:selectedNetworkAccess(skillConfiguration), tools:nativeArtifactOutputTools(outputs), toolPolicyRef, instructionsSha256 })
 }
-export async function runNativeExecution({ command, inputs, entries, store, checkActive, signal, profileRuntime, model, effort, skillConfiguration = [] }) {
+export async function runNativeExecution({ command, inputs, entries, store, checkActive, signal, profileRuntime, model, effort, mayStartTurn = true, skillConfiguration = [] }) {
   if (!profileRuntime?.openNativeExecutionAdapter) fail('NATIVE_EXECUTION_PROFILE_UNAVAILABLE')
   if (skillConfiguration.length && command.toolPolicyRef !== NATIVE_SKILL_SCRIPT_POLICY) fail('NATIVE_SKILL_CONFIG_POLICY_MISMATCH')
   const networkAccess = selectedNetworkAccess(skillConfiguration)
@@ -35,7 +35,9 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
   const requestKey = `native:${command.executionId}:${command.snapshotDigest}`
   const policy = {cwd:'/execution', model, effort, developerInstructions:nativeDeveloperInstructions}
   const binding = nativeExecutionRequestBinding(command)
-  const existing = store.read('native-thread')
+  const existing = store.read('native-thread'), attempted = store.read('native-start-attempt')
+  // A valid lease can permit local reconciliation without permitting a new model turn.
+  if ((!mayStartTurn && !attempted) || (attempted && (!existing || attempted.threadId!==existing.threadId || attempted.clientUserMessageId!==command.messageId))) fail('SKILL_RESULT_UNKNOWN')
   // Bind cancellation before opening the profile: network/bootstrap setup may
   // still be in flight when the lease is revoked. The profile owns cancellation
   // of pending startup as well as an already-running engine.
@@ -55,11 +57,10 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
     const thread = existing || await adapter.startOrResumeThread(null, policy)
     if (!existing) store.write('native-thread', { threadId: thread.threadId })
     const receipts = inputs.map(input => ({ inputRef: input.inputRef, sha256: input.sha256, carrier: 'local-file', delivery: 'DELIVERED' }))
-    const attempted = store.read('native-start-attempt')
     if (attempted) {
       const turn = store.read('native-turn')
       const recovered = await adapter.reconcileTurn({ threadId: thread.threadId, turnId: turn?.turnId, clientUserMessageId: command.messageId })
-      if (recovered.status !== 'TERMINAL') fail('SKILL_RESULT_UNKNOWN')
+      if (recovered.status !== 'TERMINAL' || (turn && (turn.threadId!==thread.threadId || turn.turnId!==recovered.turnId))) fail('SKILL_RESULT_UNKNOWN')
       // A recovered terminal also needs independent cost delivery, even when the
       // engine no longer exposes usage. Do not invent usage or replay the turn.
       // Preserve an earlier terminal observation rather than replacing its evidence.

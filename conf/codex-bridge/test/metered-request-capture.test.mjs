@@ -113,7 +113,7 @@ import { writeFile } from 'node:fs/promises'
 import { NativeExecutionProfileRuntime } from '../native-execution-runtime.mjs'
 import { measureMinimalNativeExecutionToolchain } from '../native-execution-profile.mjs'
 
-for (const admitted of [false,true,'artifact']) test(admitted==='artifact'?'real metered native execution ties its second request to the successful result proposal':admitted ? 'admitted V2 profile measures the CLI, persists before real TLS and retains suspend watermark without false coverage' : 'real metered Codex native turn uses sealed temporary HOME, measured namespace and one durable request at the TLS fixture',
+for (const admitted of [false,true,'artifact','empty']) test(admitted==='empty'?'real engine resumes an empty original thread after suspension before the first model turn':admitted==='artifact'?'real metered native execution ties its second request to the successful result proposal':admitted ? 'admitted V2 profile measures the CLI, persists before real TLS and retains suspend watermark without false coverage' : 'real metered Codex native turn uses sealed temporary HOME, measured namespace and one durable request at the TLS fixture',
   {skip:process.env.CYF_NATIVE_EXECUTION_ISOLATION_PROBE !== '1',timeout:60000}, async t=>{
   const {capture,read,store}=await openRoot(t,{engineVersion:'codex-cli-0.167.0',adapterVersion:'RESPONSES_TEXT_TOKENS_V1',coveragePolicyVersion:'TEXT_MODEL_ONLY_V1'},admitted), root=await mkdtemp(join(tmpdir(),'mrt-'));t.after(()=>rm(root,{recursive:true,force:true}))
   const privateDir=async name=>{const path=join(root,name);await mkdir(path,{mode:0o700});return path}
@@ -122,7 +122,7 @@ for (const admitted of [false,true,'artifact']) test(admitted==='artifact'?'real
   const cert=join(root,'cert'),key=join(root,'key');execFileSync('/usr/bin/openssl',['req','-x509','-newkey','rsa:2048','-nodes','-keyout',key,'-out',cert,'-days','1','-subj','/CN=localhost','-addext','subjectAltName=IP:127.0.0.1'],{stdio:'ignore'})
   let actualRead=read;const calls=[];const upstream=createHttpsServer({key:await readFile(key),cert:await readFile(cert)},async(req,res)=>{
     const chunks=[];for await(const c of req)chunks.push(c);const body=JSON.parse(Buffer.concat(chunks));calls.push({path:req.url,auth:req.headers.authorization,pending:(await actualRead(`request-${calls.length+1}-1`)).observation.resolution})
-    const firstTool=admitted==='artifact'&&calls.length===1, id='resp-'+calls.length
+    const firstTool=['artifact','empty'].includes(admitted)&&calls.length===1, id='resp-'+calls.length
     const item=firstTool?{id:'fc_1',type:'function_call',call_id:'call_local_1',name:'result_propose',arguments:JSON.stringify({summary:'fixture proposal',artifactRefs:[],data:null})}:
       {id:'msg-1',type:'message',role:'assistant',content:[{type:'output_text',text:'fixture complete'}]}
     if(admitted==='artifact'&&calls.length===2)calls[1].history=body.input.filter(x=>x.type?.startsWith('function_call')).map(x=>[x.type,x.call_id])
@@ -133,7 +133,7 @@ for (const admitted of [false,true,'artifact']) test(admitted==='artifact'?'real
   runtime._spawnAdapter=async args=>{if(args.nativeExecution.executionId!=='exec1')return spawn(args);const staged=JSON.parse(await readFile(args.engineState.authPath));assert.match(staged.OPENAI_API_KEY,/^[a-f0-9]{64}$/);assert.notEqual(staged.OPENAI_API_KEY,'upstream-fixture-only');inspected=true;return spawn(args)}
   const binding={schemaVersion:1,requestKey:'metered-request',authorizationId:'exec1',manifestDigest:'sha256:'+store.command.snapshotDigest,requestId:'req-1',turnId:'turn-1',inputPolicyDigest:'policy-1'}
   try {
-    if(admitted==='artifact'){
+    if(['artifact','empty'].includes(admitted)){
       const scope={kind:'TASK',taskId:'task',conversationId:'42',conversationGeneration:'1'}
       const command={...store.command,runId:'run-exec1',snapshotDigest:skillDigest({executionProtocolVersion:6,scope}),scope,commandId:'cmd',messageId:'msg',instruction:'fixture',parameters:{},inputRefs:[],outputs:{mimeTypes:[],artifactsRequired:false,multiple:false,dataSchema:null}}
       const actual=new SkillExecutionStore({rootDirectory:root,scope:{agentId:'agent'},command})
@@ -146,6 +146,14 @@ for (const admitted of [false,true,'artifact']) test(admitted==='artifact'?'real
       assert.ok(group);assert.equal(calls.length,0);await assert.rejects(actualRead('plan'),{code:'ENOENT'})
       const channel=skillDigest(['METERED_PROVIDER_NAMESPACE_V1','fixture',`https://127.0.0.1:${upstream.address().port}/custom`])
       const admission=skillDigest(['NATIVE_LOCAL_ARTIFACT_TEXT_V1','codex-cli-0.167.0','RESPONSES_TEXT_TOKENS_V1',group.executionConfigSha256,group.routeSha256,group.toolConfigSha256,channel])
+      if(admitted==='empty'){
+        const request={command,inputs:[],entries:[],store:actual,checkActive(){},profileRuntime:runtime,model:'gpt-5.4',effort:'medium'}
+        const write=actual.write.bind(actual);actual.write=(key,value)=>{write(key,value);if(key==='native-thread')throw Error('fixture stopped immediately after thread checkpoint')}
+        await assert.rejects(runNativeExecution(request),/fixture stopped immediately/);actual.write=write
+        const original=actual.read('native-thread');assert.ok(original.threadId);assert.equal(actual.read('native-start-attempt'),null);assert.equal((await actualRead('producer-stopped')).reservedHigh,'0');assert.equal(calls.length,0)
+        const readRoot=actualRead;actualRead=key=>readRoot('epoch-1/'+key)
+        const result=await runNativeExecution(request);assert.equal(result.executionId,command.executionId);assert.equal(actual.read('native-turn').threadId,original.threadId);assert.equal(calls.length,2);assert.ok(calls.every(c=>c.pending==='PENDING'));return
+      }
       const result=await runNativeExecution({command,inputs:[],entries:[],store:actual,checkActive(){},profileRuntime:runtime,model:'gpt-5.4',effort:'medium'})
       assert.equal(result.executionId,'exec1');assert.equal(actual.read('native-selection').revision,'1');assert.equal(calls.length,2)
       assert.deepEqual(calls.map(x=>x.pending),['PENDING','PENDING']);assert.deepEqual(calls[1].history,[['function_call','call_local_1'],['function_call_output','call_local_1']])
