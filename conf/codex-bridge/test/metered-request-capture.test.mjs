@@ -468,12 +468,34 @@ test('durable discussion source keeps original turn/dispatch/context across rest
   const old=await admit(false);await assert.rejects(startDiscussionCapture(inbox,old.key,opts),/CHAT_CAPTURE_BINDING_INVALID/)
   const {key,m}=await admit(true), cap=await startDiscussionCapture(inbox,key,opts);let sent=0
   const {parent}=inbox.discussionCaptureSubject(key,false), dir=join(parent,'usage-capture-'+cap.captureId)
-  await cap.dispatch(async req=>{assert.equal(JSON.parse(await readFile(join(dir,`request-${req.sequence}-1.json`))).observation.resolution,'PENDING');sent++})
+  const {buildContextEnvelope}=await import('../chat-runtime.mjs')
+  assert.equal(Object.hasOwn(buildContextEnvelope(m).authoritative.facts,'taskUsageCapture'),false)
+  const {runFastChat}=await import('../agent-client.mjs')
+  for(const flags of [{durable:true},{legacy:true}]) await assert.rejects(runFastChat(profile,{...m,...flags},{fallback:()=>assert.fail('unmetered fallback')}),{code:'CHAT_METERED_ROUTE_UNAVAILABLE'})
+  const cert=join(rootDir,'cert'), privateKey=join(rootDir,'key')
+  execFileSync('/usr/bin/openssl',['req','-x509','-newkey','rsa:2048','-nodes','-keyout',privateKey,'-out',cert,'-days','1','-subj','/CN=localhost','-addext','subjectAltName=IP:127.0.0.1'],{stdio:'ignore'})
+  const ca=await readFile(cert),upstream=createHttpsServer({key:await readFile(privateKey),cert:ca},async(req,res)=>{
+    sent++; req.resume(); const pending=JSON.parse(await readFile(join(dir,`request-${sent}-1.json`)))
+    assert.equal(pending.observation.resolution,'PENDING');assert.equal(pending.runId,m.dispatchId)
+    res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({id:'test-discussion',status:'completed',usage:{input_tokens:5,output_tokens:2,total_tokens:7}}))
+  });await new Promise(ok=>upstream.listen(0,'127.0.0.1',ok));t.after(()=>new Promise(ok=>upstream.close(ok)))
+  const eg=new RestrictedProviderEgress({providerBaseUrl:`https://127.0.0.1:${upstream.address().port}/v1`,networkConnectTimeoutMs:2000,
+    meteredResponses:{capture:cap,ca,getProviderKey:()=>'test-only-upstream'}});await eg.start();t.after(()=>eg.dispose())
+  // Socket, TLS, prewrite and response recording are real; namespace ownership is a fixture.
+  eg.attestation={measured:true};eg._assertOwner=async()=>{}
+  await new Promise((ok,fail)=>{const req=httpRequest({hostname:'127.0.0.1',port:eg.port,path:'/v1/responses',method:'POST',headers:{host:`10.0.2.2:${eg.port}`,authorization:`Bearer ${eg.meteredRoute.sandboxToken()}`,'content-type':'application/json'}},res=>{
+    res.resume();res.on('end',()=>res.statusCode===200?ok():fail(Error(`HTTP ${res.statusCode}`)))
+  });req.on('error',fail);req.end(JSON.stringify({model:'fixture',input:'private test input'}))})
+  await eg.dispose()
+  const request=JSON.parse(await readFile(join(dir,'request-1-2.json')));assert.equal(request.observation.resolution,'RESPONSE')
+  const response=JSON.parse(await readFile(join(dir,`response-${request.observation.sourceAttemptId}-1.json`)))
+  assert.equal(response.observation.reportedUsage.input_tokens,5);assert.equal(response.observation.reportedUsage.output_tokens,2)
   await assert.rejects(startDiscussionCapture(inbox,key,opts),{code:'EEXIST'});await cap.markStopped(()=>{})
   const restarted=new PersistentChatInbox({rootDir,profile});restarted.initialize();const closed=await recoverStoppedDiscussionCapture(restarted,key,()=>{})
   assert.equal(closed.executionId,m.turnId);assert.equal(closed.runId,m.dispatchId);assert.equal(closed.closeState,'SEALED_INCOMPLETE');assert.equal(sent,1)
   assert.equal(JSON.parse(await readFile(join(dir,'plan.json'))).observation.snapshotSha256,m.contextHash.slice(7))
   assert.deepEqual(await recoverStoppedDiscussionCapture(restarted,key,()=>{}),closed)
+  assert.ok(JSON.parse(await readFile(join(dir,'capture-final-1.json'))).observation.reasonCodes.includes('UNSUPPORTED_COST_SOURCE'))
 })
 test('stopped recovery cannot finalize a different frozen dispatch snapshot for the same run', async t=>{
   const {store,capture,dir}=await openRoot(t);await capture.markStopped(()=>{})

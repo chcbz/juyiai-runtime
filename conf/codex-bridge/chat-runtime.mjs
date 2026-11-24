@@ -144,7 +144,7 @@ export function buildContextEnvelope(message) {
   const currentUserMessage = { content: message.content }
   for (const key of ['attachments', 'inputRefs', 'files']) if (message[key] !== undefined) currentUserMessage[key] = message[key]
   // Delivery control remains covered by the original snapshot digest, but is not model history.
-  const { contextDelivery, ...modelFacts } = snapshot.facts
+  const { contextDelivery, taskUsageCapture, ...modelFacts } = snapshot.facts
   const envelope = {
     schemaVersion: CHAT_CONTEXT_ENVELOPE_VERSION,
     kind: 'juyiting.context-envelope',
@@ -629,7 +629,11 @@ export class PersistentChatInbox {
           enrollment?.protocol !== 'METERED_CAPTURE_V2' || enrollment.captureId !==
             canonicalSha256(['CAPTURE_V2',message.turnId,message.dispatchId]).slice(7)) throw new Error('CHAT_CAPTURE_BINDING_INVALID')
       const parent = resolve(this.dir, `discussion-source-${key}`)
-      if (!recovering) ensureDirectory(parent)
+      if (!recovering) {
+        // Do not chmod or follow an existing entry (including a link). openSubject verifies the private directory.
+        try { mkdirSync(parent,{mode:0o700}); directoryFsync(this.dir) }
+        catch (error) { if (error.code !== 'EEXIST') throw error }
+      }
       return {parent, subject:{executionId:message.turnId, runId:message.dispatchId, snapshotDigest:message.contextHash.slice(7)}}
     })
   }
