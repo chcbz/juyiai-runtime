@@ -7,12 +7,12 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { RuntimeV1Client } from '../../../cyf-agent-runtime-v1/lib/runtime-client.mjs'
 import { SkillExecutionStore } from '../../skill-execution-store.mjs'
-import { startMeteredRoot } from '../../metered-request-capture.mjs'
+import { startMeteredRoot,resumeStoppedMeteredRoot } from '../../metered-request-capture.mjs'
 import { observeResponse } from '../../metered-response-observation.mjs'
 import { SkillUsageDelivery } from '../../skill-usage-delivery.mjs'
 import { deliverMetered, meteredBatch } from '../../metered-usage-delivery.mjs'
 
-export async function exercisePeer({port, executionId, runId, snapshotDigest, session}) {
+export async function exercisePeer({port, executionId, runId, snapshotDigest, session, successor=false}) {
   assert.ok(Number.isInteger(port) && port>0 && port<=65535)
   const origin=`http://127.0.0.1:${port}`, client=new RuntimeV1Client({apiBaseUrl:origin,manifest:{}})
   client.currentSession=session
@@ -20,8 +20,10 @@ export async function exercisePeer({port, executionId, runId, snapshotDigest, se
   try {
     const scope={agentId:session.canonicalAgentId}, store=new SkillExecutionStore({rootDirectory:root,scope,
       command:{executionProtocolVersion:6,executionId,runId,snapshotDigest,toolPolicyRef:'NATIVE_LOCAL_FILES_V1',usageMode:'RESPONSE_V2',captureProtocol:'METERED_CAPTURE_V2'}})
-    const cap=await startMeteredRoot(store,{executionId,runId,executionConfigSha256:'c'.repeat(64),engineVersion:'fixture',
-      coveragePolicyVersion:'TEST_MODEL_ONLY',rootSourceId:'source_model',channelNamespace:'test_gateway',adapterVersion:'FIXTURE',checkActive(){}})
+    const options={executionId,runId,executionConfigSha256:'c'.repeat(64),engineVersion:'fixture',
+      coveragePolicyVersion:'TEST_MODEL_ONLY',rootSourceId:'source_model',channelNamespace:'test_gateway',adapterVersion:'FIXTURE',checkActive(){}}
+    const first=await startMeteredRoot(store,options);let cap=first
+    if(successor){await first.markStopped(()=>{});cap=await resumeStoppedMeteredRoot(store,options,'BEFORE_FIRST_TURN')}
     const observation=observeResponse('application/json',200,4096,false)
     observation.push(Buffer.from('{"id":"provider_1","status":"completed"}'))
     await cap.dispatch((_req,finish)=>finish(observation.finish(true)));await cap.sealStopped(()=>{})
@@ -32,8 +34,8 @@ export async function exercisePeer({port, executionId, runId, snapshotDigest, se
     // The receiving fixture drops the first RESPONSE reply after commit. Production delivery must GET its receipt.
     for(let i=0; !await send(meteredBatch()); i++) assert.ok(i<8,'delivery did not finish')
     const dir=join(store.directory,`usage-acks-${cap.captureId}`), files=await readdir(dir)
-    assert.equal(files.length,7)
-    const path=join(dir,files.find(f=>/^response-[a-f0-9]{64}-1\.json$/.test(f)))
+    assert.equal(files.length,successor?9:7)
+    const path=join(dir,files.find(f=>(successor?/^epoch-1-response-[a-f0-9]{64}-1\.json$/:/^response-[a-f0-9]{64}-1\.json$/).test(f)))
     const ack=JSON.parse(await readFile(path));assert.equal(ack.ledger.status,'PENDING_USAGE');assert.equal(ack.ledger.costYuan,null)
     await rm(path);assert.equal(await send({...meteredBatch(),left:0}),false);assert.equal(await send(meteredBatch()),true)
     assert.deepEqual(JSON.parse(await readFile(path)),ack)
