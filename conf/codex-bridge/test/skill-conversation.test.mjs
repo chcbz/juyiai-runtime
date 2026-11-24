@@ -802,3 +802,10 @@ test('shared API6 fixture decodes exact scope and keeps result schema2 canonical
   assert.equal(skillCanonicalJson(fixture.resultPreimage), fixture.canonicalPreimage)
   assert.equal(skillDigest(fixture.resultPreimage), fixture.resultSha256)
 })
+
+test('reconstructed native lane derives first-turn permission only from server EXECUTE work',async t=>{
+  const f=fixture(t),seen=[];const options={...f.options,runNative:async req=>{seen.push(req.mayStartTurn);throw Object.assign(Error('fixture unknown'),{code:'SKILL_RESULT_UNKNOWN'})},fetchFn:async(url,opts)=>{
+    if(!url.pathname.endsWith('/resume'))return f.options.fetchFn(url,opts)
+    const raw=await f.options.fetchFn(url,opts),env=await raw.json();return response(url,{...env.data,allowedWork:['QUERY_EFFECT','RECOVER_LOCAL_RESULT']})
+  }};await partial(new SkillConversationLane(options).poll(),'SKILL_RESULT_UNKNOWN');await partial(new SkillConversationLane(options).poll(),'SKILL_RESULT_UNKNOWN');assert.deepEqual(seen,[true,false]);assert.equal(f.modelCalls(),0)
+})

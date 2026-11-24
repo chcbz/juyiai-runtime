@@ -113,7 +113,7 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
             executionConfigSha256:skillDigest([layout.digest,store.commandDigest,engineVersion,channelNamespace,model,effort]),
             dispatchGroup:nativeDispatchGroup(layout.binding,{binarySha256:schema.binarySha256,engineVersion,channelNamespace,model,effort,
               instructionsSha256:slot.meteredAdmission.instructionsSha256,toolPolicyRef:store.command.toolPolicyRef,coveragePolicyVersion}),
-            engineVersion,coveragePolicyVersion,rootSourceId:'source_model',channelNamespace,adapterVersion:'RESPONSES_TEXT_TOKENS_V1',checkActive }
+            engineVersion,coveragePolicyVersion,rootSourceId:'source_model',channelNamespace,adapterVersion:'RESPONSES_TEXT_TOKENS_V1',checkActive,deferUntilThread:mode==='BEFORE_FIRST_TURN' }
           slot.meteredCapture=mode===null?await startMeteredRoot(store,options):await resumeStoppedMeteredRoot(store,options,mode)
         } catch (error) { if (error.code === 'EEXIST') fail('SKILL_RESULT_UNKNOWN'); throw error }
       }
@@ -171,7 +171,15 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
       // boundaries; a cached startup inventory is not refresh/resume evidence.
       for (const method of ['startOrResumeThread', 'runTurn']) {
         const call = adapter[method].bind(adapter)
-        adapter[method] = async (...args) => { await adapter.verifyNativeExecutionSkills(); return call(...args) }
+        adapter[method] = async (...args) => {
+          await adapter.verifyNativeExecutionSkills()
+          const enable=method==='startOrResumeThread' && slot.meteredCapture?.enableAfterThreadResume
+          if(!enable)return call(...args)
+          const original=slot.meteredAdmission.store.read('native-thread')?.threadId
+          if(!original||args[0]?.threadId!==original)fail('SKILL_RESULT_UNKNOWN')
+          const result=await call(...args);if(result.threadId!==original)fail('SKILL_RESULT_UNKNOWN')
+          await enable();return result
+        }
       }
       checkActive()
       adapter.nativeExecutionIsolation = Object.freeze({ schemaVersion: 1, layoutDigest: layout.digest, cwd: '/execution',

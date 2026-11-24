@@ -17,7 +17,7 @@ export const resumeStoppedMeteredRoot = (store, options, mode) => {
   return openRoot(store,options,mode)
 }
 async function openRoot(store, { executionId, runId, executionConfigSha256, dispatchGroup = null, engineVersion, coveragePolicyVersion,
-  rootSourceId, channelNamespace, adapterVersion, checkActive, now = Date.now }, mode) {
+  rootSourceId, channelNamespace, adapterVersion, checkActive, deferUntilThread = false, now = Date.now }, mode) {
   if (store.command.executionId !== checkId(executionId) || store.command.runId !== checkId(runId)
       || store.command.usageMode !== 'RESPONSE_V2' || store.command.captureProtocol !== 'METERED_CAPTURE_V2'
       || !skillSha(store.command.snapshotDigest) || !skillSha(executionConfigSha256) || typeof checkActive !== 'function') bad('METERED_CAPTURE_BINDING_INVALID')
@@ -50,13 +50,20 @@ async function openRoot(store, { executionId, runId, executionConfigSha256, disp
       if(mode==='BEFORE_FIRST_TURN')requireResume(stop.reservedHigh==='0'&&!entry.names.some(n=>/^(?:reserved|request|response|duplicate|tmp)-/.test(n)))
     }
     epoch=String(BigInt(epochs.at(-1).epoch)+1n);dir=resolve(root,`epoch-${epoch}`)
-    checkActive();await mkdir(dir,{mode:0o700});await syncDir(root)
   }
-  await persist(dir,`source-${epoch}`,first(binding,'SOURCE',[sourceId,epoch],sourceFacts(epoch,previous),now));checkActive()
+  const deferred=mode==='BEFORE_FIRST_TURN' && deferUntilThread
+  let registered=false,registering
+  const register=()=>registering??=(async()=>{
+    if(mode!==null){checkActive();await mkdir(dir,{mode:0o700});await syncDir(root)}
+    await persist(dir,`source-${epoch}`,first(binding,'SOURCE',[sourceId,epoch],sourceFacts(epoch,previous),now));registered=true;checkActive()
+  })()
+  if(!deferred)await register()
   let next = 0n, stopped = mode==='RECONCILE_ONLY', inflight=0, drained, wake, writeFailed=false
   let sealing, watermark
   async function markStopped(assertStopped) {
     await assertStopped(); stopped=true
+    if(registering)await registering
+    if(!registered)return // restoring an empty thread failed before admitting any producer
     if(inflight)await (drained??=new Promise(resolve=>{wake=resolve}))
     await assertStopped()
     // A stopped recovery may have already closed the source incomplete. Never rewrite its decision.
@@ -65,7 +72,7 @@ async function openRoot(store, { executionId, runId, executionConfigSha256, disp
       if(!sealed)await persist(dir,'producer-stopped',{...binding,...(epoch==='0'?{}:{epoch}),reservedHigh:String(next),writeFailed})
     })().catch(error=>{watermark=null;throw error})
   }
-  return Object.freeze({ ...binding, textTokenProtocol:engineVersion==='codex-cli-0.167.0' && adapterVersion==='RESPONSES_TEXT_TOKENS_V1' && ['TEXT_MODEL_ONLY_V1','NATIVE_LOCAL_ARTIFACT_TEXT_V1'].includes(coveragePolicyVersion), stopAdmission() { stopped = true },
+  return Object.freeze({ ...binding, ...(deferred?{async enableAfterThreadResume(){if(stopped)bad('METERED_CAPTURE_ADMISSION_CLOSED');await register()}}:{}), textTokenProtocol:engineVersion==='codex-cli-0.167.0' && adapterVersion==='RESPONSES_TEXT_TOKENS_V1' && ['TEXT_MODEL_ONLY_V1','NATIVE_LOCAL_ARTIFACT_TEXT_V1'].includes(coveragePolicyVersion), stopAdmission() { stopped = true },
     async stopAndDrain(){stopped=true;if(inflight)await (drained??=new Promise(resolve=>{wake=resolve}));if(writeFailed)bad('METERED_CAPTURE_WRITE_INCOMPLETE')},
     // Called only after the owner has joined the engine and closed the egress. No re-opening after this point.
     markStopped,
@@ -77,7 +84,7 @@ async function openRoot(store, { executionId, runId, executionConfigSha256, disp
     },
     // Only the actual egress handler may supply send; call it after checking the live fence again.
     async dispatch(send) {
-      if (stopped || typeof send !== 'function') bad('METERED_CAPTURE_ADMISSION_CLOSED')
+      if (!registered || stopped || typeof send !== 'function') bad('METERED_CAPTURE_ADMISSION_CLOSED')
       inflight++;try {
         checkActive(); const sequence = String(++next), attemptId = randomUUID()
         let record

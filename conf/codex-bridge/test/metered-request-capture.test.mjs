@@ -113,7 +113,7 @@ import { writeFile } from 'node:fs/promises'
 import { NativeExecutionProfileRuntime } from '../native-execution-runtime.mjs'
 import { measureMinimalNativeExecutionToolchain } from '../native-execution-profile.mjs'
 
-for (const admitted of [false,true,'artifact','empty']) test(admitted==='empty'?'real engine resumes an empty original thread after suspension before the first model turn':admitted==='artifact'?'real metered native execution ties its second request to the successful result proposal':admitted ? 'admitted V2 profile measures the CLI, persists before real TLS and retains suspend watermark without false coverage' : 'real metered Codex native turn uses sealed temporary HOME, measured namespace and one durable request at the TLS fixture',
+for (const admitted of [false,true,'artifact','empty']) test(admitted==='empty'?'real engine missing empty thread stays unresolved without another source, turn or model call':admitted==='artifact'?'real metered native execution ties its second request to the successful result proposal':admitted ? 'admitted V2 profile measures the CLI, persists before real TLS and retains suspend watermark without false coverage' : 'real metered Codex native turn uses sealed temporary HOME, measured namespace and one durable request at the TLS fixture',
   {skip:process.env.CYF_NATIVE_EXECUTION_ISOLATION_PROBE !== '1',timeout:60000}, async t=>{
   const {capture,read,store}=await openRoot(t,{engineVersion:'codex-cli-0.167.0',adapterVersion:'RESPONSES_TEXT_TOKENS_V1',coveragePolicyVersion:'TEXT_MODEL_ONLY_V1'},admitted), root=await mkdtemp(join(tmpdir(),'mrt-'));t.after(()=>rm(root,{recursive:true,force:true}))
   const privateDir=async name=>{const path=join(root,name);await mkdir(path,{mode:0o700});return path}
@@ -152,7 +152,9 @@ for (const admitted of [false,true,'artifact','empty']) test(admitted==='empty'?
         await assert.rejects(runNativeExecution(request),/fixture stopped immediately/);actual.write=write
         const original=actual.read('native-thread');assert.ok(original.threadId);assert.equal(actual.read('native-start-attempt'),null);assert.equal((await actualRead('producer-stopped')).reservedHigh,'0');assert.equal(calls.length,0)
         const readRoot=actualRead;actualRead=key=>readRoot('epoch-1/'+key)
-        const result=await runNativeExecution(request);assert.equal(result.executionId,command.executionId);assert.equal(actual.read('native-turn').threadId,original.threadId);assert.equal(calls.length,2);assert.ok(calls.every(c=>c.pending==='PENDING'));return
+        for(let i=0;i<2;i++)await assert.rejects(runNativeExecution(request),e=>e.code==='SKILL_RESULT_UNKNOWN' && e.cause?.code===-32600 && e.cause.message===`no rollout found for thread id ${original.threadId}`)
+        assert.deepEqual(actual.read('native-thread'),original);assert.equal(actual.read('native-start-attempt'),null);assert.equal(actual.read('native-turn'),null);assert.equal(calls.length,0)
+        await assert.rejects(readRoot('epoch-1/source-1'),{code:'ENOENT'});return
       }
       const result=await runNativeExecution({command,inputs:[],entries:[],store:actual,checkActive(){},profileRuntime:runtime,model:'gpt-5.4',effort:'medium'})
       assert.equal(result.executionId,'exec1');assert.equal(actual.read('native-selection').revision,'1');assert.equal(calls.length,2)
@@ -385,4 +387,10 @@ test('only a stopped matching capture before any first turn can admit a new prov
   await next.dispatch(async request=>{assert.equal(request.epoch,'1');assert.equal(request.sequence,'1');assert.equal((await read('epoch-1/request-1-1')).observation.resolution,'PENDING')})
   await next.markStopped(()=>{});await assert.rejects(open(),{code:'SKILL_RESULT_UNKNOWN'});const marker=await recoverStoppedMeteredRoot(store,()=>{})
   assert.equal(marker.closeState,'SEALED_INCOMPLETE');await assert.rejects(resume(store,args,'RECONCILE_ONLY'),{code:'SKILL_RESULT_UNKNOWN'});assert.ok(!(await readdir(dir)).includes('epoch-2'))
+})
+
+test('deferred successor blocks bootstrap egress and persists the source before permitting any dispatch',async t=>{
+  const {resumeStoppedMeteredRoot:resume}=await import('../metered-request-capture.mjs');const {store,args,capture,dir,read}=await openRoot(t);await capture.markStopped(()=>{})
+  const options={...args,deferUntilThread:true},open=()=>resume(store,options,'BEFORE_FIRST_TURN');const first=await open();await first.markStopped(()=>{});await assert.rejects(first.enableAfterThreadResume(),{code:'METERED_CAPTURE_ADMISSION_CLOSED'});assert.ok(!(await readdir(dir)).includes('epoch-1'))
+  const next=await open();await assert.rejects(next.dispatch(()=>assert.fail()),{code:'METERED_CAPTURE_ADMISSION_CLOSED'});await Promise.all([next.enableAfterThreadResume(),next.enableAfterThreadResume()]);await next.dispatch(async r=>{assert.equal(r.epoch,'1');assert.equal((await read('epoch-1/source-1')).observation.epoch,'1');assert.equal((await read('epoch-1/request-1-1')).observation.resolution,'PENDING')});await next.markStopped(()=>{})
 })

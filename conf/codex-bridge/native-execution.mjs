@@ -77,7 +77,14 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
     }
     if (existing && command.usageMode==='RESPONSE_V2') {
       // Only the never-attempted path can reach here; load the exact original thread, not a new one.
-      const resumed=await adapter.startOrResumeThread(existing,policy)
+      let resumed
+      try { resumed=await adapter.startOrResumeThread(existing,policy) }
+      catch(cause){
+        // Fixed engine: empty threads need not have a persisted rollout. Never substitute thread/start.
+        if(cause?.code===-32600 && cause.message===`no rollout found for thread id ${existing.threadId}`)
+          throw Object.assign(new Error('SKILL_RESULT_UNKNOWN'),{code:'SKILL_RESULT_UNKNOWN',cause})
+        throw cause
+      }
       if(resumed.threadId!==existing.threadId)fail('SKILL_RESULT_UNKNOWN')
     }
     const input = [{ type: 'text', text: JSON.stringify({ instruction: command.instruction, parameters: command.parameters,
