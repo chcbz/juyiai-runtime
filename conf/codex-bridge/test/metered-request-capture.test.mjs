@@ -449,3 +449,35 @@ test('deferred successor blocks bootstrap egress and persists the source before 
   const options={...args,deferUntilThread:true},open=()=>resume(store,options,'BEFORE_FIRST_TURN');const first=await open();await first.markStopped(()=>{});await assert.rejects(first.enableAfterThreadResume(),{code:'METERED_CAPTURE_ADMISSION_CLOSED'});assert.ok(!(await readdir(dir)).includes('epoch-1'))
   const next=await open();await assert.rejects(next.dispatch(()=>assert.fail()),{code:'METERED_CAPTURE_ADMISSION_CLOSED'});await Promise.all([next.enableAfterThreadResume(),next.enableAfterThreadResume()]);await next.dispatch(async r=>{assert.equal(r.epoch,'1');assert.equal((await read('epoch-1/source-1')).observation.epoch,'1');assert.equal((await read('epoch-1/request-1-1')).observation.resolution,'PENDING')});await next.markStopped(()=>{})
 })
+
+// Source-only adapter seam: API enrollment is an explicit fixture, never inferred from historical records.
+test('durable discussion source keeps original turn/dispatch/context across restart without a workspace command', async t => {
+  const {PersistentChatInbox, canonicalSha256, validateChatDispatch} = await import('../chat-runtime.mjs')
+  const {startDiscussionCapture,recoverStoppedDiscussionCapture} = await import('../metered-request-capture.mjs')
+  const rootDir = await mkdtemp(join(tmpdir(),'discussion-capture-')); t.after(()=>rm(rootDir,{recursive:true,force:true}))
+  const wire = JSON.parse(await readFile(new URL('../contracts/api-hosted-wire-v1.json', import.meta.url),'utf8'))
+  const profile = {agentId:wire.targetAgentId}, inbox = new PersistentChatInbox({rootDir,profile}); inbox.initialize()
+  const admit = async enrolled => {
+    const m=structuredClone(wire);m.route='CHAT';m.dispatchId += enrolled ? '-new' : '-old';m.dedupeKey += enrolled ? '-new' : '-old'
+    m.factsManifest.participantAgentIds=[m.targetAgentId]
+    if(enrolled)m.factsManifest.taskUsageCapture={protocol:'METERED_CAPTURE_V2',captureId:skillDigest(['CAPTURE_V2',m.turnId,m.dispatchId])}
+    m.contextSnapshot.facts=m.factsManifest;m.contextHash=m.contextSnapshot.contextHash=canonicalSha256({sourceVector:m.sourceVector,facts:m.factsManifest})
+    const {key}=await inbox.accept(validateChatDispatch(m));inbox.claim(key);return {key,m}
+  }
+  const opts={executionConfigSha256:'a'.repeat(64),engineVersion:'fixture',adapterVersion:'FIXTURE',rootSourceId:'discussion',channelNamespace:'local',checkActive(){}}
+  const old=await admit(false);await assert.rejects(startDiscussionCapture(inbox,old.key,opts),/CHAT_CAPTURE_BINDING_INVALID/)
+  const {key,m}=await admit(true), cap=await startDiscussionCapture(inbox,key,opts);let sent=0
+  const {parent}=inbox.discussionCaptureSubject(key,false), dir=join(parent,'usage-capture-'+cap.captureId)
+  await cap.dispatch(async req=>{assert.equal(JSON.parse(await readFile(join(dir,`request-${req.sequence}-1.json`))).observation.resolution,'PENDING');sent++})
+  await assert.rejects(startDiscussionCapture(inbox,key,opts),{code:'EEXIST'});await cap.markStopped(()=>{})
+  const restarted=new PersistentChatInbox({rootDir,profile});restarted.initialize();const closed=await recoverStoppedDiscussionCapture(restarted,key,()=>{})
+  assert.equal(closed.executionId,m.turnId);assert.equal(closed.runId,m.dispatchId);assert.equal(closed.closeState,'SEALED_INCOMPLETE');assert.equal(sent,1)
+  assert.equal(JSON.parse(await readFile(join(dir,'plan.json'))).observation.snapshotSha256,m.contextHash.slice(7))
+  assert.deepEqual(await recoverStoppedDiscussionCapture(restarted,key,()=>{}),closed)
+})
+test('stopped recovery cannot finalize a different frozen dispatch snapshot for the same run', async t=>{
+  const {store,capture,dir}=await openRoot(t);await capture.markStopped(()=>{})
+  await assert.rejects(recoverStoppedMeteredRoot({directory:store.directory,command:{...store.command,snapshotDigest:'b'.repeat(64)}},()=>{}),{code:'METERED_CAPTURE_SOURCE_CONFLICT'})
+  assert.equal((await readdir(dir)).some(name=>name.includes('final')),false)
+  await recoverStoppedMeteredRoot(store,()=>{})
+})

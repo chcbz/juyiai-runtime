@@ -5,7 +5,7 @@ import { resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { skillDigest, skillId, skillSha } from './skill-executor.mjs'
 import { first, persist, directory, syncDir, readPrivate, rootEpochDirectories } from './metered-capture-files.mjs'
-import { recoverStoppedMeteredRoot } from './metered-capture-closure.mjs'
+import { closeMeteredSubject } from './metered-capture-closure.mjs'
 const bad = code => { throw Object.assign(new Error(code), {code}) }
 const checkId = id => { if(!skillId(id)) bad('METERED_CAPTURE_ID_INVALID'); return id }
 /** Start only a NEW RESPONSE_V2 run, before spawning the engine. Existing plan is recovery work, never dispatch authority. */
@@ -16,23 +16,27 @@ export const resumeStoppedMeteredRoot = (store, options, mode) => {
   if(!['RECONCILE_ONLY','BEFORE_FIRST_TURN'].includes(mode))bad('SKILL_RESULT_UNKNOWN')
   return openRoot(store,options,mode)
 }
-async function openRoot(store, { executionId, runId, executionConfigSha256, dispatchGroup = null, engineVersion, coveragePolicyVersion,
+function openRoot(store, options, mode) {
+  if (store.command.usageMode !== 'RESPONSE_V2' || store.command.captureProtocol !== 'METERED_CAPTURE_V2')
+    return Promise.reject(Object.assign(Error('METERED_CAPTURE_BINDING_INVALID'),{code:'METERED_CAPTURE_BINDING_INVALID'}))
+  return openSubject(store.directory,store.command,options,mode)
+}
+async function openSubject(parent, subject, { executionId, runId, executionConfigSha256, dispatchGroup = null, engineVersion, coveragePolicyVersion,
   rootSourceId, channelNamespace, adapterVersion, checkActive, deferUntilThread = false, now = Date.now }, mode) {
-  if (store.command.executionId !== checkId(executionId) || store.command.runId !== checkId(runId)
-      || store.command.usageMode !== 'RESPONSE_V2' || store.command.captureProtocol !== 'METERED_CAPTURE_V2'
-      || !skillSha(store.command.snapshotDigest) || !skillSha(executionConfigSha256) || typeof checkActive !== 'function') bad('METERED_CAPTURE_BINDING_INVALID')
+  if (subject.executionId !== checkId(executionId) || subject.runId !== checkId(runId)
+      || !skillSha(subject.snapshotDigest) || !skillSha(executionConfigSha256) || typeof checkActive !== 'function') bad('METERED_CAPTURE_BINDING_INVALID')
   for (const id of [runId, engineVersion, coveragePolicyVersion, rootSourceId, channelNamespace, adapterVersion]) checkId(id)
   const binding = { executionId, runId, captureId: skillDigest(['CAPTURE_V2', executionId, runId]) }
-  const root = resolve(store.directory, `usage-capture-${binding.captureId}`),sourceId=rootSourceId
-  checkActive(); await directory(store.directory)
-  const planFacts={captureProtocol:'METERED_CAPTURE_V2',snapshotSha256:store.command.snapshotDigest,executionConfigSha256,
+  const root = resolve(parent, `usage-capture-${binding.captureId}`),sourceId=rootSourceId
+  checkActive(); await directory(parent)
+  const planFacts={captureProtocol:'METERED_CAPTURE_V2',snapshotSha256:subject.snapshotDigest,executionConfigSha256,
     engineVersion,coveragePolicyVersion,rootSourceId,...(dispatchGroup?{dispatchGroup}:{})}
   const sourceFacts=(epoch,previous)=>({sourceId,epoch,sourceKind:'METERED_HTTP_RESPONSES_V1',adapterVersion,channelNamespace,
     parentSourceRecordId:null,previousEpochSourceRecordId:previous})
   let epoch='0',dir=root,previous=null
   if(mode===null){
     // EEXIST never grants a second fresh writer, even if the original PLAN write failed.
-    await mkdir(root,{mode:0o700});await syncDir(store.directory)
+    await mkdir(root,{mode:0o700});await syncDir(parent)
     await persist(root,'plan',first(binding,'PLAN',[],planFacts,now))
   }else{
     const requireResume=ok=>{if(!ok)bad('SKILL_RESULT_UNKNOWN')}
@@ -79,7 +83,7 @@ async function openRoot(store, { executionId, runId, executionConfigSha256, disp
     sealStopped(assertStopped) {
       return sealing??=(async()=>{
         await markStopped(assertStopped)
-        return recoverStoppedMeteredRoot(store,assertStopped,now)
+        return closeMeteredSubject(parent,subject,assertStopped,now)
       })().catch(error=>{sealing=null;throw error})
     },
     // Only the actual egress handler may supply send; call it after checking the live fence again.
@@ -120,4 +124,17 @@ async function openRoot(store, { executionId, runId, executionConfigSha256, disp
         return await send(Object.freeze({ captureId: binding.captureId, sourceId, epoch, sequence, attemptId, evidenceSha256: record.evidenceSha256 }), finish)
       }finally{if(--inflight===0)wake?.()}
     } })
+}
+
+// Internal source owner only. Never infer capture enrollment from a thread event or a deterministic ID alone.
+// This lane records observations, not COMPLETE: shared adapters and material egress are not yet attested.
+export async function startDiscussionCapture(inbox, key, options) {
+  const {parent, subject} = inbox.discussionCaptureSubject(key, false)
+  return openSubject(parent, subject, {...options, executionId:subject.executionId, runId:subject.runId,
+    dispatchGroup:null, coveragePolicyVersion:'CHAT_SOURCE_UNVERIFIED_V1'}, null)
+}
+export async function recoverStoppedDiscussionCapture(inbox, key, assertStopped) {
+  await assertStopped()
+  const {parent, subject} = inbox.discussionCaptureSubject(key, true)
+  return closeMeteredSubject(parent, subject, assertStopped)
 }

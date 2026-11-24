@@ -1,7 +1,7 @@
 /** Source-only closure for the metered HTTP root epoch. No lease, model adapter,
  * provider credential, command dispatch or wallet dependency in recovery. */
 import { resolve } from 'node:path'
-import { skillDigest, skillId } from './skill-executor.mjs'
+import { skillDigest, skillId, skillSha } from './skill-executor.mjs'
 import { directory, readPrivate, persist, first, rootEpochDirectories } from './metered-capture-files.mjs'
 const invalid = () => {throw Object.assign(Error('METERED_CAPTURE_SOURCE_CONFLICT'),{code:'METERED_CAPTURE_SOURCE_CONFLICT'})}
 const yes = value => {if(!value)invalid()}
@@ -12,10 +12,15 @@ const requestRE=new RegExp(`^request-${positive}-${positive}\\.json$`),responseR
 
 export async function recoverStoppedMeteredRoot(store, assertStopped, clock=Date.now) {
   // Caller owns the original stopped execution / subject writer gate, not a lease to execute again.
-  await assertStopped()
-  const {executionId,runId,usageMode,captureProtocol}=store.command
+  const {executionId,runId,usageMode,captureProtocol,snapshotDigest}=store.command
   yes(skillId(executionId)&&skillId(runId)&&usageMode==='RESPONSE_V2'&&captureProtocol==='METERED_CAPTURE_V2')
-  const captureId=skillDigest(['CAPTURE_V2',executionId,runId]),binding={executionId,runId,captureId},dir=resolve(store.directory,`usage-capture-${captureId}`)
+  return closeMeteredSubject(store.directory, {executionId,runId,snapshotDigest}, assertStopped, clock)
+}
+// Source owner supplies the frozen dispatch snapshot, not a snapshot read from the PLAN being verified.
+export async function closeMeteredSubject(parent, {executionId,runId,snapshotDigest}, assertStopped, clock=Date.now) {
+  await assertStopped()
+  yes(skillId(executionId) && skillId(runId) && skillSha(snapshotDigest))
+  const captureId=skillDigest(['CAPTURE_V2',executionId,runId]),binding={executionId,runId,captureId},dir=resolve(parent,`usage-capture-${captureId}`)
   const epochs=await rootEpochDirectories(dir), names=new Set(epochs[0].names)
   const check=(raw,kind,identity,rev,previous)=>{
     const {receiptId,expectedRevision,evidenceSha256,...e}=raw
@@ -23,6 +28,7 @@ export async function recoverStoppedMeteredRoot(store, assertStopped, clock=Date
     yes(expectedRevision===(kind==='RESPONSE'?'0':null)&&receiptId===skillDigest(['USAGE_RECEIPT_V2',evidenceSha256,expectedRevision]));return raw
   }
   const plan=check(await readPrivate(dir,'plan'),'PLAN',[],1), sourceId=plan.observation.rootSourceId
+  yes(plan.observation.snapshotSha256 === snapshotDigest && plan.observation.captureProtocol === 'METERED_CAPTURE_V2')
   const finals=[], allReasons=new Set(), seenResponses=new Set();let previous=null
   const final=async(dir,names,key,kind,identity,observation)=>{
     if(names.has(`${key}.json`)){const existing=check(await readPrivate(dir,key),kind,identity,1);yes(skillDigest(existing.observation)===skillDigest(observation));return existing}

@@ -4678,6 +4678,7 @@ export const runFastChat = async (profile, message, {
   if (message?.contextSnapshot?.facts && Object.hasOwn(message.contextSnapshot.facts, 'typedDeliberation')) {
     try { validateChatDispatch(message) } catch (error) { throw new AgentProtocolError(error.code || 'TYPED_DELIBERATION_BINDING_INVALID', error.message || 'Invalid typed deliberation dispatch binding') }
   }
+  if (Object.hasOwn(message.contextSnapshot?.facts || {}, 'taskUsageCapture')) throw new AgentProtocolError('CHAT_METERED_ROUTE_UNAVAILABLE', 'An enrolled turn requires a bound metered provider route')
   const actionRequest = resolveActionChatRequest(profile, message)
   if (Object.hasOwn(message.contextSnapshot?.facts || {}, 'typedDeliberation') && !actionRequest) throw new AgentProtocolError('ACTION_PROTOCOL_VERSION_INVALID', 'Durable planning requires supported action facts v5/v6 and outcome v5')
   const typedRequest = actionRequest

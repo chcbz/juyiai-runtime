@@ -613,6 +613,26 @@ export class PersistentChatInbox {
       return { key, state: 'processing', path: target, record: claimed }
     })
   }
+  // Read the original durable record under the existing inbox lock; callers do not supply paths or a message.
+  discussionCaptureSubject(key, recovering) {
+    if (!/^[a-f0-9]{64}$/.test(key)) throw new Error('CHAT_CAPTURE_BINDING_INVALID')
+    return this._withLock(() => {
+      const item = this.findByKey(key)
+      if (!item || (recovering ? !['recovery','archive'].includes(item.state) :
+          item.state !== 'processing' || item.record.state !== 'STARTING')) throw new Error('CHAT_CAPTURE_STATE_INVALID')
+      const message = validateChatDispatch(fingerprintSource(item.record.message))
+      const facts = message.contextSnapshot?.facts, enrollment = facts?.taskUsageCapture
+      if (!message.durable || message.route !== 'CHAT' || message.conversationScopeType !== 'bounty' || !message.taskId ||
+          durableChatKey(message) !== key || chatFingerprint(message) !== item.record.fingerprint ||
+          message.targetAgentId !== this.profile.agentId || !Array.isArray(facts.participantAgentIds) ||
+          facts.participantAgentIds.length !== 1 || facts.participantAgentIds[0] !== this.profile.agentId ||
+          enrollment?.protocol !== 'METERED_CAPTURE_V2' || enrollment.captureId !==
+            canonicalSha256(['CAPTURE_V2',message.turnId,message.dispatchId]).slice(7)) throw new Error('CHAT_CAPTURE_BINDING_INVALID')
+      const parent = resolve(this.dir, `discussion-source-${key}`)
+      if (!recovering) ensureDirectory(parent)
+      return {parent, subject:{executionId:message.turnId, runId:message.dispatchId, snapshotDigest:message.contextHash.slice(7)}}
+    })
+  }
   claimPreEngineInspection(key) {
     return this._withLock(() => {
       const item = this.findByKey(key)
