@@ -43,7 +43,7 @@ export async function exercisePeer({port, executionId, runId, snapshotDigest, se
   } finally {await rm(root,{recursive:true,force:true})}
 }
 // The Java parent supplies the frozen Chat payload and an issued device session. No workspace command.
-async function discussionPeer({discussion,port,session}){
+async function discussionPeer({discussion,port,session,rotate}){
   const {PersistentChatInbox,validateChatDispatch}=await import('../../chat-runtime.mjs')
   const {startDiscussionCapture}=await import('../../metered-request-capture.mjs')
   const {ChatUsageDelivery}=await import('../../chat-usage-delivery.mjs')
@@ -59,7 +59,16 @@ async function discussionPeer({discussion,port,session}){
     const obs=observeResponse('application/json',200,4096,false);obs.push(Buffer.from('{"id":"discussion_response_1","status":"completed"}'))
     await cap.dispatch((_req,finish)=>finish(obs.finish(true)));await cap.sealStopped(()=>{});inbox.complete(inbox.findByKey(key))
     const cfg={inbox,apiOrigin,scope,nativeFetch:client.nativeFetch.bind(client)}
-    const lane=new ChatUsageDelivery(cfg);assert.deepEqual(await lane.deliver(),[])
+    const lane=new ChatUsageDelivery(cfg),errors=await lane.deliver()
+    if(rotate){
+      assert.deepEqual(errors,[{code:'CHAT_CAPTURE_DELIVERY_PENDING'}]);const audit=await new ChatUsageDelivery(cfg).flush()
+      assert.equal(audit.confirmed,false);assert.deepEqual(audit.captureStates,[{key,capture:'SEALED',delivery:'PENDING',coverage:'INCOMPLETE'}])
+      const acks=await readdir(join(parent,`usage-acks-${cap.captureId}`));assert.equal(acks.length,4);assert.ok(!acks.some(f=>f.startsWith('response-')))
+      const src=join(parent,`usage-capture-${cap.captureId}`),file=(await readdir(src)).find(f=>/^response-[a-f0-9]{64}-1\.json$/.test(f))
+      const original=JSON.parse(await readFile(join(src,file)));assert.equal(original.executionId,m.turnId);assert.equal(original.runId,m.dispatchId)
+      return {receiptId:original.receiptId,ackCount:acks.length,pending:audit.pending}
+    }
+    assert.deepEqual(errors,[])
     const audit=await new ChatUsageDelivery(cfg).flush();assert.ok(audit.confirmed);assert.equal(audit.captureStates[0].coverage,'INCOMPLETE')
     const dir=join(parent,`usage-acks-${cap.captureId}`),files=await readdir(dir);assert.equal(files.length,7)
     const ack=JSON.parse(await readFile(join(dir,files.find(f=>/^response-[a-f0-9]{64}-1\.json$/.test(f)))))
