@@ -18,15 +18,22 @@ export function stoppedSkillManager({ agent, apiOrigin, instanceId }) {
   catch (error) { if (error.code === 'ENOENT') return null; throw error; }
 }
 
+function discussionLane(agent,transport={}) {
+  const inbox = new PersistentChatInbox({ rootDir: resolve(agent.stateRoot, 'inbox'), profile: agent.profile });
+  const {canonicalAgentId:agentId,tenantId,clientId}=agent.manifest;
+  return new ChatUsageDelivery({inbox,scope:{agentId,tenantId,clientId},...transport});
+}
+// Operator snapshot may run BEFORE shutdown. No live session, cleanup or business reconciliation.
+export function inspectLocalDiscussionEvidence(agent) { return discussionLane(agent).inspectDiscussionSources(); }
+
 export async function flushStoppedEvidence({ agent, ownerJiacn, apiOrigin, hostId, instanceId,
   clientFactory = options => new RuntimeV1Client(options) }) {
   const client = clientFactory({ manifest: agent.manifest, apiBaseUrl: apiOrigin,
     stateDir: agent.stateRoot, hostId, runtimeInstanceId: instanceId });
   try {
     await client.session(); // Existing authorization only; never reenroll or register.
-    const inbox = new PersistentChatInbox({ rootDir: resolve(agent.stateRoot, 'inbox'), profile: agent.profile });
     // Do not initialize the live inbox: that would reconcile business commands and GC history.
-    const chat = await new ChatUsageDelivery({ inbox, apiOrigin, scope:{agentId:agent.manifest.canonicalAgentId,tenantId:agent.manifest.tenantId,clientId:agent.manifest.clientId},
+    const chat = await discussionLane(agent,{ apiOrigin,
       nativeFetch: (url, options) => client.nativeFetch(url, options) }).flush();
     const { workspaceFileRootDir, workspaceFileApiOrigin } = agent.profile;
     const native = workspaceFileRootDir ? await new SkillUsageDelivery({

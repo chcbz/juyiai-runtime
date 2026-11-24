@@ -454,9 +454,18 @@ test('deferred successor blocks bootstrap egress and persists the source before 
 test('durable discussion source keeps original turn/dispatch/context across restart without a workspace command', async t => {
   const {PersistentChatInbox, canonicalSha256, validateChatDispatch} = await import('../chat-runtime.mjs')
   const {startDiscussionCapture,recoverStoppedDiscussionCapture} = await import('../metered-request-capture.mjs')
-  const rootDir = await mkdtemp(join(tmpdir(),'discussion-capture-')); t.after(()=>rm(rootDir,{recursive:true,force:true}))
   const wire = JSON.parse(await readFile(new URL('../contracts/api-hosted-wire-v1.json', import.meta.url),'utf8'))
+  const {fixture}=await import('../../cyf-agent-runtime-v1/test/channel-fixture.mjs')
+  const f=await fixture(t,{count:2,firstIdentity:{tenantId:wire.tenantId,clientId:wire.clientId,canonicalAgentId:wire.targetAgentId}})
+  const config=await f.config(),agent=config.agents[0],rootDir=join(agent.stateRoot,'inbox')
+  const {spawnSync}=await import('node:child_process'),{fileURLToPath}=await import('node:url')
+  const cli=fileURLToPath(new URL('../../cyf-agent-runtime-v1/agent-runtime.mjs',import.meta.url))
+  const report=(subject=agent.subjectKey)=>spawnSync(process.execPath,[cli,'inspect-discussion-receipts','--config',f.path,'--subject',subject],
+    {encoding:'utf8',env:{...process.env,CYF_RUNTIME_PROVIDER_ENVIRONMENTS_FILE:join(rootDir,'never-read')}})
+  const counts=(expected,status)=>{const r=report();assert.equal(r.status,status,r.stderr);assert.deepEqual(JSON.parse(r.stdout),expected)}
+  const absent=report(config.agents[1].subjectKey);assert.notEqual(absent.status,0);assert.equal(absent.stdout,'');assert.deepEqual(await readdir(config.agents[1].stateRoot),[])
   const profile = {agentId:wire.targetAgentId}, inbox = new PersistentChatInbox({rootDir,profile}); inbox.initialize()
+  counts({sources:0,acknowledged:0,pending:0,unverified:0},2)
   const admit = async (enrolled, suffix = enrolled ? '-new' : '-old') => {
     const m=structuredClone(wire);m.route='CHAT';m.dispatchId += suffix;m.dedupeKey += suffix
     m.factsManifest.participantAgentIds=[m.targetAgentId]
@@ -524,6 +533,7 @@ test('durable discussion source keeps original turn/dispatch/context across rest
   const {inspectDiscussionReceipts}=await import('../metered-usage-delivery.mjs')
   const inspect=()=>inspectDiscussionReceipts(expires,key,scope)
   const ackRoot=join(parent,'usage-acks-'+cap.captureId)
+  counts({sources:1,acknowledged:0,pending:1,unverified:0},2)
   assert.equal(await inspect(),false);await assert.rejects(readFile(ackRoot),{code:'ENOENT'})
   await assert.rejects(inspectDiscussionReceipts(expires,key,{...scope,tenantId:'wrong'}))
   for(const delay of [5000,10000,20000,40000,80000,160000,300000,300000]){
@@ -540,6 +550,7 @@ test('durable discussion source keeps original turn/dispatch/context across rest
   // ACKs cannot be swapped, even if both have valid bindings elsewhere in this sealed pass.
   const fs=await import('node:fs/promises'),ackDir=join(parent,'usage-acks-'+cap.captureId)
   const planAck=join(ackDir,'plan.json'),sourceAck=join(ackDir,'source-0.json'),planBytes=await fs.readFile(planAck)
+  counts({sources:1,acknowledged:1,pending:0,unverified:0},0)
   assert.equal(await inspect(),true)
   await fs.unlink(planAck)
   try{
@@ -564,6 +575,7 @@ test('durable discussion source keeps original turn/dispatch/context across rest
   const now=Date.now;try{Date.now=()=>now()+1000;expires.initialize()}finally{Date.now=now}
   assert.equal(expires.findByKey(key),null);assert.deepEqual(await recoverStoppedDiscussionCapture(expires,key,()=>{}),closed)
   assert.equal(expires.findByKey(extra.key),null);const firstClose=await recoverStoppedDiscussionCapture(expires,extra.key,()=>{})
+  counts({sources:2,acknowledged:1,pending:1,unverified:0},2)
   assert.equal(firstClose.runId,extra.m.dispatchId);assert.equal(firstClose.closeState,'SEALED_INCOMPLETE')
   await assert.rejects(startDiscussionCapture(expires,key,opts),/CHAT_CAPTURE_STATE_INVALID/)
   const {writeFile}=await import('node:fs/promises');await writeFile(join(parent,'discussion-binding.json'),JSON.stringify({...binding,dispatchId:'different'}))

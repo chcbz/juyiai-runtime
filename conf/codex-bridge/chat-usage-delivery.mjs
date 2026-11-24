@@ -1,6 +1,6 @@
 import { readdir } from 'node:fs/promises'
 import { directory } from './metered-capture-files.mjs'
-import { deliverDiscussionMetered,discussionBatch } from './metered-usage-delivery.mjs'
+import { deliverDiscussionMetered,discussionBatch,inspectDiscussionReceipts } from './metered-usage-delivery.mjs'
 import { readNativeJson } from './native-json.mjs'
 
 /** Independent evidence delivery. Never admits a turn, changes a wallet, or retries a model. */
@@ -30,8 +30,18 @@ export class ChatUsageDelivery {
     const pending = outstanding+this.inbox.pendingUsage().length
     return { confirmed: !errors.length && !pending, pending, errors, ...(captureStates.length?{captureStates}:{}) }
   }
-  async discussionKeys(){
-    try{await directory(this.inbox.dir)}catch(error){if(error.code==='ENOENT')return [];throw error}
+  // Snapshot of visible capture sources only. Not proof of closed admission or writer quiescence.
+  async inspectDiscussionSources(){
+    const keys=await this.discussionKeys(true)
+    const result={sources:keys.length,acknowledged:0,pending:0,unverified:0}
+    for(const key of keys){
+      try{if(await inspectDiscussionReceipts(this.inbox,key,this.scope))result.acknowledged++;else result.pending++}
+      catch{result.unverified++}
+    }
+    return result
+  }
+  async discussionKeys(requireExisting=false){
+    try{await directory(this.inbox.dir)}catch(error){if(!requireExisting&&error.code==='ENOENT')return [];throw error}
     return (await readdir(this.inbox.dir,{withFileTypes:true})).filter(e=>e.name.startsWith('discussion-source-')).map(e=>{
       const key=e.name.slice('discussion-source-'.length)
       if(!e.isDirectory() || !/^[a-f0-9]{64}$/.test(key))throw new Error('CHAT_CAPTURE_SOURCE_INVALID')

@@ -26,7 +26,7 @@ function parseArgs(argv) {
         || rest[i + 1].startsWith('--') || Object.hasOwn(options, rest[i].slice(2))) throw failure('RUNTIME_ARGUMENT_INVALID');
     options[rest[i].slice(2)] = rest[i + 1];
   }
-  if (!options.config || !['validate', 'enroll', 'run'].includes(command)) throw failure('RUNTIME_CONFIG_REQUIRED');
+  if (!options.config || !['validate', 'enroll', 'run', 'inspect-discussion-receipts'].includes(command)) throw failure('RUNTIME_CONFIG_REQUIRED');
   return { command, options };
 }
 const wait = (ms, signal) => new Promise(resolveWait => {
@@ -94,6 +94,14 @@ export async function runUnifiedRuntime({ config, apiOrigin, instanceId = random
 export async function main(argv = process.argv.slice(2), env = process.env) {
   const { command, options } = parseArgs(argv);
   const config = await readRuntimeHostConfig(resolve(options.config));
+  if (command === 'inspect-discussion-receipts') {
+    const agent=config.agents.find(a=>a.subjectKey===options.subject);
+    if (!agent || Object.keys(options).length!==2) throw failure('RUNTIME_EXACT_SUBJECT_REQUIRED');
+    const {inspectLocalDiscussionEvidence}=await import('./lib/evidence-handover.mjs');
+    const result=await inspectLocalDiscussionEvidence(agent);
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    return result.sources>0 && result.sources===result.acknowledged ? 0 : 2;
+  }
   const knowledgeConfig = await readKnowledgeMaintenanceConfig(env.CYF_RUNTIME_KNOWLEDGE_CONFIG_FILE, config);
   const providerEnvironments = await readRuntimeProviderEnvironments(env.CYF_RUNTIME_PROVIDER_ENVIRONMENTS_FILE, config.agents);
   if (providerEnvironments.size) {
@@ -126,7 +134,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   finally { process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop); }
 }
 const isMain = process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
-if (isMain) main().catch(error => {
+if (isMain) main().then(status => { process.exitCode = status; }).catch(error => {
   const category = classifyRuntimeError(error);
   console.error(JSON.stringify({ event: 'runtime-error', category: category.kind, ...(category.status ? { status: category.status } : {}) }));
   process.exitCode = runtimeExitStatus(error);
