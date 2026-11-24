@@ -31,4 +31,4 @@ async function execute(){
     return {executionId:command.executionId,runId:command.runId,snapshotSha256:command.snapshotDigest,manifestId:'manifest_'+skillDigest(payload),payload,calls}
   }finally{try{if(runtime)await runtime.dispose()}finally{if(up)await new Promise(r=>up.close(r));await rm(root,{recursive:true,force:true})}}
 }
-try{const result=await execute();process.stdout.write(JSON.stringify(result))}catch(e){const codes=[e,e?.cause,e?.cause?.cause].map(e=>e?.code).filter(c=>typeof c==='string'&&/^[A-Z0-9_]{1,90}$/.test(c));console.error('pickup peer failed:',codes.join(':')||'FIXTURE_ERROR');process.exitCode=1}
+try{const result=await execute();await writeFile(process.env.CYF_PICKUP_RESULT,JSON.stringify(result),{mode:0o600,flag:'wx'})}catch(e){const codes=[e,e?.cause,e?.cause?.cause].map(e=>e?.code).filter(c=>typeof c==='string'&&/^[A-Z0-9_]{1,90}$/.test(c));console.error('pickup peer failed:',codes.join(':')||'FIXTURE_ERROR');process.exitCode=1}
