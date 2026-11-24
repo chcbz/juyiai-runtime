@@ -739,6 +739,8 @@ test('managed text discussion drives real isolated CLI through the source ledger
   assert.deepEqual(observations,[{path:'/custom/responses',method:'POST',keyMatched:true,model:'gpt-5.4',hasCaptureField:false,hasPrewrite:true}]);assert.equal(result.computationStatus,'completed');assert.equal(inbox.findByKey(key).record.finalPrepared.content,fixture.outcomes[0].text)
   const response=read(resolve(dir(),readdirSync(dir()).find(n=>/^response-.*-1\.json$/.test(n))));assert.equal(response.runId,m.dispatchId)
   assert.equal(response.observation.reportedUsage.input_tokens,12);assert.equal(response.observation.reportedUsage.output_tokens,3);assert.equal(response.observation.actualBillingIdentity,null)
+  const localSeal=read(resolve(dir(),'usage-capture-finalized.json'));assert.equal(localSeal.closeState,'SEALED_INCOMPLETE');assert.equal(runtime.conversationOwners.size,0)
+  assert.equal(localSeal.executionId,m.turnId);assert.equal(localSeal.runId,m.dispatchId)
   inbox.recoveryRequired(item,result.recoveryReason);const restored=new PersistentChatInbox({rootDir:root,profile:p});restored.initialize()
   const marker=await recoverStoppedDiscussionCapture(restored,key,()=>assert.equal(runtime.conversationOwners.size,0));assert.equal(marker.closeState,'SEALED_INCOMPLETE');assert.equal(calls,1)
 })

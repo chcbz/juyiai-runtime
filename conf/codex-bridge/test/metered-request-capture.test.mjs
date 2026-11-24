@@ -520,7 +520,11 @@ test('durable discussion source keeps original turn/dispatch/context across rest
   const delivery=new ChatUsageDelivery({inbox:expires,apiOrigin,scope,nativeFetch:peer});assert.deepEqual(await delivery.deliver(),[])
   assert.equal(delivery.nextRecoveryAt(),Infinity);assert.equal(posts,7);assert.equal(gets,1);assert.equal(acks.size,7)
   const stopped=new ChatUsageDelivery({inbox:expires,scope,apiOrigin,nativeFetch:()=>assert.fail('local receipts must replay without network')})
-  assert.equal((await stopped.flush()).confirmed,true)
+  const audit=await stopped.flush();assert.equal(audit.confirmed,true);assert.deepEqual(audit.captureStates,[{key,capture:'SEALED',delivery:'ACKNOWLEDGED',coverage:'INCOMPLETE'}])
+  // A prior network ACK is no excuse to invent a missing source seal at handover.
+  const {rename}=await import('node:fs/promises');const seal=join(dir,'usage-capture-finalized.json'),saved=join(parent,'saved-seal');await rename(seal,saved)
+  try{const broken=await stopped.flush();assert.equal(broken.confirmed,false);assert.equal(broken.captureStates[0].capture,'UNVERIFIED');await assert.rejects(readFile(seal),{code:'ENOENT'})}
+  finally{await rename(saved,seal)}
   const wrong=new ChatUsageDelivery({inbox:expires,scope:{...scope,clientId:'other'},apiOrigin,nativeFetch:peer});assert.equal((await wrong.flush()).confirmed,false)
   const extra=await admit(true,'-pruned'), extraCap=await startDiscussionCapture(inbox,extra.key,opts);await extraCap.markStopped(()=>{})
   expires.complete(expires.findByKey(extra.key));assert.equal(expires.findByKey(extra.key).state,'ledger')

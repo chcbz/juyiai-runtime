@@ -94,7 +94,9 @@ export class TypedInspectionProfileRuntime extends IsolatedEngineProfileRuntime 
         if ((slot.spawnAttempted && !slot.adapter?.childClosed) || (slot.egress && !slot.egress.lifecycle.signal.aborted) ||
             this.conversationOwners.get(slot.conversation) !== slot) fail('METERED_PRODUCER_STOP_UNCONFIRMED')
       }
-      stopped(); await slot.capture?.markStopped(stopped)
+      // The writer still owns both child and egress fences. Persist local closure before releasing them;
+      // all network delivery remains in the independent usage lane.
+      stopped(); await slot.capture?.sealStopped(stopped)
       if (slot.state?.authPath) rmSync(slot.state.authPath, { force:true })
       if (slot.inputs) rmSync(slot.inputs, { recursive:true, force:true })
       this.discussions.delete(slot.conversation); this.conversationOwners.delete(slot.conversation); slot.finished = true

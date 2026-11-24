@@ -18,13 +18,17 @@ export class ChatUsageDelivery {
       errors.push(...await this.deliverLegacy())
       if (errors.length) break
     }
-    const batch=meteredBatch();let outstanding=0
+    const batch=meteredBatch(),captureStates=[];let outstanding=0
     for(const key of await this.discussionKeys()){
-      try{if(!await deliverDiscussionMetered(this.inbox,key,this.scope,this.captureRequest.bind(this),batch))outstanding++}
-      catch{outstanding++;errors.push({code:'CHAT_CAPTURE_DELIVERY_PENDING'})}
+      const state={key,capture:'UNVERIFIED',delivery:'PENDING',coverage:'UNVERIFIED'};captureStates.push(state)
+      try{
+        const ack=await deliverDiscussionMetered(this.inbox,key,this.scope,this.captureRequest.bind(this),batch,
+          marker=>{state.capture='SEALED';state.coverage=marker.closeState==='SEALED_INCOMPLETE'?'INCOMPLETE':'UNVERIFIED'})
+        if(ack)state.delivery='ACKNOWLEDGED';else outstanding++
+      }catch{outstanding++;errors.push({code:'CHAT_CAPTURE_DELIVERY_PENDING'})}
     }
     const pending = outstanding+this.inbox.pendingUsage().length
-    return { confirmed: !errors.length && !pending, pending, errors }
+    return { confirmed: !errors.length && !pending, pending, errors, ...(captureStates.length?{captureStates}:{}) }
   }
   async discussionKeys(){
     try{await directory(this.inbox.dir)}catch(error){if(error.code==='ENOENT')return [];throw error}

@@ -25,10 +25,11 @@ export async function deliverMetered(store,request,batch,sealed=false){
   const {executionId,runId}=store.command
   return deliverSubject(store.directory,executionId,runId,`/internal/agent/executions/${executionId}/runs/${runId}/usage`,request,batch,sealed)
 }
-export async function deliverDiscussionMetered(inbox,key,scope,request,batch){
+export async function deliverDiscussionMetered(inbox,key,scope,request,batch,onSealed){
   const {parent,facts,subject}=await retainedDiscussionSource(inbox,key)
   if(!scope || scope.agentId!==facts.targetAgentId || scope.clientId!==facts.clientId || scope.tenantId!==facts.tenantId)bad()
   const marker=await verifySealedSubject(parent,subject), {executionId,runId,snapshotDigest}=subject
+  onSealed?.(marker)
   const path=`/internal/agent/chat/dispatches/${runId}/turns/${executionId}/contexts/${snapshotDigest}/captures/${marker.captureId}/usage`
   return deliverSubject(parent,executionId,runId,path,request,batch,true)
 }
