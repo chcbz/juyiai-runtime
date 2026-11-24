@@ -58,10 +58,20 @@ async function discussionPeer({discussion,port,session,rotate}){
     const cap=await startDiscussionCapture(inbox,key,{executionConfigSha256:'c'.repeat(64),engineVersion:'fixture',rootSourceId:'discussion',channelNamespace:'test_gateway',adapterVersion:'FIXTURE',checkActive(){}})
     const obs=observeResponse('application/json',200,4096,false);obs.push(Buffer.from('{"id":"discussion_response_1","status":"completed"}'))
     await cap.dispatch((_req,finish)=>finish(obs.finish(true)));await cap.sealStopped(()=>{});inbox.complete(inbox.findByKey(key))
-    const cfg={inbox,apiOrigin,scope,nativeFetch:client.nativeFetch.bind(client)}
+    // Rotation only: discard the real committed receipt before the delivery component sees it.
+    // Other peer cases still cut the TCP reply at the server. Do not conflate OS timing with session fencing.
+    let discarded=false
+    const cfg={inbox,apiOrigin,scope,nativeFetch:async(url,options)=>{
+      const response=await client.nativeFetch(url,options)
+      if(rotate && response.headers.get('X-Fixture-Drop-Committed')==='yes'){
+        assert.equal(response.status,200);assert.equal(discarded,false);discarded=true
+        await response.arrayBuffer();throw new TypeError('fixture: receipt lost before delivery')
+      }
+      return response
+    }}
     const lane=new ChatUsageDelivery(cfg),errors=await lane.deliver()
     if(rotate){
-      assert.deepEqual(errors,[{code:'CHAT_CAPTURE_DELIVERY_PENDING'}]);const audit=await new ChatUsageDelivery(cfg).flush()
+      assert.equal(discarded,true);assert.deepEqual(errors,[{code:'CHAT_CAPTURE_DELIVERY_PENDING'}]);const audit=await new ChatUsageDelivery(cfg).flush()
       assert.equal(audit.confirmed,false);assert.deepEqual(audit.captureStates,[{key,capture:'SEALED',delivery:'PENDING',coverage:'INCOMPLETE',reason:'ACCESS_UNCONFIRMED'}])
       const acks=await readdir(join(parent,`usage-acks-${cap.captureId}`));assert.equal(acks.length,4);assert.ok(!acks.some(f=>f.startsWith('response-')))
       const src=join(parent,`usage-capture-${cap.captureId}`),file=(await readdir(src)).find(f=>/^response-[a-f0-9]{64}-1\.json$/.test(f))
