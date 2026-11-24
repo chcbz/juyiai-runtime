@@ -521,6 +521,11 @@ test('durable discussion source keeps original turn/dispatch/context across rest
   const denied=new ChatUsageDelivery({inbox:expires,apiOrigin,scope,now:()=>clock,nativeFetch:async(ep,options)=>{
     refusals++;return {status:404,url:ep.href,headers:new Headers({'X-Request-Id':options.headers['X-Request-Id']})}
   }})
+  const {inspectDiscussionReceipts}=await import('../metered-usage-delivery.mjs')
+  const inspect=()=>inspectDiscussionReceipts(expires,key,scope)
+  const ackRoot=join(parent,'usage-acks-'+cap.captureId)
+  assert.equal(await inspect(),false);await assert.rejects(readFile(ackRoot),{code:'ENOENT'})
+  await assert.rejects(inspectDiscussionReceipts(expires,key,{...scope,tenantId:'wrong'}))
   for(const delay of [5000,10000,20000,40000,80000,160000,300000,300000]){
     const before=refusals;assert.equal((await denied.deliver()).length,1);assert.equal(refusals,before+1)
     denied.noteSource(key);assert.equal(denied.nextRecoveryAt(),clock+delay);clock+=delay-1
@@ -535,6 +540,14 @@ test('durable discussion source keeps original turn/dispatch/context across rest
   // ACKs cannot be swapped, even if both have valid bindings elsewhere in this sealed pass.
   const fs=await import('node:fs/promises'),ackDir=join(parent,'usage-acks-'+cap.captureId)
   const planAck=join(ackDir,'plan.json'),sourceAck=join(ackDir,'source-0.json'),planBytes=await fs.readFile(planAck)
+  assert.equal(await inspect(),true)
+  await fs.unlink(planAck)
+  try{
+    assert.equal(await inspect(),false);await assert.rejects(fs.stat(planAck),{code:'ENOENT'})
+    const sourceBytes=await fs.readFile(sourceAck)
+    try{await fs.writeFile(sourceAck,planBytes);await assert.rejects(inspect(),{code:'METERED_USAGE_RECEIPT_CONFLICT'})}
+    finally{await fs.writeFile(sourceAck,sourceBytes)}
+  }finally{await fs.writeFile(planAck,planBytes)}
   try{await fs.writeFile(planAck,await fs.readFile(sourceAck));assert.equal((await stopped.flush()).confirmed,false)}
   finally{await fs.writeFile(planAck,planBytes)}
   const {deliverDiscussionMetered,discussionBatch}=await import('../metered-usage-delivery.mjs')
@@ -543,7 +556,7 @@ test('durable discussion source keeps original turn/dispatch/context across rest
   finally{renameSync(aside,original)}
   // A prior network ACK is no excuse to invent a missing source seal at handover.
   const {rename}=await import('node:fs/promises');const seal=join(dir,'usage-capture-finalized.json'),saved=join(parent,'saved-seal');await rename(seal,saved)
-  try{const broken=await stopped.flush();assert.equal(broken.confirmed,false);assert.equal(broken.captureStates[0].capture,'UNVERIFIED');await assert.rejects(readFile(seal),{code:'ENOENT'})}
+  try{await assert.rejects(inspect());const broken=await stopped.flush();assert.equal(broken.confirmed,false);assert.equal(broken.captureStates[0].capture,'UNVERIFIED');await assert.rejects(readFile(seal),{code:'ENOENT'})}
   finally{await rename(saved,seal)}
   const wrong=new ChatUsageDelivery({inbox:expires,scope:{...scope,clientId:'other'},apiOrigin,nativeFetch:peer});assert.equal((await wrong.flush()).confirmed,false)
   const extra=await admit(true,'-pruned'), extraCap=await startDiscussionCapture(inbox,extra.key,opts);await extraCap.markStopped(()=>{})

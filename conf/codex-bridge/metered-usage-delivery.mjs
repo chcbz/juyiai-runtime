@@ -36,6 +36,12 @@ export async function deliverMetered(store,request,batch,sealed=false){
   return deliverSubject(store.directory,executionId,runId,`/internal/agent/executions/${executionId}/runs/${runId}/usage`,request,batch,sealed)
 }
 export async function deliverDiscussionMetered(inbox,key,scope,request,batch,onSealed){
+  return visitDiscussion(inbox,key,scope,{request,batch,onSealed})
+}
+// Per-source evidence only. The caller supplies the original scoped inbox and separately
+// fences admission/writers. Never open a session, deliver a request or manufacture an ACK.
+export function inspectDiscussionReceipts(inbox,key,scope){return visitDiscussion(inbox,key,scope,null)}
+async function visitDiscussion(inbox,key,scope,delivery){
   const {parent,facts,subject}=await retainedDiscussionSource(inbox,key)
   if(!scope || scope.agentId!==facts.targetAgentId || scope.clientId!==facts.clientId || scope.tenantId!==facts.tenantId)bad()
   // This one audit already reads and verifies each original. Keep only the ACK comparison
@@ -50,16 +56,18 @@ export async function deliverDiscussionMetered(inbox,key,scope,request,batch,onS
     // backing strings alive. All other ACK fields come from the verified subject and file key.
     expectations.set(epoch==='0'?key:`epoch-${epoch}-${key}`,Buffer.from(recordId+receiptId+evidenceSha256,'hex'))
   }), {executionId,runId,snapshotDigest}=subject
-  onSealed?.(marker)
+  delivery?.onSealed?.(marker)
   const path=`/internal/agent/chat/dispatches/${runId}/turns/${executionId}/contexts/${snapshotDigest}/captures/${marker.captureId}/usage`
-  return deliverSubject(parent,executionId,runId,path,request,batch,true,expectations)
+  return deliverSubject(parent,executionId,runId,path,delivery?.request,delivery?.batch,true,expectations,delivery===null)
 }
-async function deliverSubject(parent,executionId,runId,path,request,batch,sealed,expectations){
+async function deliverSubject(parent,executionId,runId,path,request,batch,sealed,expectations,inspect=false){
   const captureId=skillDigest(['CAPTURE_V2',executionId,runId]),src=resolve(parent,`usage-capture-${captureId}`),acks=resolve(parent,`usage-acks-${captureId}`)
   await directory(parent)
   try{await directory(src)}catch(e){if(!sealed&&e.code==='ENOENT')return false;throw e}
-  try{await mkdir(acks,{mode:0o700});await syncDir(parent)}catch(e){if(e.code!=='EEXIST')throw e}
-  await directory(acks);const saved=new Set(await readdir(acks)),epochs=await rootEpochDirectories(src)
+  if(!inspect)try{await mkdir(acks,{mode:0o700});await syncDir(parent)}catch(e){if(e.code!=='EEXIST')throw e}
+  let saved=new Set()
+  try{await directory(acks);saved=new Set(await readdir(acks))}catch(e){if(!inspect||e.code!=='ENOENT')throw e}
+  const epochs=await rootEpochDirectories(src);let pending=false
   for(const entry of epochs)entry.keys=entry.names.filter(n=>n.endsWith('.json')).map(n=>n.slice(0,-5)).sort()
   let checked=0
   for(const [kind,pattern] of entries)for(const entry of epochs)for(const key of entry.keys){
@@ -75,6 +83,7 @@ async function deliverSubject(parent,executionId,runId,path,request,batch,sealed
         sourceRevision:kind==='REQUEST'?match[2]:'1',expectedRevision:kind==='RESPONSE'?'0':null,
         observation:kind==='RESPONSE'?{sourceAttemptId:match[1]}:null});continue
     }
+    if(!has&&inspect){pending=true;continue} // Audit the other saved ACKs even if an earlier one is missing.
     if(!has&&(batch.left<=0||remainingMs(batch)<=0))return false
     const raw=await readPrivate(entry.dir,key),{receiptId,expectedRevision,evidenceSha256,...e}=raw
     if(audited&&raw.receiptId!==audited.toString('hex',32,64))bad()
@@ -100,6 +109,6 @@ async function deliverSubject(parent,executionId,runId,path,request,batch,sealed
     validateAck(ack,raw);await persist(acks,ackKey,ack)
   }
   if(expectations&&checked!==expectations.size)bad() // A file disappeared after seal verification.
-  return sealed&&epochs[0].keys.includes('plan')&&epochs[0].keys.includes('capture-final-1')&&
+  return !pending&&sealed&&epochs[0].keys.includes('plan')&&epochs[0].keys.includes('capture-final-1')&&
     epochs.every(e=>e.keys.includes(`source-${e.epoch}`)&&e.keys.includes('source-final-1'))
 }

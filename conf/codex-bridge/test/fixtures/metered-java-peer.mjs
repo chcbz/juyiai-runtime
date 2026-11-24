@@ -57,7 +57,10 @@ async function discussionPeer({discussion,port,session,rotate,cutover}){
     if(cutover==='resume'){
       // New OS process; recovery must discover the sealed original without starting a model or accepting another dispatch.
       const key=durableChatKey(m), lane=new ChatUsageDelivery({inbox,apiOrigin,scope,nativeFetch:client.nativeFetch.bind(client)})
+      const {inspectDiscussionReceipts}=await import('../../metered-usage-delivery.mjs')
+      assert.equal(await inspectDiscussionReceipts(inbox,key,scope),false)
       const audit=await lane.flush();assert.equal(audit.confirmed,true);assert.equal(audit.pending,0)
+      assert.equal(await inspectDiscussionReceipts(inbox,key,scope),true)
       assert.deepEqual(audit.captureStates,[{key,capture:'SEALED',delivery:'ACKNOWLEDGED',coverage:'INCOMPLETE'}])
       const parent=join(inbox.dir,`discussion-source-${key}`),captureId=m.contextSnapshot.facts.taskUsageCapture.captureId
       const dir=join(parent,`usage-acks-${captureId}`),files=await readdir(dir);assert.equal(files.length,7)
