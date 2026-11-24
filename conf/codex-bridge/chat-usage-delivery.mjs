@@ -1,6 +1,6 @@
 import { readdir } from 'node:fs/promises'
 import { directory } from './metered-capture-files.mjs'
-import { deliverDiscussionMetered,meteredBatch } from './metered-usage-delivery.mjs'
+import { deliverDiscussionMetered,discussionBatch } from './metered-usage-delivery.mjs'
 import { readNativeJson } from './native-json.mjs'
 
 /** Independent evidence delivery. Never admits a turn, changes a wallet, or retries a model. */
@@ -18,7 +18,7 @@ export class ChatUsageDelivery {
       errors.push(...await this.deliverLegacy())
       if (errors.length) break
     }
-    const batch=meteredBatch(),captureStates=[];let outstanding=0
+    const batch=discussionBatch(),captureStates=[];let outstanding=0
     for(const key of await this.discussionKeys()){
       const state={key,capture:'UNVERIFIED',delivery:'PENDING',coverage:'UNVERIFIED'};captureStates.push(state)
       try{
@@ -60,10 +60,10 @@ export class ChatUsageDelivery {
     const errors=await this.deliverLegacy()
     if(!this.scope)return errors
     if(!this.discovered){for(const key of await this.discussionKeys())this.noteSource(key);this.discovered=true}
-    const batch=meteredBatch();let checked=0
+    const batch=discussionBatch();let checked=0
     for(const [key,at] of this.sources){
       if(at>this.now())continue
-      if(++checked>8 || batch.left===0 || Date.now()>=batch.until)break
+      if(++checked>8 || batch.left===0 || batch.remaining()<=0)break
       this.sources.delete(key)
       try{if(await deliverDiscussionMetered(this.inbox,key,this.scope,this.captureRequest.bind(this),batch))continue}
       catch{errors.push({code:'CHAT_CAPTURE_DELIVERY_PENDING'})}

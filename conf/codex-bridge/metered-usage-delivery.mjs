@@ -21,6 +21,16 @@ function validateAck(a,e){
     !['PRICED','PENDING_USAGE','PENDING_PRICE'].includes(l.status)||(l.status==='PRICED'?typeof l.costYuan!=='string'||!/^(0|[1-9][0-9]*)(\.[0-9]+)?$/.test(l.costYuan):l.costYuan!==null))bad()
 }
 export function meteredBatch(){return {left:8,until:Date.now()+3000}}
+// Chat verifies immutable files before and between calls. Only time inside a network
+// attempt spends this allowance; receipt lookup after an ambiguous POST spends it too.
+export function discussionBatch(now=()=>performance.now()){
+  let remaining=3000
+  return {left:8, remaining:()=>remaining, async measure(send){
+    const start=now()
+    try{return await send()}finally{remaining=Math.max(0,remaining-(now()-start))}
+  }}
+}
+const remainingMs=batch=>batch.remaining?batch.remaining():batch.until-Date.now()
 export async function deliverMetered(store,request,batch,sealed=false){
   const {executionId,runId}=store.command
   return deliverSubject(store.directory,executionId,runId,`/internal/agent/executions/${executionId}/runs/${runId}/usage`,request,batch,sealed)
@@ -45,20 +55,26 @@ async function deliverSubject(parent,executionId,runId,path,request,batch,sealed
     const global=kind==='PLAN'||kind==='CAPTURE_FINAL';if((global&&entry.epoch!=='0')||(kind==='SOURCE'&&match[1]!==entry.epoch))bad()
     const ackKey=entry.epoch==='0'?key:`epoch-${entry.epoch}-${key}`
     const has=saved.has(`${ackKey}.json`);if(has&&!sealed)continue
-    if(!has&&(batch.left<=0||Date.now()>=batch.until))return false
+    if(!has&&(batch.left<=0||remainingMs(batch)<=0))return false
     const raw=await readPrivate(entry.dir,key),{receiptId,expectedRevision,evidenceSha256,...e}=raw
     const o=e.observation,identity=kind==='PLAN'||kind==='CAPTURE_FINAL'?[]:kind==='RESPONSE'?[match[1]]:kind==='REQUEST'?[o.sourceId,o.epoch,match[1]]:[o.sourceId,o.epoch]
     if((!global&&o.epoch!==entry.epoch)||e.kind!==kind||e.schemaVersion!==2||e.executionId!==executionId||e.runId!==runId||e.captureId!==captureId||e.sourceRevision!==(kind==='REQUEST'?match[2]:'1')||
       e.recordId!==skillDigest(['USAGE_RECORD_V2',captureId,kind,identity])||!sha.test(evidenceSha256)||skillDigest(e)!==evidenceSha256||
       expectedRevision!==(kind==='RESPONSE'?'0':null)||receiptId!==skillDigest(['USAGE_RECEIPT_V2',evidenceSha256,expectedRevision]))bad()
     if(has){validateAck(await readPrivate(acks,ackKey),raw);continue}
-    const call=()=>({requestId:receiptId,callId:receiptId,signal:AbortSignal.timeout(Math.max(1,batch.until-Date.now()))})
-    batch.left--;let ack
-    try{ack=await request(path,'POST',raw,[200],call())}
+    const send=(url,method,body)=>{
+      const ms=remainingMs(batch)
+      if(ms<=0||batch.left<=0)throw new Error('METERED_DELIVERY_BUDGET_EXHAUSTED')
+      batch.left--
+      const invoke=()=>request(url,method,body,[200],{requestId:receiptId,callId:receiptId,signal:AbortSignal.timeout(Math.ceil(ms))})
+      return batch.measure?batch.measure(invoke):invoke()
+    }
+    let ack
+    try{ack=await send(path,'POST',raw)}
     catch(error){
-      // Transport loss after commit is ambiguous. Read only the same persisted submission; never mint a retry identity.
-      if(error.code!=='SKILL_TRANSPORT_UNKNOWN'||batch.left<=0||Date.now()>=batch.until)throw error
-      batch.left--;ack=await request(`${path}/receipts/${receiptId}`,'GET',undefined,[200],call())
+      // Read only the same submission, never mint a new retry identity.
+      if(error.code!=='SKILL_TRANSPORT_UNKNOWN'||batch.left<=0||remainingMs(batch)<=0)throw error
+      ack=await send(`${path}/receipts/${receiptId}`,'GET',undefined)
     }
     validateAck(ack,raw);await persist(acks,ackKey,ack)
   }

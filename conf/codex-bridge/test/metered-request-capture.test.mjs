@@ -543,3 +543,12 @@ test('stopped recovery cannot finalize a different frozen dispatch snapshot for 
   assert.equal((await readdir(dir)).some(name=>name.includes('final')),false)
   await recoverStoppedMeteredRoot(store,()=>{})
 })
+
+test('discussion budget excludes local audit and charges failed and successful transport attempts',async()=>{
+  const {discussionBatch}=await import('../metered-usage-delivery.mjs')
+  let clock=0;const batch=discussionBatch(()=>clock)
+  clock+=8000;assert.equal(batch.remaining(),3000);assert.equal(batch.left,8)
+  await assert.rejects(batch.measure(async()=>{clock+=2410;throw new TypeError('lost response')}),TypeError)
+  clock+=9000;assert.equal(batch.remaining(),590)
+  await batch.measure(async()=>{clock+=590});assert.equal(batch.remaining(),0)
+})
