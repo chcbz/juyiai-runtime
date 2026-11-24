@@ -19,6 +19,11 @@ export async function recoverStoppedMeteredRoot(store, assertStopped, clock=Date
 // Source owner supplies the frozen dispatch snapshot, not a snapshot read from the PLAN being verified.
 export async function closeMeteredSubject(parent, {executionId,runId,snapshotDigest}, assertStopped, clock=Date.now) {
   await assertStopped()
+  return auditSubject(parent,{executionId,runId,snapshotDigest},assertStopped,clock)
+}
+// Read-only recovery: never fabricate a stopped writer gate or manufacture missing seals.
+export function verifySealedSubject(parent,subject){return auditSubject(parent,subject,null,null)}
+async function auditSubject(parent,{executionId,runId,snapshotDigest},assertStopped,clock){
   yes(skillId(executionId) && skillId(runId) && skillSha(snapshotDigest))
   const captureId=skillDigest(['CAPTURE_V2',executionId,runId]),binding={executionId,runId,captureId},dir=resolve(parent,`usage-capture-${captureId}`)
   const epochs=await rootEpochDirectories(dir), names=new Set(epochs[0].names)
@@ -32,7 +37,7 @@ export async function closeMeteredSubject(parent, {executionId,runId,snapshotDig
   const finals=[], allReasons=new Set(), seenResponses=new Set();let previous=null
   const final=async(dir,names,key,kind,identity,observation)=>{
     if(names.has(`${key}.json`)){const existing=check(await readPrivate(dir,key),kind,identity,1);yes(skillDigest(existing.observation)===skillDigest(observation));return existing}
-    await assertStopped();const r=first(binding,kind,identity,observation,clock);await persist(dir,key,r);return r
+    yes(assertStopped);await assertStopped();const r=first(binding,kind,identity,observation,clock);await persist(dir,key,r);return r
   }
   for(const entry of epochs){
     const {epoch,dir}=entry,names=new Set(entry.names),read=k=>readPrivate(dir,k)
@@ -80,6 +85,6 @@ export async function closeMeteredSubject(parent, {executionId,runId,snapshotDig
   const captureFinal=await final(dir,names,'capture-final-1','CAPTURE_FINAL',[],{planEvidenceSha256:plan.evidenceSha256,sourceCount:String(finals.length),sourcesSha256:skillDigest([...finals].sort(([a],[b])=>a<b?-1:1)),closeState,reasonCodes})
   const marker={...binding,...(finals.length===1?{sourceFinal:finals[0]}:{sourceFinals:finals}),captureFinal:tuple(captureFinal),closeState}
   if(names.has('usage-capture-finalized.json'))yes(skillDigest(await readPrivate(dir,'usage-capture-finalized'))===skillDigest(marker))
-  else {await assertStopped();await persist(dir,'usage-capture-finalized',marker)}
+  else {yes(assertStopped);await assertStopped();await persist(dir,'usage-capture-finalized',marker)}
   return marker // local capture only; does not assert billing completeness, durability at the API or delivery ACK.
 }

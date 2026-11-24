@@ -504,6 +504,24 @@ test('durable discussion source keeps original turn/dispatch/context across rest
   const binding=JSON.parse(await readFile(join(parent,'discussion-binding.json')))
   assert.deepEqual(Object.keys(binding).sort(),['schemaVersion','key','fingerprint','tenantId','ownerJiacn','clientId','requestId','turnId','dispatchId','targetAgentId','contextHash','digest'].sort())
   // Dedupe expiration is strictly older than the GC cutoff; pin only the GC clock for this synchronous pass.
+  const {ChatUsageDelivery}=await import('../chat-usage-delivery.mjs'),acks=new Map();let gets=0,posts=0,drop=true
+  const scope={agentId:m.targetAgentId,clientId:m.clientId,tenantId:m.tenantId}
+  const apiOrigin='https://fixture.invalid',base=`/internal/agent/chat/dispatches/${m.dispatchId}/turns/${m.turnId}/contexts/${m.contextHash.slice(7)}/captures/${cap.captureId}/usage`
+  const peer=async(ep,options)=>{
+    const id=options.headers['X-Request-Id'];assert.equal(ep.origin,apiOrigin)
+    if(options.method==='POST'){
+      posts++;assert.equal(ep.pathname,base);const e=JSON.parse(options.body);assert.equal(e.receiptId,id);assert.equal(options.headers['Idempotency-Key'],id);assert.equal(acks.has(id),false)
+      acks.set(id,{...Object.fromEntries(['schemaVersion','executionId','runId','captureId','receiptId','recordId','sourceRevision','evidenceSha256'].map(k=>[k,e[k]])),acceptedAt:1,acceptance:'DURABLE',
+        ledger:e.kind==='RESPONSE'?{attemptId:skillDigest(['NATIVE_RESPONSE_USAGE',e.observation.sourceAttemptId]),revision:'1',status:'PENDING_USAGE',costYuan:null}:null})
+      if(drop){drop=false;throw new TypeError('connection lost after fixture stored receipt')}
+    }else{gets++;assert.equal(ep.pathname,base+'/receipts/'+id);assert.equal(options.body,undefined)}
+    return {status:200,url:ep.href,headers:new Headers({'X-Request-Id':id}),text:async()=>JSON.stringify({protocolVersion:1,requestId:id,code:'E0',msg:'',data:acks.get(id)})}
+  }
+  const delivery=new ChatUsageDelivery({inbox:expires,apiOrigin,scope,nativeFetch:peer});assert.deepEqual(await delivery.deliver(),[])
+  assert.equal(delivery.nextRecoveryAt(),Infinity);assert.equal(posts,7);assert.equal(gets,1);assert.equal(acks.size,7)
+  const stopped=new ChatUsageDelivery({inbox:expires,scope,apiOrigin,nativeFetch:()=>assert.fail('local receipts must replay without network')})
+  assert.equal((await stopped.flush()).confirmed,true)
+  const wrong=new ChatUsageDelivery({inbox:expires,scope:{...scope,clientId:'other'},apiOrigin,nativeFetch:peer});assert.equal((await wrong.flush()).confirmed,false)
   const extra=await admit(true,'-pruned'), extraCap=await startDiscussionCapture(inbox,extra.key,opts);await extraCap.markStopped(()=>{})
   expires.complete(expires.findByKey(extra.key));assert.equal(expires.findByKey(extra.key).state,'ledger')
   const now=Date.now;try{Date.now=()=>now()+1000;expires.initialize()}finally{Date.now=now}

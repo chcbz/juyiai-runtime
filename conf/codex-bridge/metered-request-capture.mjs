@@ -140,6 +140,7 @@ export async function startDiscussionCapture(inbox, key, options) {
     const f = await open(resolve(parent,'discussion-binding.json'),'wx',0o600)
     try { await f.writeFile(JSON.stringify({...facts,digest:skillDigest(facts)})); await f.sync() } finally { await f.close() }
     await syncDir(parent)
+    inbox.noteDiscussionSource?.(key)
   }
   return openSubject(parent, subject, {...options, executionId:subject.executionId, runId:subject.runId,
     dispatchGroup:null, coveragePolicyVersion:'CHAT_SOURCE_UNVERIFIED_V1'}, null, bind)
@@ -150,6 +151,11 @@ const discussionBinding = (key,m,fingerprint) => ({schemaVersion:1,key,fingerpri
   ...Object.fromEntries(['tenantId','ownerJiacn','clientId','requestId','turnId','dispatchId','targetAgentId','contextHash'].map(k=>[k,m[k]]))})
 export async function recoverStoppedDiscussionCapture(inbox, key, assertStopped) {
   await assertStopped()
+  const {parent,subject}=await retainedDiscussionSource(inbox,key)
+  return closeMeteredSubject(parent,subject,assertStopped)
+}
+// Read-only lookup for delivery and closure; has no engine or model dispatch authority.
+export async function retainedDiscussionSource(inbox,key){
   const original = inbox.discussionCaptureSubject(key, true), {parent} = original
   const {digest,...facts} = await readPrivate(parent,'discussion-binding')
   const expected = discussionBinding(key,original.message || original.marker?.message || facts,
@@ -158,5 +164,6 @@ export async function recoverStoppedDiscussionCapture(inbox, key, assertStopped)
       !/^sha256:[0-9a-f]{64}$/.test(facts.fingerprint) || !/^sha256:[0-9a-f]{64}$/.test(facts.contextHash) ||
       digest!==skillDigest(facts) || digest!==skillDigest(expected) ||
       discussionKey(facts)!==key) bad('METERED_CAPTURE_SOURCE_CONFLICT')
-  return closeMeteredSubject(parent,{executionId:facts.turnId,runId:facts.dispatchId,snapshotDigest:facts.contextHash.slice(7)},assertStopped)
+  if(!skillId(facts.turnId)||!skillId(facts.dispatchId))bad('METERED_CAPTURE_SOURCE_CONFLICT')
+  return {parent,facts,subject:{executionId:facts.turnId,runId:facts.dispatchId,snapshotDigest:facts.contextHash.slice(7)}}
 }

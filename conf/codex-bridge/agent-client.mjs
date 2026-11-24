@@ -5625,7 +5625,9 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
   const chatInbox = new PersistentChatInbox({ rootDir: profileConfig.commandInboxDir, profile })
   const chatAckOutbox = new ChatAckOutbox({ rootDir: profileConfig.commandInboxDir, profile })
   const chatUsageDelivery = profile.runtimeIdentity ? new ChatUsageDelivery({ inbox: chatInbox,
-    apiOrigin: profile.runtimeApiOrigin, nativeFetch }) : null
+    apiOrigin: profile.runtimeApiOrigin, nativeFetch, scope:{agentId:profile.runtimeIdentity.canonicalAgentId,
+      clientId:profile.runtimeIdentity.clientId,tenantId:profile.runtimeIdentity.tenantId} }) : null
+  if(chatUsageDelivery)chatInbox.noteDiscussionSource=key=>{chatUsageDelivery.noteSource(key);getProfileState(profile)?.conversationNativeWakeup?.arm(Date.now())}
   const threadBindingStore = new ThreadBindingStore({ rootDir: profileConfig.commandInboxDir, profile }).initialize()
   const chatWorkdir = prepareChatWorkdir({
     rootDir: resolve(profileConfig.commandInboxDir, 'chat-workdirs'), profile,

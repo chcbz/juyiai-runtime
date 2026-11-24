@@ -26,7 +26,7 @@ export async function flushStoppedEvidence({ agent, ownerJiacn, apiOrigin, hostI
     await client.session(); // Existing authorization only; never reenroll or register.
     const inbox = new PersistentChatInbox({ rootDir: resolve(agent.stateRoot, 'inbox'), profile: agent.profile });
     // Do not initialize the live inbox: that would reconcile business commands and GC history.
-    const chat = await new ChatUsageDelivery({ inbox, apiOrigin,
+    const chat = await new ChatUsageDelivery({ inbox, apiOrigin, scope:{agentId:agent.manifest.canonicalAgentId,tenantId:agent.manifest.tenantId,clientId:agent.manifest.clientId},
       nativeFetch: (url, options) => client.nativeFetch(url, options) }).flush();
     const { workspaceFileRootDir, workspaceFileApiOrigin } = agent.profile;
     const native = workspaceFileRootDir ? await new SkillUsageDelivery({
