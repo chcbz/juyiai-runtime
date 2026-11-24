@@ -60,13 +60,14 @@ async function deliverSubject(parent,executionId,runId,path,request,batch,sealed
   try{await mkdir(acks,{mode:0o700});await syncDir(parent)}catch(e){if(e.code!=='EEXIST')throw e}
   await directory(acks);const saved=new Set(await readdir(acks)),epochs=await rootEpochDirectories(src)
   for(const entry of epochs)entry.keys=entry.names.filter(n=>n.endsWith('.json')).map(n=>n.slice(0,-5)).sort()
+  let checked=0
   for(const [kind,pattern] of entries)for(const entry of epochs)for(const key of entry.keys){
     const match=pattern.exec(key);if(!match)continue
     const global=kind==='PLAN'||kind==='CAPTURE_FINAL';if((global&&entry.epoch!=='0')||(kind==='SOURCE'&&match[1]!==entry.epoch))bad()
     const ackKey=entry.epoch==='0'?key:`epoch-${entry.epoch}-${key}`
     const has=saved.has(`${ackKey}.json`);if(has&&!sealed)continue
     const audited=expectations?.get(ackKey)
-    if(expectations&&!audited)bad()
+    if(expectations){if(!audited)bad();checked++}
     if(has&&audited){validateAck(await readPrivate(acks,ackKey),audited);continue}
     if(!has&&(batch.left<=0||remainingMs(batch)<=0))return false
     const raw=await readPrivate(entry.dir,key),{receiptId,expectedRevision,evidenceSha256,...e}=raw
@@ -92,6 +93,7 @@ async function deliverSubject(parent,executionId,runId,path,request,batch,sealed
     }
     validateAck(ack,raw);await persist(acks,ackKey,ack)
   }
+  if(expectations&&checked!==expectations.size)bad() // A file disappeared after seal verification.
   return sealed&&epochs[0].keys.includes('plan')&&epochs[0].keys.includes('capture-final-1')&&
     epochs.every(e=>e.keys.includes(`source-${e.epoch}`)&&e.keys.includes('source-final-1'))
 }

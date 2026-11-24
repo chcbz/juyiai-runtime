@@ -537,6 +537,10 @@ test('durable discussion source keeps original turn/dispatch/context across rest
   const planAck=join(ackDir,'plan.json'),sourceAck=join(ackDir,'source-0.json'),planBytes=await fs.readFile(planAck)
   try{await fs.writeFile(planAck,await fs.readFile(sourceAck));assert.equal((await stopped.flush()).confirmed,false)}
   finally{await fs.writeFile(planAck,planBytes)}
+  const {deliverDiscussionMetered,discussionBatch}=await import('../metered-usage-delivery.mjs')
+  const {renameSync}=await import('node:fs'),original=join(dir,'request-1-2.json'),aside=join(parent,'verify-gap')
+  try{await assert.rejects(deliverDiscussionMetered(expires,key,scope,()=>assert.fail('no fresh request'),discussionBatch(),()=>renameSync(original,aside)),{code:'METERED_USAGE_RECEIPT_CONFLICT'})}
+  finally{renameSync(aside,original)}
   // A prior network ACK is no excuse to invent a missing source seal at handover.
   const {rename}=await import('node:fs/promises');const seal=join(dir,'usage-capture-finalized.json'),saved=join(parent,'saved-seal');await rename(seal,saved)
   try{const broken=await stopped.flush();assert.equal(broken.confirmed,false);assert.equal(broken.captureStates[0].capture,'UNVERIFIED');await assert.rejects(readFile(seal),{code:'ENOENT'})}
