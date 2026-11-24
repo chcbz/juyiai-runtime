@@ -24,7 +24,7 @@ function discussionLane(agent,transport={}) {
   return new ChatUsageDelivery({inbox,scope:{agentId,tenantId,clientId},...transport});
 }
 // Operator snapshot may run BEFORE shutdown. No live session, cleanup or business reconciliation.
-export function inspectLocalDiscussionEvidence(agent) { return discussionLane(agent).inspectDiscussionSources(); }
+export function inspectLocalDiscussionEvidence(agent,expected) { return discussionLane(agent).inspectDiscussionSources(expected); }
 
 export async function flushStoppedEvidence({ agent, ownerJiacn, apiOrigin, hostId, instanceId,
   clientFactory = options => new RuntimeV1Client(options) }) {

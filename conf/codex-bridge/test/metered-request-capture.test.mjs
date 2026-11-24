@@ -460,7 +460,7 @@ test('durable discussion source keeps original turn/dispatch/context across rest
   const config=await f.config(),agent=config.agents[0],rootDir=join(agent.stateRoot,'inbox')
   const {spawnSync}=await import('node:child_process'),{fileURLToPath}=await import('node:url')
   const cli=fileURLToPath(new URL('../../cyf-agent-runtime-v1/agent-runtime.mjs',import.meta.url))
-  const report=(subject=agent.subjectKey)=>spawnSync(process.execPath,[cli,'inspect-discussion-receipts','--config',f.path,'--subject',subject],
+  const report=(subject=agent.subjectKey,extra=[])=>spawnSync(process.execPath,[cli,'inspect-discussion-receipts','--config',f.path,'--subject',subject,...extra],
     {encoding:'utf8',env:{...process.env,CYF_RUNTIME_PROVIDER_ENVIRONMENTS_FILE:join(rootDir,'never-read')}})
   const counts=(expected,status)=>{const r=report();assert.equal(r.status,status,r.stderr);assert.deepEqual(JSON.parse(r.stdout),expected)}
   const absent=report(config.agents[1].subjectKey);assert.notEqual(absent.status,0);assert.equal(absent.stdout,'');assert.deepEqual(await readdir(config.agents[1].stateRoot),[])
@@ -551,6 +551,15 @@ test('durable discussion source keeps original turn/dispatch/context across rest
   const fs=await import('node:fs/promises'),ackDir=join(parent,'usage-acks-'+cap.captureId)
   const planAck=join(ackDir,'plan.json'),sourceAck=join(ackDir,'source-0.json'),planBytes=await fs.readFile(planAck)
   counts({sources:1,acknowledged:1,pending:0,unverified:0},0)
+  const roster=join(agent.stateRoot,'expected-sources.json'),actual=cap.captureId,absentId='0'.repeat(64)
+  for(const [ids,status,missing,unexpected] of [[[actual],0,0,0],[[actual,absentId],2,1,0],[[absentId],2,1,1]]){
+    await writeFile(roster,JSON.stringify({subjectKey:agent.subjectKey,captureIds:ids}),{mode:0o600})
+    const r=report(agent.subjectKey,['--expected-sources',roster]);assert.equal(r.status,status,r.stderr)
+    assert.deepEqual(JSON.parse(r.stdout),{sources:1,acknowledged:1,pending:0,unverified:0,expected:ids.length,missing,unexpected})
+  }
+  for(const manifest of [{subjectKey:agent.subjectKey,captureIds:[actual,actual]},{subjectKey:'other',captureIds:[actual]}]){
+    await writeFile(roster,JSON.stringify(manifest));const r=report(agent.subjectKey,['--expected-sources',roster]);assert.notEqual(r.status,0);assert.equal(r.stdout,'')
+  }
   assert.equal(await inspect(),true)
   await fs.unlink(planAck)
   try{

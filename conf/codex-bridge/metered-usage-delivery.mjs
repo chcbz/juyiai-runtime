@@ -40,8 +40,8 @@ export async function deliverDiscussionMetered(inbox,key,scope,request,batch,onS
 }
 // Per-source evidence only. The caller supplies the original scoped inbox and separately
 // fences admission/writers. Never open a session, deliver a request or manufacture an ACK.
-export function inspectDiscussionReceipts(inbox,key,scope){return visitDiscussion(inbox,key,scope,null)}
-async function visitDiscussion(inbox,key,scope,delivery){
+export function inspectDiscussionReceipts(inbox,key,scope,onSealedId){return visitDiscussion(inbox,key,scope,null,onSealedId)}
+async function visitDiscussion(inbox,key,scope,delivery,onSealedId){
   const {parent,facts,subject}=await retainedDiscussionSource(inbox,key)
   if(!scope || scope.agentId!==facts.targetAgentId || scope.clientId!==facts.clientId || scope.tenantId!==facts.tenantId)bad()
   // This one audit already reads and verifies each original. Keep only the ACK comparison
@@ -56,6 +56,7 @@ async function visitDiscussion(inbox,key,scope,delivery){
     // backing strings alive. All other ACK fields come from the verified subject and file key.
     expectations.set(epoch==='0'?key:`epoch-${epoch}-${key}`,Buffer.from(recordId+receiptId+evidenceSha256,'hex'))
   }), {executionId,runId,snapshotDigest}=subject
+  onSealedId?.(marker.captureId)
   delivery?.onSealed?.(marker)
   const path=`/internal/agent/chat/dispatches/${runId}/turns/${executionId}/contexts/${snapshotDigest}/captures/${marker.captureId}/usage`
   return deliverSubject(parent,executionId,runId,path,delivery?.request,delivery?.batch,true,expectations,delivery===null)

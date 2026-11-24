@@ -566,3 +566,5 @@ self-hosted assets. Reuse existing installation/session identities on upgrade.
 ### 计划切换前核对本地议事计量回执
 
 用现有运行用户执行 `node runtime/agent-runtime.mjs inspect-discussion-receipts --config <现用host.json> --subject <完整subjectKey>`。仅逐份核对该配置主体已发现的议事计量原件与持久回执，输出来源总数、已确认、待确认和无法核实数；不读提供商配置、不联网、不触发执行、不补写回执。空目录或任一待确认/无法核实均返回2；主体无效、目录缺失或不可安全枚举时失败，不作空目录处理。退出0只表示此次扫描的非空来源均已确认，不表示计量覆盖完整或预算有效。切换前须另证所选配置与全部受影响主体/节点对应、受理暂停且无新增写入，不得把命令当作停机许可。
+
+同一只读命令可加 `--expected-sources <私有JSON文件>`，格式为 `{"subjectKey":"完整配置主体键","captureIds":["64位小写十六进制来源ID"]}`。清单须由独立控制面固定，覆盖该主体目录内本轮核对的全部来源，不从设备反推；缺少独立清单时不作完整性结论。命令在同一次逐修订扫描中比对已封口来源身份，不公开ID；`missing`、`unexpected`、待确认或不可核实任一非零都不能通过。重复ID、空清单、主体不符或不安全的清单文件直接失败。即使通过也不代替原派发归属、停止新增与全集证明。

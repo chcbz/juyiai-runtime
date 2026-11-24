@@ -31,13 +31,17 @@ export class ChatUsageDelivery {
     return { confirmed: !errors.length && !pending, pending, errors, ...(captureStates.length?{captureStates}:{}) }
   }
   // Snapshot of visible capture sources only. Not proof of closed admission or writer quiescence.
-  async inspectDiscussionSources(){
+  async inspectDiscussionSources(expected){
     const keys=await this.discussionKeys(true)
     const result={sources:keys.length,acknowledged:0,pending:0,unverified:0}
+    const remaining=expected && new Set(expected)
+    if(remaining)Object.assign(result,{expected:remaining.size,unexpected:0})
     for(const key of keys){
-      try{if(await inspectDiscussionReceipts(this.inbox,key,this.scope))result.acknowledged++;else result.pending++}
+      const observe=remaining && (id=>{if(!remaining.delete(id))result.unexpected++})
+      try{if(await inspectDiscussionReceipts(this.inbox,key,this.scope,observe))result.acknowledged++;else result.pending++}
       catch{result.unverified++}
     }
+    if(remaining)result.missing=remaining.size
     return result
   }
   async discussionKeys(requireExisting=false){
