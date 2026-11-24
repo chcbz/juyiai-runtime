@@ -517,6 +517,17 @@ test('durable discussion source keeps original turn/dispatch/context across rest
     }else{gets++;assert.equal(ep.pathname,base+'/receipts/'+id);assert.equal(options.body,undefined)}
     return {status:200,url:ep.href,headers:new Headers({'X-Request-Id':id}),text:async()=>JSON.stringify({protocolVersion:1,requestId:id,code:'E0',msg:'',data:acks.get(id)})}
   }
+  let clock=1000,refusals=0
+  const denied=new ChatUsageDelivery({inbox:expires,apiOrigin,scope,now:()=>clock,nativeFetch:async(ep,options)=>{
+    refusals++;return {status:404,url:ep.href,headers:new Headers({'X-Request-Id':options.headers['X-Request-Id']})}
+  }})
+  for(const delay of [5000,10000,20000,40000,80000,160000,300000,300000]){
+    const before=refusals;assert.equal((await denied.deliver()).length,1);assert.equal(refusals,before+1)
+    denied.noteSource(key);assert.equal(denied.nextRecoveryAt(),clock+delay);clock+=delay-1
+    assert.deepEqual(await denied.deliver(),[]);assert.equal(refusals,before+1);clock++
+  }
+  // Local backoff is a scheduling hint only. An explicit audit still tests the exact original scope.
+  assert.equal((await denied.flush()).captureStates[0].reason,'ACCESS_UNCONFIRMED')
   const delivery=new ChatUsageDelivery({inbox:expires,apiOrigin,scope,nativeFetch:peer});assert.deepEqual(await delivery.deliver(),[])
   assert.equal(delivery.nextRecoveryAt(),Infinity);assert.equal(posts,7);assert.equal(gets,1);assert.equal(acks.size,7)
   const stopped=new ChatUsageDelivery({inbox:expires,scope,apiOrigin,nativeFetch:()=>assert.fail('local receipts must replay without network')})

@@ -62,7 +62,7 @@ async function discussionPeer({discussion,port,session,rotate}){
     const lane=new ChatUsageDelivery(cfg),errors=await lane.deliver()
     if(rotate){
       assert.deepEqual(errors,[{code:'CHAT_CAPTURE_DELIVERY_PENDING'}]);const audit=await new ChatUsageDelivery(cfg).flush()
-      assert.equal(audit.confirmed,false);assert.deepEqual(audit.captureStates,[{key,capture:'SEALED',delivery:'PENDING',coverage:'INCOMPLETE'}])
+      assert.equal(audit.confirmed,false);assert.deepEqual(audit.captureStates,[{key,capture:'SEALED',delivery:'PENDING',coverage:'INCOMPLETE',reason:'ACCESS_UNCONFIRMED'}])
       const acks=await readdir(join(parent,`usage-acks-${cap.captureId}`));assert.equal(acks.length,4);assert.ok(!acks.some(f=>f.startsWith('response-')))
       const src=join(parent,`usage-capture-${cap.captureId}`),file=(await readdir(src)).find(f=>/^response-[a-f0-9]{64}-1\.json$/.test(f))
       const original=JSON.parse(await readFile(join(src,file)));assert.equal(original.executionId,m.turnId);assert.equal(original.runId,m.dispatchId)

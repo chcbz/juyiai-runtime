@@ -25,7 +25,7 @@ export class ChatUsageDelivery {
         const ack=await deliverDiscussionMetered(this.inbox,key,this.scope,this.captureRequest.bind(this),batch,
           marker=>{state.capture='SEALED';state.coverage=marker.closeState==='SEALED_INCOMPLETE'?'INCOMPLETE':'UNVERIFIED'})
         if(ack)state.delivery='ACKNOWLEDGED';else outstanding++
-      }catch{outstanding++;errors.push({code:'CHAT_CAPTURE_DELIVERY_PENDING'})}
+      }catch(error){if(error?.accessUnconfirmed)state.reason='ACCESS_UNCONFIRMED';outstanding++;errors.push({code:'CHAT_CAPTURE_DELIVERY_PENDING'})}
     }
     const pending = outstanding+this.inbox.pendingUsage().length
     return { confirmed: !errors.length && !pending, pending, errors, ...(captureStates.length?{captureStates}:{}) }
@@ -47,27 +47,33 @@ export class ChatUsageDelivery {
       ...(body===undefined?{}:{body:JSON.stringify(body)})})}
     catch(e){if(e instanceof TypeError && !e.code)throw Object.assign(Error('CHAT_TRANSPORT_UNKNOWN'),{code:'SKILL_TRANSPORT_UNKNOWN'});throw e}
     if(!statuses.includes(response?.status)||response.redirected||response.url!==ep.href||response.headers.get('X-Request-Id')!==call.requestId){
-      await response?.body?.cancel?.().catch(()=>{});throw new Error('CHAT_CAPTURE_HTTP_UNCONFIRMED')}
+      await response?.body?.cancel?.().catch(()=>{})
+      const denied=[401,404].includes(response?.status)&&!response.redirected&&response.url===ep.href&&response.headers.get('X-Request-Id')===call.requestId
+      throw Object.assign(new Error('CHAT_CAPTURE_HTTP_UNCONFIRMED'),{accessUnconfirmed:denied})}
     return readNativeJson(response)
   }
   nextRecoveryAt() {
-    let due=Infinity;for(const at of this.sources.values())due=Math.min(due,at)
+    let due=Infinity;for(const {at} of this.sources.values())due=Math.min(due,at)
     return this.inbox.pendingUsage().reduce((next, item) => Math.min(next,
       this.retries.get(item.key)?.at ?? this.now()), due)
   }
-  noteSource(key){this.sources.set(key,this.now())}
+  noteSource(key){if(!this.sources.has(key))this.sources.set(key,{at:this.now(),denials:0})}
   async deliver(){
     const errors=await this.deliverLegacy()
     if(!this.scope)return errors
     if(!this.discovered){for(const key of await this.discussionKeys())this.noteSource(key);this.discovered=true}
     const batch=discussionBatch();let checked=0
-    for(const [key,at] of this.sources){
+    for(const [key,{at,denials}] of this.sources){
       if(at>this.now())continue
       if(++checked>8 || batch.left===0 || batch.remaining()<=0)break
       this.sources.delete(key)
+      let nextDenials=0
       try{if(await deliverDiscussionMetered(this.inbox,key,this.scope,this.captureRequest.bind(this),batch))continue}
-      catch{errors.push({code:'CHAT_CAPTURE_DELIVERY_PENDING'})}
-      this.sources.set(key,this.now()+5000)
+      catch(error){if(error?.accessUnconfirmed)nextDenials=Math.min(7,denials+1);errors.push({code:'CHAT_CAPTURE_DELIVERY_PENDING'})}
+      // A correlated refusal is not proof of a rotated session. Back off only this source;
+      // keep sealed files and allow an explicit handover audit independently of this timer.
+      const delay=Math.min(300000,5000*2**Math.max(0,nextDenials-1))
+      this.sources.set(key,{at:this.now()+delay,denials:nextDenials})
     }
     return errors
   }
