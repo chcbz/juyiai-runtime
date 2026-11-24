@@ -30,7 +30,6 @@ async function openRoot(store, { executionId, runId, executionConfigSha256, disp
   const sourceFacts=(epoch,previous)=>({sourceId,epoch,sourceKind:'METERED_HTTP_RESPONSES_V1',adapterVersion,channelNamespace,
     parentSourceRecordId:null,previousEpochSourceRecordId:previous})
   let epoch='0',dir=root,previous=null
-  const priorClaims=new Set()
   if(mode===null){
     // EEXIST never grants a second fresh writer, even if the original PLAN write failed.
     await mkdir(root,{mode:0o700});await syncDir(store.directory)
@@ -49,7 +48,6 @@ async function openRoot(store, { executionId, runId, executionConfigSha256, disp
         (entry.epoch==='0'||stop.epoch===entry.epoch)&&stop.writeFailed===false&&typeof stop.reservedHigh==='string'&&/^(0|[1-9][0-9]*)$/.test(stop.reservedHigh))
       // A missing start-attempt is never sufficient evidence to repeat prior provider activity.
       if(mode==='BEFORE_FIRST_TURN')requireResume(stop.reservedHigh==='0'&&!entry.names.some(n=>/^(?:reserved|request|response|duplicate|tmp)-/.test(n)))
-      for(const name of entry.names){const match=/^response-owner-([0-9a-f]{64})$/.exec(name);if(match)priorClaims.add(match[1])}
     }
     epoch=String(BigInt(epochs.at(-1).epoch)+1n);dir=resolve(root,`epoch-${epoch}`)
     checkActive();await mkdir(dir,{mode:0o700});await syncDir(root)
@@ -102,10 +100,10 @@ async function openRoot(store, { executionId, runId, executionConfigSha256, disp
               checkId(providerResponseId);sourceAttemptId=skillDigest(['NATIVE_RESPONSE_USAGE',channelNamespace,providerResponseId])
               const observation={sourceId,epoch,sourceAttemptId,providerResponseId,reportedUsage,measuredQuantities,actualBillingIdentity,reasonCodes}
               // Immutable identity: a second concurrent request cannot replace the first response revision.
-              let duplicate=priorClaims.has(sourceAttemptId)
-              if(!duplicate)try { await mkdir(resolve(dir,`response-owner-${sourceAttemptId}`),{mode:0o700}) }
+              let duplicate=false
+              try { await mkdir(resolve(dir,`response-owner-${sourceAttemptId}`),{mode:0o700}) }
               catch(error){if(error.code!=='EEXIST')throw error;duplicate=true}
-              if(duplicate){reasons=[...reasonCodes,'DUPLICATE_RESPONSE_ID'];await persist(dir,`duplicate-${sequence}`,observation);if(priorClaims.has(sourceAttemptId))sourceAttemptId=null}
+              if(duplicate){reasons=[...reasonCodes,'DUPLICATE_RESPONSE_ID'];await persist(dir,`duplicate-${sequence}`,observation)}
               else await persist(dir,`response-${sourceAttemptId}-1`,first(binding,'RESPONSE',[sourceAttemptId],observation,now))
             }
             const observation={...record.observation,resolution:sourceAttemptId?'RESPONSE':'UNRESOLVED',sourceAttemptId,reasonCodes:reasons}

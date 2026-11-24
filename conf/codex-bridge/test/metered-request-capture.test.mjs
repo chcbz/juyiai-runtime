@@ -11,7 +11,7 @@ const openRoot = async (t, options = {}, deferred = false) => {
   const directory = await mkdtemp(join(tmpdir(), 'metered-'))
   t.after(() => rm(directory, {recursive:true, force:true}))
   const store = new SkillExecutionStore({rootDirectory:directory,scope:{tenant:'t',owner:'o'},
-    command:{executionProtocolVersion:6,executionId:'exec1',runId:'run1',toolPolicyRef:'NATIVE_LOCAL_FILES_V1',usageMode:'RESPONSE_V2',captureProtocol:'METERED_CAPTURE_V2',snapshotDigest:'a'.repeat(64)}})
+    command:{executionProtocolVersion:6,executionId:'exec1',runId:'run1',messageId:'fixture-message',toolPolicyRef:'NATIVE_LOCAL_FILES_V1',usageMode:'RESPONSE_V2',captureProtocol:'METERED_CAPTURE_V2',snapshotDigest:'a'.repeat(64)}})
   const args = { executionId:'exec1',runId:'run1',executionConfigSha256:'c'.repeat(64),engineVersion:'engine1',
     coveragePolicyVersion:'TEST_MODEL_ONLY',rootSourceId:'source_model',channelNamespace:'test_gateway',adapterVersion:'FIXTURE',checkActive:()=>{}, ...options }
   const capture = deferred ? null : await startMeteredRoot(store, args)
@@ -164,14 +164,15 @@ for (const admitted of [false,true,'artifact']) test(admitted==='artifact'?'real
     const openAdapter=(restore=false)=>runtime.openNativeExecutionAdapter(join(store.directory,'inputs'),binding.requestKey,binding,{requireExistingState:restore,scratchDirectory:join(store.directory,'scratch'),draftsDirectory:join(store.directory,'drafts'),nativeExecution:{executionId:'exec1',tools:[],checkActive(){},callTool(){}},...(admitted?{meteredAdmission:{store,model:'gpt-5.4',effort:'medium',instructionsSha256:skillDigest('fixture launch policy')}}:{meteredCapture:capture})})
     const adapter=await openAdapter();assert.ok(inspected);assert.ok(adapter.readback.credentialIsolation.bootstrapCredentialRemoved);assert.ok(adapter.nativeExecutionIsolation.network.nftDefaultDropReadback)
     const policy={cwd:'/execution',model:'gpt-5.4',effort:'medium',developerInstructions:'fixture launch policy'},thread=await adapter.startOrResumeThread(null,policy)
-    await adapter.runTurn({threadId:thread.threadId,clientUserMessageId:'fixture-message',policy,input:[{type:'text',text:'fixture'}]})
+    const completed=await adapter.runTurn({threadId:thread.threadId,clientUserMessageId:'fixture-message',policy,input:[{type:'text',text:'fixture'}]})
     assert.deepEqual(calls,[{path:'/custom/responses',auth:'Bearer upstream-fixture-only',pending:'PENDING'}])
     if(admitted){
       await runtime.suspendAdapter(binding.requestKey)
       const measured=(await read('plan')).observation;assert.equal(measured.engineVersion,'codex-cli-0.167.0');assert.equal(measured.dispatchGroup.version,'NATIVE_DISPATCH_GROUP_V1');assert.match(measured.dispatchGroup.toolConfigSha256,/^[a-f0-9]{64}$/);assert.equal(measured.coveragePolicyVersion,'NATIVE_EXECUTION_UNVERIFIED_V1')
       assert.equal((await read('producer-stopped')).reservedHigh,'1')
       store.write('native-thread',{threadId:thread.threadId});store.write('native-start-attempt',{threadId:thread.threadId,clientUserMessageId:store.command.messageId})
-      const again=await openAdapter(true);const state=await again.request('thread/read',{threadId:thread.threadId,includeTurns:true});assert.equal(state.thread.id,thread.threadId)
+      const again=await openAdapter(true);const state=await again.reconcileTurn({threadId:thread.threadId,turnId:completed.turnId,clientUserMessageId:store.command.messageId})
+      assert.equal(state.status,'TERMINAL');assert.equal(state.turnId,completed.turnId);assert.equal(state.terminalStatus,'completed')
       const active=runtime.activeAdapters.get(binding.requestKey);await assert.rejects(active.slot.meteredCapture.dispatch(()=>assert.fail('reconciliation sent a request')),{code:'METERED_CAPTURE_ADMISSION_CLOSED'})
       await runtime.suspendAdapter(binding.requestKey);assert.equal(calls.length,1)
       assert.equal((await read('epoch-1/source-1')).observation.previousEpochSourceRecordId,(await read('source-0')).recordId);assert.equal((await read('epoch-1/producer-stopped')).reservedHigh,'0')

@@ -1,6 +1,6 @@
 import { isCurrentAppServerMeasurement } from './app-server-adapter.mjs'
 import { startMeteredRoot, resumeStoppedMeteredRoot } from './metered-request-capture.mjs'
-import { skillDigest } from './skill-executor.mjs'
+import { skillDigest, skillId } from './skill-executor.mjs'
 import { readModelAuthFile } from './model-auth.mjs'
 import { BROWSER_PROBE } from './native-browser-toolchain.mjs'
 import { DOCUMENT_MIMES, DOCUMENT_PROBE, PDF_PROBE } from './native-document-toolchain.mjs'
@@ -100,7 +100,8 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
         let mode=null
         if(requireExistingState){
           const thread=store.read('native-thread'),attempt=store.read('native-start-attempt')
-          if(typeof thread?.threadId!=='string'||!thread.threadId||
+          if(!skillId(thread?.threadId)||!skillId(store.command.messageId)||
+              (!attempt&&(store.read('native-turn')||store.read('native-terminal')))||
               (attempt&&(attempt.threadId!==thread.threadId||attempt.clientUserMessageId!==store.command.messageId)))fail('SKILL_RESULT_UNKNOWN')
           mode=attempt?'RECONCILE_ONLY':'BEFORE_FIRST_TURN'
         }
