@@ -343,3 +343,21 @@ test('local tool history requires this execution’s successful call; a matching
   for(const [x,f] of [[call,null],[out,null],[{...call,name:'private'},lookup],[{...out,call_id:'foreign'},lookup]])assert.ok(check(x,f).includes('REQUEST_TOOL_HISTORY_UNBOUND'))
   assert.ok(check({...out,output:[{type:'input_image',image_url:'private'}]},lookup).includes('REQUEST_NON_TEXT_INPUT'))
 })
+
+// Reader fixture: no permission to resume the engine is implied by the presence of a SOURCE.
+test('stopped recovery links two epochs, retains unresolved prior requests and acknowledges both sources separately',async t=>{
+  const {capture,dir,read,store}=await openRoot(t,{engineVersion:'codex-cli-0.167.0',coveragePolicyVersion:'TEXT_MODEL_ONLY_V1',adapterVersion:'RESPONSES_TEXT_TOKENS_V1'})
+  await capture.dispatch(async()=>{});await capture.markStopped(()=>{})
+  const {first,persist}=await import('../metered-capture-files.mjs');const {deliverMetered}=await import('../metered-usage-delivery.mjs')
+  const source=await read('source-0'),{executionId,runId,captureId}=source,binding={executionId,runId,captureId},child=join(dir,'epoch-1');await mkdir(child,{mode:0o700})
+  const obs={...source.observation,epoch:'1',previousEpochSourceRecordId:'f'.repeat(64)}
+  const build=()=>first(binding,'SOURCE',[obs.sourceId,'1'],obs,()=>1)
+  await persist(child,'source-1',build());await assert.rejects(recoverStoppedMeteredRoot(store,()=>{}),{code:'METERED_CAPTURE_SOURCE_CONFLICT'})
+  await assert.rejects(read('capture-final-1'),{code:'ENOENT'});obs.previousEpochSourceRecordId=source.recordId
+  await persist(child,'source-1',build());await persist(child,'producer-stopped',{...binding,epoch:'1',reservedHigh:'0',writeFailed:false})
+  const marker=await recoverStoppedMeteredRoot(store,()=>{});const final=await read('capture-final-1');assert.equal(marker.closeState,'SEALED_INCOMPLETE');assert.equal(marker.sourceFinals.length,2)
+  assert.equal(final.observation.sourceCount,'2');assert.ok(final.observation.reasonCodes.includes('UNRESOLVED_REQUEST'));assert.equal(final.observation.sourcesSha256,skillDigest([...marker.sourceFinals].sort(([a],[b])=>a<b?-1:1)))
+  assert.deepEqual(await recoverStoppedMeteredRoot(store,()=>{}),marker)
+  const seen=new Set();const post=async(path,method,r)=>{assert.equal(method,'POST');assert.ok(!seen.has(r.receiptId));seen.add(r.receiptId);return Object.fromEntries([...['schemaVersion','executionId','runId','captureId','receiptId','recordId','sourceRevision','evidenceSha256'].map(k=>[k,r[k]]),['acceptedAt',5],['acceptance','DURABLE'],['ledger',null]])}
+  const send=()=>deliverMetered(store,post,{left:2,until:Date.now()+5000},true);assert.equal(await send(),false);assert.equal(await send(),false);assert.equal(await send(),false);assert.equal(await send(),true);assert.equal(seen.size,7);assert.equal(await send(),true)
+})

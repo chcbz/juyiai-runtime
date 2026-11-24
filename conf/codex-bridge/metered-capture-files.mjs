@@ -1,5 +1,5 @@
 import { constants as fs } from 'node:fs'
-import { open, realpath, lstat, rename, unlink } from 'node:fs/promises'
+import { open, readdir, realpath, lstat, rename, unlink } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
 import { skillCanonicalJson, skillDigest } from './skill-executor.mjs'
@@ -44,4 +44,20 @@ export async function readPrivate(dir, key) {
     if(BigInt(bytes.length)!==stat.size || after.ctimeNs!==stat.ctimeNs || after.mtimeNs!==stat.mtimeNs)bad('METERED_CAPTURE_FILE_CHANGED')
     return JSON.parse(bytes.toString('utf8'))
   }finally{await file.close()}
+}
+
+// Epoch zero keeps its original layout. A successor is a private directory directly below
+// the capture, not a new execution. Never follow a link or silently skip a broken chain.
+export async function rootEpochDirectories(root) {
+  await directory(root)
+  const names=await readdir(root), epochs=new Map([['0',{epoch:'0',dir:root,names}]])
+  for(const name of names.filter(n=>n.startsWith('epoch-'))){
+    const m=/^epoch-([1-9][0-9]*)$/.exec(name);if(!m)bad('METERED_CAPTURE_SOURCE_CONFLICT')
+    const dir=resolve(root,name);await directory(dir);epochs.set(m[1],{epoch:m[1],dir,names:await readdir(dir)})
+  }
+  const ordered=[]
+  for(let i=0n; i<BigInt(epochs.size); i++){
+    const entry=epochs.get(String(i));if(!entry)bad('METERED_CAPTURE_SOURCE_CONFLICT');ordered.push(entry)
+  }
+  return ordered
 }
