@@ -22,15 +22,15 @@ export async function closeMeteredSubject(parent, {executionId,runId,snapshotDig
   return auditSubject(parent,{executionId,runId,snapshotDigest},assertStopped,clock)
 }
 // Read-only recovery: never fabricate a stopped writer gate or manufacture missing seals.
-export function verifySealedSubject(parent,subject){return auditSubject(parent,subject,null,null)}
-async function auditSubject(parent,{executionId,runId,snapshotDigest},assertStopped,clock){
+export function verifySealedSubject(parent,subject,onRecord){return auditSubject(parent,subject,null,null,onRecord)}
+async function auditSubject(parent,{executionId,runId,snapshotDigest},assertStopped,clock,onRecord){
   yes(skillId(executionId) && skillId(runId) && skillSha(snapshotDigest))
   const captureId=skillDigest(['CAPTURE_V2',executionId,runId]),binding={executionId,runId,captureId},dir=resolve(parent,`usage-capture-${captureId}`)
   const epochs=await rootEpochDirectories(dir), names=new Set(epochs[0].names)
   const check=(raw,kind,identity,rev,previous)=>{
     const {receiptId,expectedRevision,evidenceSha256,...e}=raw
     yes(e.schemaVersion===2&&e.executionId===executionId&&e.runId===runId&&e.captureId===captureId&&e.kind===kind&&e.recordId===skillDigest(['USAGE_RECORD_V2',captureId,kind,identity])&&e.sourceRevision===String(rev)&&e.previousEvidenceSha256===(previous?.evidenceSha256??null)&&evidenceSha256===skillDigest(e))
-    yes(expectedRevision===(kind==='RESPONSE'?'0':null)&&receiptId===skillDigest(['USAGE_RECEIPT_V2',evidenceSha256,expectedRevision]));return raw
+    yes(expectedRevision===(kind==='RESPONSE'?'0':null)&&receiptId===skillDigest(['USAGE_RECEIPT_V2',evidenceSha256,expectedRevision]));onRecord?.(raw);return raw
   }
   const plan=check(await readPrivate(dir,'plan'),'PLAN',[],1), sourceId=plan.observation.rootSourceId
   yes(plan.observation.snapshotSha256 === snapshotDigest && plan.observation.captureProtocol === 'METERED_CAPTURE_V2')

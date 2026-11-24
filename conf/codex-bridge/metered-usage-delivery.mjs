@@ -38,12 +38,22 @@ export async function deliverMetered(store,request,batch,sealed=false){
 export async function deliverDiscussionMetered(inbox,key,scope,request,batch,onSealed){
   const {parent,facts,subject}=await retainedDiscussionSource(inbox,key)
   if(!scope || scope.agentId!==facts.targetAgentId || scope.clientId!==facts.clientId || scope.tenantId!==facts.tenantId)bad()
-  const marker=await verifySealedSubject(parent,subject), {executionId,runId,snapshotDigest}=subject
+  // This one audit already reads and verifies each original. Keep only the ACK comparison
+  // fields for this pass; no observations/bodies on the retry queue or across calls.
+  const expectations=new Map()
+  const marker=await verifySealedSubject(parent,subject,r=>{
+    const {schemaVersion,executionId,runId,captureId,recordId,sourceRevision,receiptId,evidenceSha256,kind,expectedRevision}=r
+    const epoch=r.observation.epoch??'0'
+    const key=kind==='REQUEST'?`request-${r.observation.sequence}-${sourceRevision}`:kind==='RESPONSE'?`response-${r.observation.sourceAttemptId}-1`:
+      kind==='SOURCE'?`source-${epoch}`:kind==='SOURCE_FINAL'?'source-final-1':kind==='CAPTURE_FINAL'?'capture-final-1':'plan'
+    expectations.set(epoch==='0'?key:`epoch-${epoch}-${key}`,{schemaVersion,executionId,runId,captureId,recordId,sourceRevision,receiptId,evidenceSha256,kind,expectedRevision,
+      observation:kind==='RESPONSE'?{sourceAttemptId:r.observation.sourceAttemptId}:null})
+  }), {executionId,runId,snapshotDigest}=subject
   onSealed?.(marker)
   const path=`/internal/agent/chat/dispatches/${runId}/turns/${executionId}/contexts/${snapshotDigest}/captures/${marker.captureId}/usage`
-  return deliverSubject(parent,executionId,runId,path,request,batch,true)
+  return deliverSubject(parent,executionId,runId,path,request,batch,true,expectations)
 }
-async function deliverSubject(parent,executionId,runId,path,request,batch,sealed){
+async function deliverSubject(parent,executionId,runId,path,request,batch,sealed,expectations){
   const captureId=skillDigest(['CAPTURE_V2',executionId,runId]),src=resolve(parent,`usage-capture-${captureId}`),acks=resolve(parent,`usage-acks-${captureId}`)
   await directory(parent)
   try{await directory(src)}catch(e){if(!sealed&&e.code==='ENOENT')return false;throw e}
@@ -55,8 +65,12 @@ async function deliverSubject(parent,executionId,runId,path,request,batch,sealed
     const global=kind==='PLAN'||kind==='CAPTURE_FINAL';if((global&&entry.epoch!=='0')||(kind==='SOURCE'&&match[1]!==entry.epoch))bad()
     const ackKey=entry.epoch==='0'?key:`epoch-${entry.epoch}-${key}`
     const has=saved.has(`${ackKey}.json`);if(has&&!sealed)continue
+    const audited=expectations?.get(ackKey)
+    if(expectations&&!audited)bad()
+    if(has&&audited){validateAck(await readPrivate(acks,ackKey),audited);continue}
     if(!has&&(batch.left<=0||remainingMs(batch)<=0))return false
     const raw=await readPrivate(entry.dir,key),{receiptId,expectedRevision,evidenceSha256,...e}=raw
+    if(audited&&raw.receiptId!==audited.receiptId)bad()
     const o=e.observation,identity=kind==='PLAN'||kind==='CAPTURE_FINAL'?[]:kind==='RESPONSE'?[match[1]]:kind==='REQUEST'?[o.sourceId,o.epoch,match[1]]:[o.sourceId,o.epoch]
     if((!global&&o.epoch!==entry.epoch)||e.kind!==kind||e.schemaVersion!==2||e.executionId!==executionId||e.runId!==runId||e.captureId!==captureId||e.sourceRevision!==(kind==='REQUEST'?match[2]:'1')||
       e.recordId!==skillDigest(['USAGE_RECORD_V2',captureId,kind,identity])||!sha.test(evidenceSha256)||skillDigest(e)!==evidenceSha256||

@@ -532,6 +532,11 @@ test('durable discussion source keeps original turn/dispatch/context across rest
   assert.equal(delivery.nextRecoveryAt(),Infinity);assert.equal(posts,7);assert.equal(gets,1);assert.equal(acks.size,7)
   const stopped=new ChatUsageDelivery({inbox:expires,scope,apiOrigin,nativeFetch:()=>assert.fail('local receipts must replay without network')})
   const audit=await stopped.flush();assert.equal(audit.confirmed,true);assert.deepEqual(audit.captureStates,[{key,capture:'SEALED',delivery:'ACKNOWLEDGED',coverage:'INCOMPLETE'}])
+  // ACKs cannot be swapped, even if both have valid bindings elsewhere in this sealed pass.
+  const fs=await import('node:fs/promises'),ackDir=join(parent,'usage-acks-'+cap.captureId)
+  const planAck=join(ackDir,'plan.json'),sourceAck=join(ackDir,'source-0.json'),planBytes=await fs.readFile(planAck)
+  try{await fs.writeFile(planAck,await fs.readFile(sourceAck));assert.equal((await stopped.flush()).confirmed,false)}
+  finally{await fs.writeFile(planAck,planBytes)}
   // A prior network ACK is no excuse to invent a missing source seal at handover.
   const {rename}=await import('node:fs/promises');const seal=join(dir,'usage-capture-finalized.json'),saved=join(parent,'saved-seal');await rename(seal,saved)
   try{const broken=await stopped.flush();assert.equal(broken.confirmed,false);assert.equal(broken.captureStates[0].capture,'UNVERIFIED');await assert.rejects(readFile(seal),{code:'ENOENT'})}
