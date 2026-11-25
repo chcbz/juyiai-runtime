@@ -15,25 +15,42 @@ export const nativeArtifactTools = Object.freeze([
   { type: 'function', name: 'result_propose', description: 'Submit the reply data required by outputs.dataSchema and select any already staged artifactRefs. Required before ending every successful turn, including pure-text answers, clarification questions and preview-only deliveries. For zero files use artifactRefs: []; still submit the declared data. A plain final message does not submit structured data. This requirement also applies when the user says not to accept yet. This does not accept, settle payment or archive a task, and is not an API completion receipt.', inputSchema: { type: 'object', properties: { summary: { type: 'string' }, artifactRefs: { type: 'array', items: { type: 'string' } }, data: {} }, required: ['summary', 'artifactRefs', 'data'], additionalProperties: false } }
 ])
 
+export function nativeArtifactOutputTools(outputs) {
+  // Advertise the execution's actual data contract, not an unconstrained value
+  // that the same tool subsequently rejects (e.g. {} for file-only results).
+  // Keep structured schemas at their existing root in outputs.dataSchema so
+  // local $refs retain their original meaning; runtime validation is unchanged.
+  const data = outputs.dataSchema ? {} : { type: 'null', description: 'This execution has no structured data output. Pass null; deliver files via artifactRefs.' }
+    const { artifactsRequired, multiple } = outputs
+    return nativeArtifactTools.map(tool => tool.name === 'result_propose'
+      ? { ...tool, inputSchema: { ...tool.inputSchema, properties: { ...tool.inputSchema.properties, data,
+        artifactRefs: { ...tool.inputSchema.properties.artifactRefs, uniqueItems: true,
+          ...(artifactsRequired ? { minItems: 1 } : {}), ...(multiple ? {} : { maxItems: 1 }),
+          description: 'Use artifactRef values returned by artifact_stage, not file paths or display names.' } } } }
+      : tool)
+
+}
+
 export class NativeArtifactSession {
   constructor({ store, checkActive, validateSnapshot }) {
     this.store = store; this.command = store.command; this.checkActive = checkActive; this.validateSnapshot = validateSnapshot
     if (this.command.executionProtocolVersion !== 6 || typeof checkActive !== 'function' || typeof validateSnapshot !== 'function') fail('NATIVE_ARTIFACT_SESSION_INVALID')
   }
   policy() {
-    // Advertise the execution's actual data contract, not an unconstrained value
-    // that the same tool subsequently rejects (e.g. {} for file-only results).
-    // Keep structured schemas at their existing root in outputs.dataSchema so
-    // local $refs retain their original meaning; runtime validation is unchanged.
-    const data = this.command.outputs.dataSchema ? {} : { type: 'null', description: 'This execution has no structured data output. Pass null; deliver files via artifactRefs.' }
-    const { artifactsRequired, multiple } = this.command.outputs
-    const tools = nativeArtifactTools.map(tool => tool.name === 'result_propose'
-      ? { ...tool, inputSchema: { ...tool.inputSchema, properties: { ...tool.inputSchema.properties, data,
-        artifactRefs: { ...tool.inputSchema.properties.artifactRefs, uniqueItems: true,
-          ...(artifactsRequired ? { minItems: 1 } : {}), ...(multiple ? {} : { maxItems: 1 }),
-          description: 'Use artifactRef values returned by artifact_stage, not file paths or display names.' } } } }
-      : tool)
-    return { executionId: this.command.executionId, tools, checkActive: this.checkActive, callTool: ctx => this.callTool(ctx) }
+    const tools = nativeArtifactOutputTools(this.command.outputs)
+    if(this.command.usageMode!=='RESPONSE_V2')return {executionId:this.command.executionId,tools,checkActive:this.checkActive,callTool:ctx=>this.callTool(ctx)}
+    // Execution/turn checks and durable DONE/selection belong to callTool. Publish only
+    // after it succeeds. No arguments/results, cross-execution cache or new fsync.
+    const observed=new Map()
+    return {executionId:this.command.executionId,tools,checkActive:this.checkActive,
+      localArtifactCall:id=>observed.get(id),callTool:async ctx=>{
+        const result=await this.callTool(ctx)
+        if(skillId(ctx.callId)){
+          if(observed.size>=256&&!observed.has(ctx.callId))observed.delete(observed.keys().next().value)
+          observed.set(ctx.callId,ctx.tool)
+        }
+        return result
+      }}
   }
   bindTurn({ threadId, turnId }) {
     this.checkActive()

@@ -91,6 +91,14 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
       let admitted = true; let activation = null; let resolveActivated; let rejectActivated; let closed = null;
       let lastPresenceSentAt = null; let lastPresenceAckAt = null; let channelState = 'initializing'; let lastFailure = null;
       let nativeWorkEnabled = false;
+      // O(1) state per activated subject, no per-task subscriptions. Presence samples only after an
+      // authenticated comparison requested observation. A new server session fences the entire sequence.
+      let profileSequence = 0n, profileSha = null;
+      const observeProfile = sha => {
+        if (profileSequence === 0n || profileSha !== sha) { profileSha = sha; profileSequence++; }
+        return {sequence:profileSequence.toString(),profileSha256:profileSha};
+      };
+      const profileDigest = group => typeof group?.profileSha256 === 'string' && /^[0-9a-f]{64}$/.test(group.profileSha256) ? group.profileSha256 : null;
       let registrationEpoch = 0;
       let managementSession = null; // Confirmed session authority survives catalog-only re-registration.
       const inFlightSkillReceipts = new Set();
@@ -142,7 +150,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
         replay = Promise.resolve().then(() => executor.resume()).catch(error => logger('runtime-replay-failed', { code: error.code || 'REPLAY_FAILED' }));
         void replay.finally(() => { replay = null; });
       };
-      const disconnect = () => { registrationEpoch++; channelState = 'disconnected'; lastPresenceAckAt = null; registeredAt = null; serviceReadyAt = null; channelConfirmed = false; managementSession = null; observer?.disconnect(); executor.disconnected(); client.invalidateSession(); };
+      const disconnect = () => { profileSequence=0n;profileSha=null;registrationEpoch++; channelState = 'disconnected'; lastPresenceAckAt = null; registeredAt = null; serviceReadyAt = null; channelConfirmed = false; managementSession = null; observer?.disconnect(); executor.disconnected(); client.invalidateSession(); };
       const connectOnce = async signal => {
         channelState = 'connecting';
         const session = await client.session({ signal });
@@ -235,6 +243,25 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
             const managementAuthorized = () => managementSession === session && !!managementFacts;
             if (!channelConfirmed && !managementAuthorized()) {
               if (managementFacts) logger('runtime-management-not-admitted', { ...managementFacts, code: 'CHANNEL_NOT_CONFIRMED' });
+              return;
+            }
+            // Read-only, task preparation only. No command ingress, durable ACK, engine startup or remote action.
+            if (frame.messageType === 'runtime.task.configuration.probe') {
+              const keys=['messageType','messageId','requestId','installationId','tenantId','clientId','agentId','hostId','runtimeInstanceId','sessionGeneration','intentSha256','preparationKind','outputs'];
+              if (!ready() || !executor.comparePreparedLocalTask || Object.keys(frame).some(k=>!keys.includes(k)) || frame.agentId!==session.canonicalAgentId
+                  || ['installationId','tenantId','clientId','hostId','runtimeInstanceId','sessionGeneration'].some(k=>frame[k]!==session[k])
+                  || frame.preparationKind!=='TASK_NATIVE_LOCAL_FILES_V1' || typeof frame.intentSha256!=='string' || !/^[0-9a-f]{64}$/.test(frame.intentSha256)
+                  || !frame.outputs || !Object.hasOwn(frame.outputs,'dataSchema') || !Array.isArray(frame.outputs.mimeTypes)
+                  || typeof frame.outputs.multiple!=='boolean' || typeof frame.outputs.artifactsRequired!=='boolean'
+                  || Buffer.byteLength(bytes)>16384 || (frame.outputs.dataSchema!==null && (typeof frame.outputs.dataSchema!=='object'||Array.isArray(frame.outputs.dataSchema)))) return;
+              let measurement=null, sha=null;
+              try {
+                const group=executor.comparePreparedLocalTask(frame.outputs);
+                sha=profileDigest(group);
+                if(sha && group?.version==='NATIVE_DISPATCH_GROUP_V1' && ['executionConfigSha256','routeSha256','toolConfigSha256'].every(k=>typeof group[k]==='string' && /^[0-9a-f]{64}$/.test(group[k])))
+                  measurement={version:group.version,executionConfigSha256:group.executionConfigSha256,routeSha256:group.routeSha256,toolConfigSha256:group.toolConfigSha256,capturePolicyVersion:'NATIVE_LOCAL_ARTIFACT_TEXT_V1'};
+              } catch { /* drift or unavailable: never infer a configuration */ }
+              send({messageType:'runtime.task.configuration.measured',messageId:randomUUID(),requestId:frame.requestId,correlationId:frame.messageId,intentSha256:frame.intentSha256,measurement,configurationEpoch:observeProfile(measurement?sha:null)});
               return;
             }
             // This is a lossy scheduling hint, never an executable command or durable ACK.
@@ -334,7 +361,15 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
           // Catalog-only refresh keeps the confirmed session online; actual health
           // loss/pause still withdraws readiness and is reported immediately.
           if (healthy && declaredHealthy && admitted && usable() && !channelConfirmed) return;
-          if (send(module.buildProtocolEnvelope('agent.presence', { messageId: randomUUID(), status: readyWithHealth(healthy) ? 'online' : 'offline', durableStateHealthy: healthy }, executor.state().profile, instanceId))) lastPresenceSentAt = Date.now();
+          let epoch = null;
+          if (profileSequence !== 0n) {
+            let sha=null;
+            if (readyWithHealth(healthy)) try {
+              sha=profileDigest(executor.comparePreparedLocalTask({mimeTypes:[],multiple:false,artifactsRequired:false,dataSchema:null}));
+            } catch { /* a changed/unavailable toolchain withdraws, never warms the engine */ }
+            epoch=observeProfile(sha);
+          }
+          if (send(module.buildProtocolEnvelope('agent.presence', { ...(epoch?{configurationEpoch:epoch}:{}), messageId: randomUUID(), status: readyWithHealth(healthy) ? 'online' : 'offline', durableStateHealthy: healthy }, executor.state().profile, instanceId))) lastPresenceSentAt = Date.now();
           // Health revocation never removes authorization to report known outcomes.
           if (!healthy) { declaredHealthy = false; executor.suspendAdmission(); }
           else if (!declaredHealthy) register();
@@ -394,6 +429,14 @@ export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   "native-execution.mjs",
   "native-installation-selection.mjs",
   "execution-business-api.mjs",
+  "metered-capture-files.mjs",
+  "metered-capture-closure.mjs",
+  "metered-usage-delivery.mjs",
+  "metered-request-capture.mjs",
+  "metered-responses-route.mjs",
+  "metered-response-observation.mjs",
+  "metered-response-json.mjs",
+  "metered-request-scope.mjs",
   "native-usage-receipts.mjs",
   "provider-usage-receipts.mjs",
   "chat-usage-delivery.mjs",

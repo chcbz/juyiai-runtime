@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { readRuntimeHostConfig } from './lib/manifest.mjs';
-import { createLogger, readEnrollmentSecret, readRuntimeProviderEnvironments, writePrivateJson } from './lib/security.mjs';
+import { readPrivateJson, createLogger, readEnrollmentSecret, readRuntimeProviderEnvironments, writePrivateJson } from './lib/security.mjs';
 import { classifyRuntimeError, RuntimeV1Client } from './lib/runtime-client.mjs';
 import { RuntimeHost } from './lib/runtime-host.mjs';
 import { createExecutionAdapterFactory } from './lib/execution-adapter.mjs';
@@ -22,11 +22,11 @@ const failure = code => Object.assign(new Error(code), { code });
 function parseArgs(argv) {
   const [command, ...rest] = argv; const options = {};
   for (let i = 0; i < rest.length; i += 2) {
-    if (!['--config', '--subject', '--api-base-url', '--workspace-policies'].includes(rest[i]) || !rest[i + 1]
+    if (!(command==='inspect-discussion-receipts' && rest[i]==='--expected-sources') && !['--config', '--subject', '--api-base-url', '--workspace-policies'].includes(rest[i]) || !rest[i + 1]
         || rest[i + 1].startsWith('--') || Object.hasOwn(options, rest[i].slice(2))) throw failure('RUNTIME_ARGUMENT_INVALID');
     options[rest[i].slice(2)] = rest[i + 1];
   }
-  if (!options.config || !['validate', 'enroll', 'run'].includes(command)) throw failure('RUNTIME_CONFIG_REQUIRED');
+  if (!options.config || !['validate', 'enroll', 'run', 'inspect-discussion-receipts'].includes(command)) throw failure('RUNTIME_CONFIG_REQUIRED');
   return { command, options };
 }
 const wait = (ms, signal) => new Promise(resolveWait => {
@@ -94,6 +94,27 @@ export async function runUnifiedRuntime({ config, apiOrigin, instanceId = random
 export async function main(argv = process.argv.slice(2), env = process.env) {
   const { command, options } = parseArgs(argv);
   const config = await readRuntimeHostConfig(resolve(options.config));
+  if (command === 'inspect-discussion-receipts') {
+    if (Object.keys(options).some(k=>!['subject','config','expected-sources'].includes(k))) throw failure('RUNTIME_EXACT_SUBJECT_REQUIRED');
+    const {receiptInspectionAgent}=await import('./lib/hosting-control.mjs');
+    const agent=await receiptInspectionAgent(config,options.subject);
+    const {inspectLocalDiscussionEvidence}=await import('./lib/evidence-handover.mjs');
+    let expected;
+    if (options['expected-sources']) {
+      const entry=await readPrivateJson(options['expected-sources'],null);
+      const {origin,manifest}=entry ?? {};
+      const local=agent.manifest;
+      if (!origin || origin.tenant_id!==local.tenantId || origin.client_id!==local.clientId
+          || origin.target_agent_id!==local.canonicalAgentId || origin.installation_id!==local.installationId
+          || origin.host_id!==config.hostId || manifest?.subjectKey!==agent.subjectKey || !Array.isArray(manifest.captureIds) || !manifest.captureIds.length
+          || manifest.captureIds.some(id=>typeof id!=='string'||id.length!==64||!/^[0-9a-f]+$/.test(id))
+          || new Set(manifest.captureIds).size!==manifest.captureIds.length) throw failure('RUNTIME_EXPECTED_SOURCES_INVALID');
+      expected=manifest.captureIds;
+    }
+    const result=await inspectLocalDiscussionEvidence(agent,expected);
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    return result.sources>0 && result.sources===result.acknowledged && !result.missing && !result.unexpected ? 0 : 2;
+  }
   const knowledgeConfig = await readKnowledgeMaintenanceConfig(env.CYF_RUNTIME_KNOWLEDGE_CONFIG_FILE, config);
   const providerEnvironments = await readRuntimeProviderEnvironments(env.CYF_RUNTIME_PROVIDER_ENVIRONMENTS_FILE, config.agents);
   if (providerEnvironments.size) {
@@ -126,7 +147,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   finally { process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop); }
 }
 const isMain = process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
-if (isMain) main().catch(error => {
+if (isMain) main().then(status => { process.exitCode = status; }).catch(error => {
   const category = classifyRuntimeError(error);
   console.error(JSON.stringify({ event: 'runtime-error', category: category.kind, ...(category.status ? { status: category.status } : {}) }));
   process.exitCode = runtimeExitStatus(error);

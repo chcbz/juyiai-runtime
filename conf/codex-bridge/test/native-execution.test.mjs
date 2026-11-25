@@ -258,3 +258,9 @@ test('a lost selection-binding reply reuses the durable choice; revocation preve
   let opens=0,attempts=0;const args={...f.request,entries:['a','b'].map(id=>({descriptor:{skillInstallationId:id}})),profileRuntime:{openNativeExecutionAdapter:async()=>{opens++;throw Error('unexpected adapter')}},bindInstallation:async id=>{attempts++;assert.equal(id,'b');throw Error(attempts===1?'reply lost':'revoked')}}
   await assert.rejects(runNativeExecution(args),/reply lost/);await assert.rejects(runNativeExecution(args),/revoked/);assert.equal(opens,0);assert.equal(attempts,2)
 })
+test('local-result-only recovery cannot open a new engine and rejects a terminal for another turn',async t=>{
+  const f=fixture(t);const readOnly={...f.request,mayStartTurn:false};await assert.rejects(runNativeExecution(readOnly),{code:'SKILL_RESULT_UNKNOWN'});assert.deepEqual(f.events,[])
+  f.store.write('native-thread',{threadId:'thread1'});await assert.rejects(runNativeExecution(readOnly),{code:'SKILL_RESULT_UNKNOWN'});assert.deepEqual(f.events,[])
+  f.store.write('native-start-attempt',{threadId:'thread1',clientUserMessageId:f.command.messageId});f.store.write('native-turn',{executionId:f.command.executionId,threadId:'thread1',turnId:'original'})
+  f.adapter.reconcileTurn=async()=>({status:'TERMINAL',terminalStatus:'completed',turnId:'wrong'});await assert.rejects(runNativeExecution(readOnly),{code:'SKILL_RESULT_UNKNOWN'});assert.equal(f.runs(),0);assert.equal(f.store.read('native-usage-recovered'),null)
+})

@@ -1,4 +1,7 @@
 import { openBusinessSocket, BUSINESS_API_SOCKET } from './execution-business-api.mjs'
+import { isCurrentAppServerMeasurement } from './app-server-adapter.mjs'
+import { startMeteredRoot, resumeStoppedMeteredRoot } from './metered-request-capture.mjs'
+import { skillDigest, skillId } from './skill-executor.mjs'
 import { BROWSER_PROBE } from './native-browser-toolchain.mjs'
 import { DOCUMENT_MIMES, DOCUMENT_PROBE, PDF_PROBE } from './native-document-toolchain.mjs'
 import { spawn } from 'node:child_process'
@@ -11,7 +14,7 @@ import { skillPackageTreeDigest } from './skill-manifest.mjs'
 
 import { canonicalSha256 } from './chat-runtime.mjs'
 
-import { NATIVE_NEUTRAL_MOUNT_TARGETS, NATIVE_PERMISSION_PROFILE, prepareNativeExecutionLayout, validateNativeExecutionToolchain, verifyNativeExecutionConfig, verifyNativeExecutionSkillCatalog } from './native-execution-profile.mjs'
+import { NATIVE_NEUTRAL_MOUNT_TARGETS, NATIVE_PERMISSION_PROFILE, measureProspectiveNativeGroup, nativeDispatchGroup, prepareNativeExecutionLayout, validateNativeExecutionToolchain, verifyNativeExecutionConfig, verifyNativeExecutionSkillCatalog } from './native-execution-profile.mjs'
 
 import { IsolatedEngineProfileRuntime, nonblank, fail, sha256, ensurePrivateDirectory, engineStateBinding, stateMarker, emptyMcpCatalog } from './isolated-engine-profile.mjs'
 
@@ -29,19 +32,45 @@ export const nativeExecutionProfile = profile => {
   }
 }
 
+export { nativeDispatchGroup } from './native-execution-profile.mjs'
+
+const nativeMeteringRoute = (profile, schema, localArtifactOnly) => {
+  const channelNamespace = skillDigest(['METERED_PROVIDER_NAMESPACE_V1', profile.typedInspectionProviderId, new URL(profile.typedInspectionProviderBaseUrl).href.replace(/\/$/, '')])
+  const engineVersion = /^\d+\.\d+\.\d+$/.test(schema.cliVersion) ? `codex-cli-${schema.cliVersion}` : 'unknown'
+  // Local tool dispatch is known here; actual uploaded shapes and response usage are checked per request.
+  const coveragePolicyVersion = localArtifactOnly === true && engineVersion === 'codex-cli-0.167.0'
+    && new URL(profile.typedInspectionProviderBaseUrl).protocol === 'https:' ? 'NATIVE_LOCAL_ARTIFACT_TEXT_V1' : 'NATIVE_EXECUTION_UNVERIFIED_V1'
+  return { channelNamespace, engineVersion, coveragePolicyVersion }
+}
+
 export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime {
   constructor(options = {}) {
     super({ ...options, profile: nativeExecutionProfile(options.profile || {}) })
   }
-  openNativeExecutionAdapter(inputDirectory, requestKey, requestBinding, { scratchDirectory, draftsDirectory, skills = [], skillConfiguration = [], nativeExecution, requireExistingState = false } = {}) {
+  // Only internal dispatch preparation supplies the selected tools/skills and instruction commitment.
+  // The executable, model, effort, route, toolchain and loaded model catalogue are profile-owned.
+  prospectiveNativeGroup({skills,skillConfiguration,tools,networkAccess,toolPolicyRef,instructionsSha256,localArtifactOnly,preparedLocalBudget=false,profileTools}) {
+    const profile = this.profile, schema = this.nativeBinaryMeasurement
+    if (!this.nativeExecutionDeclaration() || !this.nativeToolchain || profile.typedInspectionProviderNetwork !== 'restricted-proxy'
+        || !profile.typedInspectionProviderId || !profile.typedInspectionProviderBaseUrl || !isCurrentAppServerMeasurement(profile,schema)) return null
+    const route=nativeMeteringRoute(profile,schema,localArtifactOnly)
+    if (preparedLocalBudget && route.coveragePolicyVersion !== 'NATIVE_LOCAL_ARTIFACT_TEXT_V1') return null
+    return measureProspectiveNativeGroup({verifiedOnly:preparedLocalBudget,profileTools,skills,skillConfiguration,tools,networkAccess,stateRoot:this.stateRoot,
+      toolchain:this.nativeToolchain,modelCatalogSha256:this.nativeModelCatalog?.sha256 ?? null}, {
+      ...route, binarySha256:schema.binarySha256, model:profile.chatModel || profile.codexModel,
+      effort:profile.chatReasoningEffort, toolPolicyRef, instructionsSha256 })
+  }
+  openNativeExecutionAdapter(inputDirectory, requestKey, requestBinding, { scratchDirectory, draftsDirectory, skills = [], skillConfiguration = [], nativeExecution, meteredCapture = null, meteredAdmission = null, requireExistingState = false } = {}) {
     if (nativeExecution) nativeExecution = Object.freeze({ ...nativeExecution, tools: structuredClone(nativeExecution.tools), ...(this.nativeModelCatalog ? { modelCatalogSha256: this.nativeModelCatalog.sha256 } : {}) })
     if (this.disposed) return Promise.reject(Object.assign(new Error('TYPED_INSPECTION_PROFILE_DISPOSED'), { code: 'TYPED_INSPECTION_PROFILE_DISPOSED' }))
     const binding = engineStateBinding(requestBinding)
     if (!nonblank(requestKey) || binding.requestKey !== requestKey) fail('NATIVE_EXECUTION_BINDING_INVALID')
+    if (meteredCapture && (meteredCapture.executionId !== binding.authorizationId || meteredCapture.executionId !== nativeExecution.executionId || !/^[0-9a-f]{64}$/.test(meteredCapture.captureId))) fail('METERED_CAPTURE_BINDING_INVALID')
+    if (meteredAdmission && (meteredCapture || meteredAdmission.store.command.executionId !== binding.authorizationId || nativeExecution.executionId !== binding.authorizationId || meteredAdmission.store.command.snapshotDigest !== binding.manifestDigest.slice(7))) fail('METERED_CAPTURE_BINDING_INVALID')
     const layout = prepareNativeExecutionLayout({ inputDirectory, scratchDirectory, draftsDirectory, skills, skillConfiguration, nativeExecution,
       toolchain: this.nativeToolchain, stateRoot: this.stateRoot, sourceHome: this.profile.codexHome })
     const bindingDigest = canonicalSha256(binding)
-    const matches = active => active.nativeLayout?.digest === layout.digest && active.engineState.bindingDigest === bindingDigest
+    const matches = active => (active.slot || active).meteredAdmission === meteredAdmission && (active.slot || active).meteredCapture === meteredCapture && active.nativeLayout?.digest === layout.digest && active.engineState.bindingDigest === bindingDigest
       && active.nativeExecution.checkActive === nativeExecution.checkActive && active.nativeExecution.callTool === nativeExecution.callTool
     if (this.closingAdapters?.has(requestKey)) fail('NATIVE_EXECUTION_ADAPTER_CLOSING')
     if (this.pendingInspectionKeys?.has(requestKey)) fail('NATIVE_EXECUTION_ADAPTER_BINDING_CONFLICT')
@@ -52,7 +81,7 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
       if (!active.adapter.closed && matches(active)) return Promise.resolve(active.adapter)
       fail('NATIVE_EXECUTION_ADAPTER_BINDING_CONFLICT')
     }
-    const slot = { nativeLayout: layout, engineState: { bindingDigest }, nativeExecution, cancelled: false }
+    const slot = { meteredAdmission, meteredCapture, nativeLayout: layout, engineState: { bindingDigest }, nativeExecution, cancelled: false }
     this.pendingNativeAdapters.set(requestKey, slot)
     slot.promise = this._openNativeExecutionAdapter(binding, layout, nativeExecution, requireExistingState, slot)
       .finally(() => { if (this.pendingNativeAdapters.get(requestKey) === slot) this.pendingNativeAdapters.delete(requestKey) })
@@ -67,8 +96,36 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
       checkActive()
       if (this.profile.typedInspectionProviderNetwork !== 'restricted-proxy') fail('TYPED_INSPECTION_PROVIDER_NETWORK_NOT_CONFIGURED')
       const schema = await this.measureBinary(this.profile); checkActive()
+      const egressOptions = { providerBaseUrl: this.profile.typedInspectionProviderBaseUrl, networkConnectTimeoutMs: this.profile.typedInspectionNetworkConnectTimeoutMs, additionalOrigins: layout.binding.networkOrigins }
+      if (slot.meteredAdmission) {
+        const { store, model, effort } = slot.meteredAdmission
+        let mode=null
+        if(requireExistingState){
+          const thread=store.read('native-thread'),attempt=store.read('native-start-attempt')
+          if(!skillId(thread?.threadId)||!skillId(store.command.messageId)||
+              (!attempt&&(store.read('native-turn')||store.read('native-terminal')))||
+              (attempt&&(attempt.threadId!==thread.threadId||attempt.clientUserMessageId!==store.command.messageId)))fail('SKILL_RESULT_UNKNOWN')
+          mode=attempt?'RECONCILE_ONLY':'BEFORE_FIRST_TURN'
+        }
+        const { channelNamespace, engineVersion, coveragePolicyVersion } = nativeMeteringRoute(this.profile, schema, slot.meteredAdmission.localArtifactOnly &&
+          !layout.binding.networkAccess && !layout.binding.networkOrigins.length && !layout.binding.webSearch &&
+          !layout.binding.skills.length && !layout.binding.skillConfiguration.length && typeof nativeExecution.localArtifactCall === 'function')
+        try {
+          const options = { executionId:binding.authorizationId, runId:store.command.runId,
+            executionConfigSha256:skillDigest([layout.digest,store.commandDigest,engineVersion,channelNamespace,model,effort]),
+            dispatchGroup:nativeDispatchGroup(layout.binding,{binarySha256:schema.binarySha256,engineVersion,channelNamespace,model,effort,
+              instructionsSha256:slot.meteredAdmission.instructionsSha256,toolPolicyRef:store.command.toolPolicyRef,coveragePolicyVersion}),
+            engineVersion,coveragePolicyVersion,rootSourceId:'source_model',channelNamespace,adapterVersion:'RESPONSES_TEXT_TOKENS_V1',checkActive,deferUntilThread:mode==='BEFORE_FIRST_TURN' }
+          slot.meteredCapture=mode===null?await startMeteredRoot(store,options):await resumeStoppedMeteredRoot(store,options,mode)
+        } catch (error) { if (error.code === 'EEXIST') fail('SKILL_RESULT_UNKNOWN'); throw error }
+      }
+      if (slot.meteredCapture) {
+        phase('metered-egress-start')
+        egress = this._meteredEgress(egressOptions, slot.meteredCapture, nativeExecution.localArtifactCall)
+        await egress.start(); checkActive()
+      }
       phase('request-state-and-skill-view')
-      engineState = this._prepareRequestState(binding, { requireExistingState, nativeExecution: true, nativeBinding: layout.binding })
+      engineState = this._prepareRequestState(binding, { requireExistingState, nativeExecution: true, nativeBinding: slot.meteredCapture ? { ...layout.binding, captureId:slot.meteredCapture.captureId } : layout.binding, meteredEgress: egress })
       slot.engineState = engineState
       const skillConfigurationDirectory = ensurePrivateDirectory(resolve(engineState.directory, 'skill-config'))
       for (const item of layout.skillConfiguration) stateMarker(skillConfigurationDirectory, item.configuration, `${item.skillKey}.json`)
@@ -85,9 +142,9 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
         const mountpoint = ensurePrivateDirectory(resolve(skillsDirectory, skill.skillKey))
         if (readdirSync(mountpoint).length) fail('NATIVE_EXECUTION_DISCOVERY_ROOT_UNSAFE')
       }
-      phase('egress-start')
-      egress = this.egressFactory({ providerBaseUrl: this.profile.typedInspectionProviderBaseUrl, networkConnectTimeoutMs: this.profile.typedInspectionNetworkConnectTimeoutMs, additionalOrigins: layout.binding.networkOrigins })
-      await egress.start(); checkActive()
+      if (!egress) {
+        phase('egress-start'); egress = this.egressFactory(egressOptions); await egress.start(); checkActive()
+      }
       // Recheck bytes/identities after asynchronous setup, immediately before bind.
       phase('layout-recheck')
       const current = prepareNativeExecutionLayout({ ...layout, nativeExecution, toolchain: this.nativeToolchain, stateRoot: this.stateRoot, sourceHome: this.profile.codexHome })
@@ -113,12 +170,22 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
       // boundaries; a cached startup inventory is not refresh/resume evidence.
       for (const method of ['startOrResumeThread', 'runTurn']) {
         const call = adapter[method].bind(adapter)
-        adapter[method] = async (...args) => { await adapter.verifyNativeExecutionSkills(); return call(...args) }
+        adapter[method] = async (...args) => {
+          await adapter.verifyNativeExecutionSkills()
+          const enable=method==='startOrResumeThread' && slot.meteredCapture?.enableAfterThreadResume
+          if(!enable)return call(...args)
+          const original=slot.meteredAdmission.store.read('native-thread')?.threadId
+          if(!original||args[0]?.threadId!==original)fail('SKILL_RESULT_UNKNOWN')
+          const result=await call(...args);if(result.threadId!==original)fail('SKILL_RESULT_UNKNOWN')
+          await enable();return result
+        }
       }
       checkActive()
       adapter.nativeExecutionIsolation = Object.freeze({ schemaVersion: 1, layoutDigest: layout.digest, cwd: '/execution',
         writableRoots: Object.freeze(['/workspace', '/outputs']), skills: discovery, network, modelTurnMeasured: false })
       this.suspendedNativeStates?.delete(binding.requestKey)
+      // Keep the process-local, integrity-owner-attested object, never a serialized PLAN or heartbeat.
+      this.nativeBinaryMeasurement = schema
       this.activeAdapters.set(binding.requestKey, { adapter, egress, engineState, inputDirectory: layout.inputDirectory, nativeLayout: layout, nativeExecution, slot })
       adapter.once('exit', () => {
         // Keep the closed entry until per-execution suspend/release joins

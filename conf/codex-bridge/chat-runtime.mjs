@@ -144,7 +144,7 @@ export function buildContextEnvelope(message) {
   const currentUserMessage = { content: message.content }
   for (const key of ['attachments', 'inputRefs', 'files']) if (message[key] !== undefined) currentUserMessage[key] = message[key]
   // Delivery control remains covered by the original snapshot digest, but is not model history.
-  const { contextDelivery, ...modelFacts } = snapshot.facts
+  const { contextDelivery, taskUsageCapture, ...modelFacts } = snapshot.facts
   const envelope = {
     schemaVersion: CHAT_CONTEXT_ENVELOPE_VERSION,
     kind: 'juyiting.context-envelope',
@@ -611,6 +611,35 @@ export class PersistentChatInbox {
       const record = JSON.parse(readFileSync(path, 'utf8')); const target = this.path('processing', key); durableRename(path, target)
       const claimed = { ...record, state: 'STARTING', claimedAt: Date.now() }; atomicJson(target, claimed)
       return { key, state: 'processing', path: target, record: claimed }
+    })
+  }
+  // Read the original durable record under the existing inbox lock; callers do not supply paths or a message.
+  discussionCaptureSubject(key, recovering) {
+    if (!/^[a-f0-9]{64}$/.test(key)) throw new Error('CHAT_CAPTURE_BINDING_INVALID')
+    return this._withLock(() => {
+      const item = this.findByKey(key)
+      const parent = resolve(this.dir, `discussion-source-${key}`)
+      if (recovering && (!item || item.state === 'ledger')) {
+        // Terminal dedupe has its own retention. Neither a compact marker nor absence may start an engine.
+        const marker = item ? this._validateDedupeMarker(key,item.record) : null
+        return { parent, retainedOnly:true, marker }
+      }
+      if (!item || (recovering ? !['recovery','archive'].includes(item.state) :
+          item.state !== 'processing' || item.record.state !== 'STARTING')) throw new Error('CHAT_CAPTURE_STATE_INVALID')
+      const message = validateChatDispatch(fingerprintSource(item.record.message))
+      const facts = message.contextSnapshot?.facts, enrollment = facts?.taskUsageCapture
+      if (!message.durable || message.route !== 'CHAT' || message.conversationScopeType !== 'bounty' || !message.taskId ||
+          durableChatKey(message) !== key || chatFingerprint(message) !== item.record.fingerprint ||
+          message.targetAgentId !== this.profile.agentId || !Array.isArray(facts.participantAgentIds) ||
+          facts.participantAgentIds.length !== 1 || facts.participantAgentIds[0] !== this.profile.agentId ||
+          enrollment?.protocol !== 'METERED_CAPTURE_V2' || enrollment.captureId !==
+            canonicalSha256(['CAPTURE_V2',message.turnId,message.dispatchId]).slice(7)) throw new Error('CHAT_CAPTURE_BINDING_INVALID')
+      if (!recovering) {
+        // Do not chmod or follow an existing entry (including a link). openSubject verifies the private directory.
+        try { mkdirSync(parent,{mode:0o700}); directoryFsync(this.dir) }
+        catch (error) { if (error.code !== 'EEXIST') throw error }
+      }
+      return {parent, message, fingerprint:item.record.fingerprint, subject:{executionId:message.turnId, runId:message.dispatchId, snapshotDigest:message.contextHash.slice(7)}}
     })
   }
   claimPreEngineInspection(key) {

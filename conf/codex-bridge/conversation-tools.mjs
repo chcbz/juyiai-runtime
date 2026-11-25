@@ -7,19 +7,21 @@ const id = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,
 
 /** Authenticated HTTP callbacks only. Tool names and business schemas belong to API,
  * installation integrity belongs to the existing manager, and no token enters model context. */
-export async function prepareConversationTools({ message, apiOrigin, nativeFetch, loadInstalled, current,
+export async function prepareConversationTools({ message, apiOrigin, nativeFetch, loadInstalled, current, requireEmpty = false,
   readInstructions = row => readFileSync(resolve(row.packageRoot, 'SKILL.md'), { encoding: 'utf8', flag: constants.O_RDONLY | constants.O_NOFOLLOW }) }) {
   // The API catalog is private-turn only; a task dispatch always gets an empty catalog.
-  if (message.conversationScopeType === 'bounty') return null
-  if (!(message.durable || message.ackRequired && message.deliverySemantics === 'AT_LEAST_ONCE_DURABLE_DEDUPE_REQUIRED') || !id(message.requestId) || !id(message.turnId) || !id(message.messageId) || !id(message.dispatchId)) return null
+  if (message.conversationScopeType === 'bounty' && !requireEmpty) return null
+  if (!(message.durable || message.ackRequired && message.deliverySemantics === 'AT_LEAST_ONCE_DURABLE_DEDUPE_REQUIRED') || !id(message.requestId) || !id(message.turnId) || !id(message.messageId) || !id(message.dispatchId)) { if (requireEmpty) fail('CONVERSATION_TOOL_CATALOG_REQUIRED'); return null }
   const origin = new URL(apiOrigin).origin
   const path = `/internal/agent/chat/requests/${message.requestId}/turns/${message.turnId}/tools`
   if (!current()) fail('CONVERSATION_TOOL_INACTIVE')
   const response = await nativeFetch(new URL(path, origin))
   // An older API has no optional catalog. Never interpret a rejected tool call as success.
+  if (requireEmpty && response.status !== 200) fail('CONVERSATION_TOOL_CATALOG_REQUIRED')
   if (response.status === 404) return null
   const catalog = await readNativeJson(response)
   if (catalog?.schemaVersion !== '1' || !Array.isArray(catalog.tools) || !Array.isArray(catalog.skills)) fail('CONVERSATION_TOOL_CATALOG_INVALID')
+  if (requireEmpty && (!current() || catalog.tools.length || catalog.skills.length)) fail('CHAT_METERED_ROUTE_UNAVAILABLE')
   if (!catalog.tools.length && !catalog.skills.length) return null
   if (catalog.tools.some(t => !id(t.name) || t.type !== 'function' || !t.inputSchema || typeof t.description !== 'string')
       || new Set(catalog.tools.map(t => t.name)).size !== catalog.tools.length) fail('CONVERSATION_TOOL_CATALOG_INVALID')

@@ -562,3 +562,9 @@ API. A complete authenticated directory scan is needed before removing a worker;
 partial reads preserve healthy transports. Secrets never enter Agent profiles or
 journals. Management outages and revoked grants do not suspend billing or delete
 self-hosted assets. Reuse existing installation/session identities on upgrade.
+
+### 计划切换前核对本地议事计量回执
+
+用现有运行用户执行 `node runtime/agent-runtime.mjs inspect-discussion-receipts --config <现用host.json> --subject <完整subjectKey>`。静态主体按 host 配置定位；启用托管时，另核同 host 私有日志：已接管静态主体须与原配置一致，仅动态托管的主体须与已落盘的主体标记和安装 manifest 一致。只读检查不初始化托管控制器，也不接受调用者指定收件目录。仅逐份核对该主体已发现的议事计量原件与持久回执，输出来源总数、已确认、待确认和无法核实数；不加载 provider 环境或执行引擎、不联网、不触发执行、不补写回执。空目录或任一待确认/无法核实均返回2；主体无效、目录缺失或不可安全枚举时失败，不作空目录处理。退出0只表示此次扫描的非空来源均已确认，不表示计量覆盖完整或预算有效。切换前须另证所选配置与全部受影响主体/节点对应、受理暂停且无新增写入，不得把命令当作停机许可。
+
+同一只读命令可加 `--expected-sources <私有JSON文件>`，输入为控制面名册中一个完整的 `devices[i]` 条目（保留 `origin` 和 `manifest`，不能只传 `manifest`）。命令按本机配置和安装清单核对租户、客户端、主体、安装与 host；不据此认定实时会话或代次仍有效。清单须由独立控制面固定，覆盖该主体目录内本轮核对的全部来源，不从设备反推；缺少独立清单时不作完整性结论。命令在同一次逐修订扫描中比对已封口来源身份，不公开ID；`missing`、`unexpected`、待确认或不可核实任一非零都不能通过。重复ID、空清单、主体不符或不安全的清单文件直接失败。即使通过也不代替原派发归属、停止新增与全集证明。

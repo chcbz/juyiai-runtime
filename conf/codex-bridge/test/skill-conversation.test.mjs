@@ -856,3 +856,9 @@ test('attachment commit binds the exact metadata requestId and never uploads byt
   },runNative:async req=>{for(let i=0;i<2;i++)assert.deepEqual(await req.exchangeBusiness('fixture',{ref:'ref'},new AbortController().signal,'commit',new Blob([new Uint8Array(131072)])),{confirmed:true});return f.options.runNative(req)}})
   assert.equal((await lane.poll()).processed,1);assert.deepEqual(verbs,['commit','receipt','receipt'])
 })
+test('reconstructed native lane derives first-turn permission only from server EXECUTE work',async t=>{
+  const f=fixture(t),seen=[];const options={...f.options,runNative:async req=>{seen.push(req.mayStartTurn);throw Object.assign(Error('fixture unknown'),{code:'SKILL_RESULT_UNKNOWN'})},fetchFn:async(url,opts)=>{
+    if(!url.pathname.endsWith('/resume'))return f.options.fetchFn(url,opts)
+    const raw=await f.options.fetchFn(url,opts),env=await raw.json();return response(url,{...env.data,allowedWork:['QUERY_EFFECT','RECOVER_LOCAL_RESULT']})
+  }};await partial(new SkillConversationLane(options).poll(),'SKILL_RESULT_UNKNOWN');await partial(new SkillConversationLane(options).poll(),'SKILL_RESULT_UNKNOWN');assert.deepEqual(seen,[true,false]);assert.equal(f.modelCalls(),0)
+})

@@ -45,7 +45,7 @@ import { isManagementMessage } from './skill-management-wire.mjs'
 import { SkillInstallManager, WORK_RESULT_RECEIPT_TYPE, defaultSkillInstallStateRoot } from './skill-install-manager.mjs'
 import { materialProfileFromInputCarriers } from './skill-config-candidate.mjs'
 import { SkillConversationLane } from './skill-conversation.mjs'
-import { nativeExecutionRequestBinding, runNativeExecution } from './native-execution.mjs'
+import { compareProspectiveTaskConfiguration, nativeExecutionRequestBinding, runNativeExecution } from './native-execution.mjs'
 import { initializeNativeToolchain } from './native-document-toolchain.mjs'
 import { loadNativeSkillConfiguration } from './native-skill-config.mjs'
 import { createLocalScriptRunner } from './skill-runners/local-script.mjs'
@@ -3014,6 +3014,9 @@ export class AgentMessageProcessor {
       const claimed = preEngineRecovery ? this.chatInbox.claimPreEngineInspection(item.key) : this.chatInbox.claim(item.key); if (!claimed) { this.activeChats.delete(item.key); return }
       active.state = 'STARTING'; active.item = claimed; this.chatActive = true
       const controls = {
+        ...(Object.hasOwn(claimed.record.message.contextSnapshot?.facts || {}, 'taskUsageCapture') ? {
+          openDiscussion: (runtime, current) => runtime.openDiscussionAdapter(this.chatInbox, claimed.key, current)
+        } : {}),
         markPrepared: preparation => { active.state = 'PREPARED'; this.chatInbox.markPrepared(claimed, preparation) },
         recordUsage: (phase, model, evidence) => { if (this.chatInbox.recordUsage(claimed, phase, model, evidence)) this.onChatUsagePending() },
         markRunning: (cancel, engine = {}) => { active.state = 'RUNNING'; active.cancel = cancel; this.chatInbox.markRunning(claimed, engine); if (active.cancelRequested && cancel) void Promise.resolve(cancel()).catch(() => {}) },
@@ -4659,17 +4662,33 @@ const appServerReadbackSummary = adapter => {
   }
 }
 
+const discussionLeaseKey = Symbol('claimed-discussion')
+// The tool catalog and inbox are authenticated separately; no caller-provided adapter or legacy fallback.
+export async function runClaimedDiscussion(profile, message, { controls, runtime, catalog, bindingStore, current, sendProtocolFn }) {
+  if (!Object.hasOwn(message.contextSnapshot?.facts || {}, 'taskUsageCapture') || !current() || !runtime ||
+      !controls.openDiscussion || !resolveActionChatRequest(profile,message) || contextDeliveryPlan(message)?.mode !== 'BOOTSTRAP' ||
+      message.contextSnapshot.facts.materialsInput) throw new AgentProtocolError('CHAT_METERED_ROUTE_UNAVAILABLE', 'Bound text discussion required')
+  await prepareConversationTools({ ...catalog, current, message, requireEmpty:true })
+  if (!current()) throw new AgentProtocolError('CHAT_METERED_ROUTE_UNAVAILABLE', 'Device session changed')
+  const lease = await controls.openDiscussion(runtime,current)
+  try {
+    if (!current() || ['tenantId','ownerJiacn','clientId','requestId','turnId','messageId','dispatchId','contextHash','dedupeKey'].some(k => lease.message[k] !== message[k]))
+      throw new AgentProtocolError('CHAT_METERED_ROUTE_UNAVAILABLE', 'Claimed discussion differs from tool lookup')
+    return await runFastChat(profile, lease.message, { [discussionLeaseKey]:lease, controls, bindingStore, sendProtocolFn })
+  } finally { await lease.close() }
+}
 export const runFastChat = async (profile, message, {
   adapter = null, adapterPromise = null, bindingStore = null, controls = { markRunning: () => {}, isCancelled: () => false },
   fallback = null, sendProtocolFn = sendProtocol, chatWorkdir = profile.chatWorkdir, getAppServerFailure = () => null,
   enginePolicyHash = '', instructionSourceHash = '', modelConfigHash = '', toolPolicyHash = '',
-  materialsRuntime = null, materialsMaterializer = null, materialsInputAdapters = {}, conversationToolSession = null, conversationRuntime = null, warmChatOptions = {}
+  [discussionLeaseKey]:discussion = null, materialsRuntime = null, materialsMaterializer = null, materialsInputAdapters = {}, conversationToolSession = null, conversationRuntime = null, warmChatOptions = {}
 } = {}) => {
   const modern = message?.durable === true || (message?.ackRequired === true && message?.deliverySemantics === 'AT_LEAST_ONCE_DURABLE_DEDUPE_REQUIRED')
   const legacy = (reason, secureBoundaryRequired = false) => {
     if (fallback) return fallback({ routeUsed: 'CHAT_LEGACY_FALLBACK', fallbackReason: reason, modern, secureBoundaryRequired })
     throw new AgentProtocolError('AGENT_FAST_PATH_UNAVAILABLE', reason)
   }
+  if (Object.hasOwn(message.contextSnapshot?.facts || {}, 'taskUsageCapture') && !discussion) throw new AgentProtocolError('CHAT_METERED_ROUTE_UNAVAILABLE', 'An enrolled turn requires a bound metered provider route')
   // Only explicit old protocol may use the compatibility runner. Modern durable CHAT never falls through to legacy execution.
   if (message.legacy || !modern) return legacy('LEGACY_CHAT_PROTOCOL', false)
   const requestedRoute = message.route === undefined ? (message.routing?.interactionMode || 'CHAT') : message.route
@@ -4690,8 +4709,9 @@ export const runFastChat = async (profile, message, {
     throw new AgentProtocolError('FAST_CHAT_ENGINE_UNSUPPORTED', 'Modern durable CHAT requires app-server; legacy workspace execution is forbidden')
   }
   if (!message.contextSnapshot) throw new AgentProtocolError('FAST_CHAT_CONTEXT_REQUIRED', 'Modern durable CHAT requires contextSnapshot')
-  let selectedAdapter = adapter
-  let preparedMaterials = null, conversationKey = null, materialEngineBinding = null
+  let selectedAdapter = discussion?.adapter || adapter
+  if (discussion) chatWorkdir = selectedAdapter.typedInspectionEngineState.chatWorkdir
+  let preparedMaterials = null, conversationKey = discussion?.conversationKey || null, materialEngineBinding = null
   let warmOpened = false, materialsOpened = false, turnAttempted = false, turnCompleted = false
   try {
     if (materials) {
@@ -4745,7 +4765,7 @@ export const runFastChat = async (profile, message, {
     const engineIdentity = conversationState ? {
       cliVersion: measuredSchema.cliVersion || null, binaryIdentityDigest: measuredSchema.binaryIdentityDigest || null,
       schemaContractId: measuredSchema.schemaContractId || null, bundleSha256: measuredSchema.bundleSha256 || null,
-      configDigest: conversationState.configDigest
+      configDigest: (conversationState.memoryConfigDigest || conversationState.configDigest)
     } : { initialize: selectedAdapter.readback?.initialize || {}, measuredSchema }
     const baseEnginePolicyHash = enginePolicyHash
       ? (typedRequest ? canonicalSha256({ base: enginePolicyHash, typedContractBinding }) : enginePolicyHash)
@@ -4755,7 +4775,7 @@ export const runFastChat = async (profile, message, {
     const effectiveInstructionSourceHash = instructionSourceHash
       ? (typedRequest ? canonicalSha256({ base: instructionSourceHash, typedContractBinding }) : instructionSourceHash)
       : canonicalSha256({ source: 'runtime-static', instructions: developerInstructions, ...(typedRequest ? { typedContractBinding } : {}) })
-    const effectiveModelConfigHash = modelConfigHash || canonicalSha256({ model: profile.chatModel || profile.codexModel || 'default', effort: profile.chatReasoningEffort || '', ...(conversationState ? { configDigest: conversationState.configDigest } : { models: selectedAdapter.readback?.models || {}, config: selectedAdapter.readback?.config || {} }) })
+    const effectiveModelConfigHash = modelConfigHash || canonicalSha256({ model: profile.chatModel || profile.codexModel || 'default', effort: profile.chatReasoningEffort || '', ...(conversationState ? { configDigest: (conversationState.memoryConfigDigest || conversationState.configDigest) } : { models: selectedAdapter.readback?.models || {}, config: selectedAdapter.readback?.config || {} }) })
     const key = buildThreadKey({ tenantId: message.tenantId, clientId: message.clientId, ownerJiacn: message.ownerJiacn, profileId: profile.profileId, agentId: profile.agentId, conversationId: message.conversationId, mode: 'CHAT', workspaceScopeHash: 'none', cwd: chatWorkdir, enginePolicyHash: effectiveEnginePolicyHash, toolPolicyHash: effectiveToolPolicyHash, instructionSourceHash: effectiveInstructionSourceHash, modelConfigHash: effectiveModelConfigHash, conversationGeneration: String(message.conversationGeneration), taskAuthorityDigest: chatTaskAuthorityDigest(message) })
     metrics.queueAt = Date.now()
     const prior = materials ? bindingStore?.get(key) || null : bindingStore?.get(key)
@@ -4768,12 +4788,12 @@ export const runFastChat = async (profile, message, {
     if (materials) await controls.markPrepared({ schemaVersion: 1, contract: 'juyiting-materials-chat-v1', authorizationId: materials.authorizationId, manifestDigest: materials.manifestDigest,
       conversationKey: conversationKey, engineStateBinding: materialEngineBinding,
       inputDirectory: preparedMaterials.inputDirectory, inspectionInputReceiptDraft: preparedMaterials.inspectionInputReceiptDraft, threadKey: key, engineThreadId: binding.threadId })
-    if (warmOpened) await controls.markPrepared({ schemaVersion: 1, contract: 'juyiting-action-chat-preparation-v1',
+    if (warmOpened || discussion) await controls.markPrepared({ schemaVersion: 1, contract: 'juyiting-action-chat-preparation-v1',
       conversationKey, threadKey: key, engineThreadId: binding.threadId })
     metrics.engineStartAt = Date.now()
     let acceptedTurn = null; let typedStreamError = null; let nativeDeltaObserved = false
     const decoder = typedRequest ? new TypedUserReplyStreamDecoder() : null
-    const recordRecovery = reason => (materials || warmOpened)
+    const recordRecovery = reason => (materials || warmOpened || discussion)
       ? bindingStore?.put(key, { ...binding, state: 'RECOVERY_REQUIRED', recoveryReason: reason, recoveryMessageId: message.messageId, updatedAt: Date.now() })
       : bindingStore?.markRecovery(key, reason)
     try {
@@ -4862,10 +4882,12 @@ export const recoverActionChat = async (profile, message, record, {
     const key = finalPrepared.result.threadKey, prior = bindingStore?.get(key)
     if (prior?.threadId === finalPrepared.result.threadId && prior.state === 'RECOVERY_REQUIRED' && prior.recoveryMessageId === message.messageId)
       bindingStore.put(key, { ...prior, state: 'IDLE', recoveryReason: null, recoveryMessageId: null, updatedAt: Date.now() })
-    if (record.preparation?.conversationKey) await profileRuntime?.finishWarmChatAdapter(record.preparation.conversationKey, message.dedupeKey || message.messageId)
+    if (!Object.hasOwn(message.contextSnapshot?.facts || {}, 'taskUsageCapture') && record.preparation?.conversationKey) await profileRuntime?.finishWarmChatAdapter(record.preparation.conversationKey, message.dedupeKey || message.messageId)
     return result
   }
   if (record.finalPrepared) return publish(record.finalPrepared)
+  // A lost result is not permission to start a new provider-backed engine.
+  if (Object.hasOwn(message.contextSnapshot?.facts || {}, 'taskUsageCapture')) return { status:'recovery_required', reconciliationStatus:'ACCEPTANCE_UNKNOWN' }
   const preparation = record.preparation
   if (preparation?.schemaVersion !== 1 || preparation.contract !== 'juyiting-action-chat-preparation-v1' || !preparation.threadKey)
     throw new AgentProtocolError('CHAT_RECOVERY_BINDING_INVALID', 'Original conversation preparation required')
@@ -5603,7 +5625,9 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
   const chatInbox = new PersistentChatInbox({ rootDir: profileConfig.commandInboxDir, profile })
   const chatAckOutbox = new ChatAckOutbox({ rootDir: profileConfig.commandInboxDir, profile })
   const chatUsageDelivery = profile.runtimeIdentity ? new ChatUsageDelivery({ inbox: chatInbox,
-    apiOrigin: profile.runtimeApiOrigin, nativeFetch }) : null
+    apiOrigin: profile.runtimeApiOrigin, nativeFetch, scope:{agentId:profile.runtimeIdentity.canonicalAgentId,
+      clientId:profile.runtimeIdentity.clientId,tenantId:profile.runtimeIdentity.tenantId} }) : null
+  if(chatUsageDelivery)chatInbox.noteDiscussionSource=key=>{chatUsageDelivery.noteSource(key);getProfileState(profile)?.conversationNativeWakeup?.arm(Date.now())}
   const threadBindingStore = new ThreadBindingStore({ rootDir: profileConfig.commandInboxDir, profile }).initialize()
   const chatWorkdir = prepareChatWorkdir({
     rootDir: resolve(profileConfig.commandInboxDir, 'chat-workdirs'), profile,
@@ -5852,6 +5876,11 @@ const createProfileState = (profile, profileConfig = config, { deferNativeStartu
       const generation = transport?.ready?.() ? transport.headers()['X-Agent-Session-Generation'] : null
       const current = () => !state.disposed && !controls.isCancelled() && state.runtimeTransport === transport
         && transport?.ready?.() && transport.headers()['X-Agent-Session-Generation'] === generation
+      if (Object.hasOwn(message.contextSnapshot?.facts || {}, 'taskUsageCapture')) {
+        if (!current()) throw new AgentProtocolError('CHAT_METERED_ROUTE_UNAVAILABLE', 'Current device session required')
+        return runClaimedDiscussion(profile, message, { controls, runtime:state.typedInspectionProfileRuntime, current,
+          bindingStore:threadBindingStore, catalog:{ apiOrigin:profile.runtimeApiOrigin, nativeFetch:transport.nativeFetch } })
+      }
       // Attached-material sessions already have their own isolated adapter. They do not
       // inherit maintenance callbacks; the catalog does not grant a new filesystem view.
       const conversationToolSession = transport && !message.contextSnapshot?.facts?.materialsInput
@@ -6312,6 +6341,12 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
         },
         bindSkillSession: binding => bindMeasuredSkillSession(entry.state, binding),
         bindWorkNotifications: version => { entry.state.nativeWorkNotifications = version === 1 ? 1 : null },
+        comparePreparedLocalTask: outputs => {
+          const runtime=entry.state?.nativeExecutionProfileRuntime
+          if (!runtime || entry.closed || entry.state.disposed || entry.state.profileClosing) return null
+          return compareProspectiveTaskConfiguration(runtime,{scopeKind:'TASK',outputs,entries:[],skillConfiguration:[],
+            toolPolicyRef:'NATIVE_LOCAL_FILES_V1',privateTools:null},true)
+        },
         nativeWorkAvailable: () => { entry.state.conversationNativeWakeup?.wake() },
         matchesSkillManagementAck: envelope => entry.state?.skillInstallManager.matchesDurableAckEnvelope(envelope) === true,
         matchesSkillInstallResult: envelope => entry.state?.skillInstallManager.matchesDurableResultEnvelope(envelope) === true,

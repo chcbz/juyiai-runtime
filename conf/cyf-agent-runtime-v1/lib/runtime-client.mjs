@@ -140,11 +140,19 @@ export const skillConversationHttpScope = (endpoint, options = {}) => {
   if (decoded === null) return false
   // Retired task-addressed execution routes must not pass as unrelated APIs.
   if (/^\/internal\/agent\/tasks\/(?:conversation-executions|[^/]+\/runs\/[^/]+\/conversation)(?:\/|$)/.test(decoded)) return false
+  if (/^\/internal\/agent\/chat\/dispatches(?:\/|$)/.test(decoded)) {
+    if(endpoint.href.includes('?')||endpoint.hash||endpoint.pathname!==decoded)return false
+    const id='[A-Za-z0-9][A-Za-z0-9._:-]{0,99}',sha='[a-f0-9]{64}',method=(options.method||'GET').toUpperCase()
+    const base=`/internal/agent/chat/dispatches/${id}`,capture=`${base}/turns/${id}/contexts/${sha}/captures/${sha}/usage`
+    return method==='POST' && new RegExp(`^(?:${base}/usage|${capture})$`).test(decoded)
+      || method==='GET' && options.body==null && new RegExp(`^${capture}/(?:receipts/${id}|records/${sha})$`).test(decoded)
+  }
   if (!/^\/internal\/agent\/executions(?:\/|$)/.test(decoded)) return true
   if (endpoint.href.includes('?') || endpoint.hash || endpoint.pathname !== decoded) return false
   const method = (options.method || 'GET').toUpperCase()
   if (endpoint.pathname === '/internal/agent/executions/commands') return method === 'GET' && options.body == null
   const id = '[A-Za-z0-9][A-Za-z0-9._:-]{0,99}'
+  if(method==='GET'&&options.body==null&&new RegExp(`^/internal/agent/executions/${id}/runs/${id}/usage/(?:receipts/${id}|records/[a-f0-9]{64})$`).test(endpoint.pathname))return true
   return method === 'POST' && new RegExp(`^/internal/agent/executions/${id}/runs/${id}/(?:lease(?:/renew)?|inputs(?:/${id}/content)?|effects/${id}/(?:start|result)|resume|outputs/${id}/content|result-commits/${id}|skill-selection|business/[a-z][a-z0-9-]{0,63}/(?:lookup|commit|receipt)|failure|usage|provider-usage)$`).test(endpoint.pathname)
 }
 

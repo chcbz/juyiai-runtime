@@ -1,3 +1,6 @@
+import { chatConversationKey } from './materials-chat.mjs'
+import { contextDeliveryPlan } from './chat-context-delivery.mjs'
+import { startDiscussionCapture } from './metered-request-capture.mjs'
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { chmodSync, existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
@@ -30,7 +33,7 @@ export class TypedInspectionProfileRuntime extends IsolatedEngineProfileRuntime 
     if (!DIGEST.test(conversationKey)) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_INVALID')
     return resolve(this.stateRoot, 'conversations', conversationKey.slice('sha256:'.length))
   }
-  _prepareConversationState(conversationKey, { requireExistingState = false } = {}) {
+  _prepareConversationState(conversationKey, { requireExistingState = false, meteredEgress = null } = {}) {
     const directory = this._conversationDirectory(conversationKey)
     if (requireExistingState && (!existsSync(resolve(directory, 'binding.json')) || !existsSync(resolve(directory, 'codex-home'))))
       fail('TYPED_INSPECTION_RECOVERY_STATE_MISSING')
@@ -38,7 +41,72 @@ export class TypedInspectionProfileRuntime extends IsolatedEngineProfileRuntime 
     const markerPath = stateMarker(directory, { schemaVersion: 1, conversationKey })
     return { directory, conversationDirectory: directory, conversationKey, markerPath,
       sandboxStatePath: directory, chatWorkdir: ensurePrivateDirectory(resolve(directory, 'chat')),
-      ...stageCodexHome(this.profile, directory) }
+      ...stageCodexHome(this.profile, directory, { meteredDiscussion: Boolean(meteredEgress), meteredEgress }) }
+  }
+  // Only the durable inbox supplies the message. Never publish this adapter to the shared profile.
+  async openDiscussionAdapter(inbox, key, current = () => true) {
+    const { message } = inbox.discussionCaptureSubject(key, false)
+    const facts = message.contextSnapshot.facts, profile = this.profile
+    if (this.disposed || message.targetAgentId !== profile.agentId || usesChatFiles(profile) ||
+        ![5, 6].includes(facts.typedDeliberation?.schemaVersion) || 'materialsInput' in facts || 'typedInspection' in facts ||
+        contextDeliveryPlan(message)?.mode !== 'BOOTSTRAP' || facts.contextDelivery.replacesDispatchId ||
+        profile.typedInspectionProviderNetwork !== 'restricted-proxy' ||
+        message.dedupeKey !== `${message.tenantId}:${message.ownerJiacn}:${message.clientId}:${message.dispatchId}`) fail('CHAT_METERED_ROUTE_UNAVAILABLE')
+    const conversation = chatConversationKey(profile, message)
+    if (this.warmChatAdapters?.has(conversation)) await this._closeWarmChat(conversation)
+    if (this.disposed || this.conversationOwners?.has(conversation)) fail('TYPED_INSPECTION_CONVERSATION_IN_USE')
+    const slot = { conversation }
+    this.discussions ||= new Map(); this.conversationOwners ||= new Map()
+    this.conversationOwners.set(conversation, slot); this.discussions.set(conversation, slot)
+    const checkActive = () => {
+      if (!current() || this.disposed || slot.closing || this.conversationOwners.get(conversation) !== slot) fail('CHAT_METERED_ROUTE_UNAVAILABLE')
+    }
+    slot.start = (async () => {
+      const schema = await this.measureBinary(profile); checkActive()
+      const channelNamespace = canonicalSha256(['METERED_PROVIDER_NAMESPACE_V1', profile.typedInspectionProviderId,
+        new URL(profile.typedInspectionProviderBaseUrl).href.replace(/\/$/, '')]).slice(7)
+      slot.capture = await startDiscussionCapture(inbox, key, { executionConfigSha256:canonicalSha256([conversation, schema.binarySha256, channelNamespace]).slice(7),
+        engineVersion:`codex-cli-${schema.cliVersion}`, rootSourceId:'source_model', channelNamespace, adapterVersion:'RESPONSES_TEXT_TOKENS_V1', checkActive }); checkActive()
+      slot.egress = this._meteredEgress({ providerBaseUrl:profile.typedInspectionProviderBaseUrl,
+        networkConnectTimeoutMs:profile.typedInspectionNetworkConnectTimeoutMs }, slot.capture)
+      await slot.egress.start(); checkActive()
+      slot.state = this._prepareConversationState(conversation, { meteredEgress:slot.egress })
+      slot.inputs = ensurePrivateDirectory(mkdtempSync(resolve(this.materializerRoot, '.discussion-')))
+      slot.spawnAttempted = true
+      slot.adapter = await this._spawnAdapter({ inputDirectory:slot.inputs, engineState:slot.state, schemaMeasurement:schema,
+        networkMode:'provider-restricted', proxyUrl:slot.egress.proxyUrl }); checkActive()
+      await slot.egress.bindOwner(slot.adapter.child, this.bwrap); await slot.egress.attach(); checkActive()
+      await this._initializeAndSeal(slot.adapter); checkActive()
+      if (!emptyMcpCatalog(slot.adapter.readback.tools)) fail('TYPED_INSPECTION_NATIVE_MCP_CATALOG_NOT_EMPTY')
+    })()
+    try { await slot.start; checkActive() }
+    catch (error) { await this._closeDiscussion(slot); throw error }
+    return Object.freeze({ adapter:slot.adapter, message, conversationKey:conversation, close:() => this._closeDiscussion(slot) })
+  }
+  _closeDiscussion(slot) {
+    if (slot.finished) return Promise.resolve()
+    // A failed join retains the slot and HOME for a later close, not the next turn.
+    return slot.closing ||= (async () => {
+      await slot.start.catch(() => {})
+      slot.capture?.stopAdmission()
+      try { await slot.adapter?.shutdown({ timeoutMs:1000 }) } finally { await slot.egress?.dispose() }
+      const stopped = () => {
+        if ((slot.spawnAttempted && !slot.adapter?.childClosed) || (slot.egress && !slot.egress.lifecycle.signal.aborted) ||
+            this.conversationOwners.get(slot.conversation) !== slot) fail('METERED_PRODUCER_STOP_UNCONFIRMED')
+      }
+      // The writer still owns both child and egress fences. Persist local closure before releasing them;
+      // all network delivery remains in the independent usage lane.
+      stopped(); await slot.capture?.sealStopped(stopped)
+      if (slot.state?.authPath) rmSync(slot.state.authPath, { force:true })
+      if (slot.inputs) rmSync(slot.inputs, { recursive:true, force:true })
+      this.discussions.delete(slot.conversation); this.conversationOwners.delete(slot.conversation); slot.finished = true
+    })().catch(error => { slot.closing = null; throw error })
+  }
+  async dispose() {
+    this.disposed = true
+    const results = await Promise.allSettled([...(this.discussions?.values() || [])].map(slot => this._closeDiscussion(slot)))
+    if (results.some(r => r.status === 'rejected')) fail('TYPED_INSPECTION_SHUTDOWN_UNCONFIRMED')
+    await super.dispose()
   }
   async _closeWarmChat(conversationKey) {
     const active = this.warmChatAdapters?.get(conversationKey)

@@ -10,7 +10,7 @@ import { resolve } from 'node:path'
 import { canonicalSha256 } from '../chat-runtime.mjs'
 import { skillPackageTreeDigest } from '../skill-manifest.mjs'
 import { buildTypedInspectionCodexConfig } from '../typed-inspection-profile.mjs'
-import { buildNativeExecutionCodexConfig, loadNativeModelCatalog, nativeFilesystemPermissions, measureMinimalNativeExecutionToolchain, nativeExecutionMountArgs, prepareNativeExecutionLayout, validateNativeExecutionToolchain, verifyNativeExecutionConfig, verifyNativeExecutionSkillCatalog } from '../native-execution-profile.mjs'
+import { measureProspectiveNativeGroup, nativeDispatchGroup, buildNativeExecutionCodexConfig, loadNativeModelCatalog, nativeFilesystemPermissions, measureMinimalNativeExecutionToolchain, nativeExecutionMountArgs, prepareNativeExecutionLayout, validateNativeExecutionToolchain, verifyNativeExecutionConfig, verifyNativeExecutionSkillCatalog } from '../native-execution-profile.mjs'
 
 const sha256 = path => createHash('sha256').update(readFileSync(path)).digest('hex')
 const mkdir = path => { mkdirSync(path, { mode: 0o700 }); chmodSync(path, 0o700); return path }
@@ -816,4 +816,51 @@ test('native startup does not loop or retry permanent, cleanup, execution or dis
     assert.equal(runtime.nativeExecutionMeasurementPending, null)
     assert.deepEqual(runtime.nativeExecutionMeasurementFailure, { stage, code })
   }
+})
+
+test('prospective comparison measures actual installed policy without starting or requiring an execution', () => {
+  const f = fixture()
+  try {
+    const { skills, toolchain, stateRoot, nativeExecution } = f.options
+    const settings = { model:'model', effort:'medium', engineVersion:'engine', instructionsSha256:'instructions',
+      toolPolicyRef:'policy', binarySha256:'binary', channelNamespace:'namespace',coveragePolicyVersion:'unverified' }
+    const skillConfiguration = [{skillKey:skills[0].skillKey, configuration:{key:'synthetic-private'}, networkOrigins:[]}]
+    const launch = prepareNativeExecutionLayout({...f.options,skillConfiguration})
+    const expected = nativeDispatchGroup(launch.binding,settings)
+    rmSync(f.execution,{recursive:true})
+    const options = {skills,toolchain,stateRoot,skillConfiguration,tools:nativeExecution.tools,networkAccess:false,modelCatalogSha256:null}
+    const before = measureProspectiveNativeGroup(options,settings)
+    assert.deepEqual(before,expected); assert.deepEqual(Object.keys(before).sort(),['executionConfigSha256','routeSha256','toolConfigSha256','version'])
+    for (const key of ['skills','skillConfiguration','networkAccess','modelCatalogSha256']) assert.equal(measureProspectiveNativeGroup({...options,[key]:undefined},settings),null)
+    for (const key of Object.keys(settings)) assert.equal(measureProspectiveNativeGroup(options,{...settings,[key]:undefined}),null)
+    assert.notDeepEqual(measureProspectiveNativeGroup({...options,tools:[]},settings),expected)
+    assert.notDeepEqual(measureProspectiveNativeGroup({...options,skillConfiguration:[]},settings),expected)
+    writeFileSync(resolve(skills[0].packageRoot,'SKILL.md'),'changed')
+    assert.throws(() => measureProspectiveNativeGroup(options,settings),/SKILL_PACKAGE_CHANGED/)
+    assert.equal(existsSync(f.execution),false)
+  } finally { f.cleanup() }
+})
+
+test('prospective profile refuses an unverified binary and never warms up on a budget read', () => {
+  const f=fixture()
+  try {
+    const { runtime,counts }=stubRuntime(f)
+    runtime.profile.typedInspectionProviderId='provider';runtime.profile.typedInspectionProviderBaseUrl='https://provider.invalid'
+    runtime.nativeExecutionReadback={schemaVersion:1};runtime.nativeBinaryMeasurement={ measured:true, binarySha256:'a'.repeat(64), cliVersion:'1.2.3' }
+    runtime.measureBinary=()=>assert.fail('no executable measurement on budget read');runtime.egressFactory=()=>assert.fail('no provider call')
+    assert.equal(runtime.prospectiveNativeGroup({}),null);assert.equal(counts().spawns,0)
+  } finally { f.cleanup() }
+})
+
+test('task pre-dispatch uses the artifact owner output tool contract and rejects unresolved or private selections',async()=>{
+  const {compareProspectiveTaskConfiguration}=await import('../native-execution.mjs')
+  const {NativeArtifactSession}=await import('../native-artifact-session.mjs')
+  const call={prospectiveNativeGroup: input=>input}, intent={scopeKind:'TASK',outputs:{dataSchema:null},entries:[],skillConfiguration:[],privateTools:null,toolPolicyRef:'NATIVE_LOCAL_FILES_V1'}
+  for(const dataSchema of [null,{type:'string'}]) {
+    const outputs={dataSchema}, session=new NativeArtifactSession({store:{command:{executionProtocolVersion:6,outputs}},checkActive(){},validateSnapshot(){}})
+    const inputs=compareProspectiveTaskConfiguration(call,{...intent,outputs});assert.deepEqual(inputs.tools,session.policy().tools)
+    assert.match(inputs.instructionsSha256,/^[0-9a-f]{64}$/);assert.equal(inputs.networkAccess,false)
+  }
+  for(const change of [{scopeKind:'PRIVATE'},{outputs:{}},{entries:undefined},{skillConfiguration:undefined},{privateTools:undefined},{privateTools:{tools:[]}}, {toolPolicyRef:'NATIVE_SKILL_SCRIPT_V1'}])
+    assert.equal(compareProspectiveTaskConfiguration(call,{...intent,...change}),null)
 })

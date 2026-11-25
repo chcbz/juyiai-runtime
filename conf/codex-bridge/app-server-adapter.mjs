@@ -219,6 +219,12 @@ const binaryIntegrityState = (profile, measurement) => {
 export const binaryVerificationState = measurement => verifiedBinaryStates.get(measurement)
 const sameVerificationState = (left, right) => JSON.stringify(left) === JSON.stringify(right)
 
+/** Read-only reuse of a locally verified measurement. Never launch a version probe or repair a stale record. */
+export function isCurrentAppServerMeasurement(profile, measurement) {
+  try { return verifiedBinaryStates.has(measurement) && sameVerificationState(verifiedBinaryStates.get(measurement), binaryIntegrityState(profile, measurement)) }
+  catch { return false }
+}
+
 export function verifyCodexAppServerBinaryIdentity(profile, measurement) {
   try {
     if (!measurement?.measured || !id(measurement.snapshotPath) || process.platform !== 'linux') throw failTrust('CODEX_APP_SERVER_MEASUREMENT_REQUIRED')
@@ -419,7 +425,7 @@ export const measureCodexAppServerBinaryAsync = (profile, { environment } = {}) 
 export class AppServerAdapter extends EventEmitter {
   static async spawnAsync(profile, options = {}) {
     let measurement = options.schemaMeasurement
-    const current = () => { try { return sameVerificationState(verifiedBinaryStates.get(measurement), binaryIntegrityState(profile, measurement)) } catch { return false } }
+    const current = () => isCurrentAppServerMeasurement(profile, measurement)
     // Reuse only this process's successful measurement while metadata is exact.
     // No TTL/path-only trust and no async gap between final stat guard and spawn.
     if (!measurement?.measured) throw failTrust('CODEX_APP_SERVER_MEASUREMENT_REQUIRED')

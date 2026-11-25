@@ -858,3 +858,21 @@ test('new managed materialization creates exact auth baseline, resumes missing h
   await writeFile(authPath, 'conflict'); await assert.rejects(f.control().materializeConfig(agent, subject.template), code('HOSTING_STATE_UNCONFIRMED'));
   assert.equal(await readFile(authPath, 'utf8'), 'conflict');
 });
+
+
+test('receipt inspection resolves the materialized hosted subject without reconciliation or a new session', async t => {
+  const { receiptInspectionAgent } = await import('../lib/hosting-control.mjs');
+  const f = await hostingFixture(t), config = { ...f.hostConfig, hostingControl: f.controlConfig };
+  const prepared = await f.control().handle(prepare), key = runtimeSubjectKey(prepared.manifest);
+  const inspect = (k=key) => receiptInspectionAgent(config,k);
+  const root = resolve(f.controlConfig.managedRoot,key);
+  await assert.rejects(inspect()); await assert.rejects(lstat(root), {code:'ENOENT'});
+  await f.control().handle(candidateRequest(prepare,prepared,'ensure')); await f.settle();
+  const journal = await readFile(f.control().path), sessions=f.sessionCount(), enrollments=f.enrollmentCount();
+  const agent=await inspect(); assert.deepEqual(agent,{ subjectKey:key, stateRoot:resolve(root,'state'),manifest:prepared.manifest,profile:{agentId:prepared.manifest.canonicalAgentId} });
+  assert.equal(await inspect(f.peers[0].subjectKey),f.peers[0]);
+  for (const unknown of ['x','../'+key,'f'.repeat(64)]) await assert.rejects(inspect(unknown));
+  const file=resolve(root,'subject.json'); await writePrivateJson(file,{manifest:f.peers[0].manifest}); await assert.rejects(inspect(),code('RUNTIME_EXACT_SUBJECT_REQUIRED'));
+  await rm(file); await assert.rejects(inspect()); await assert.rejects(lstat(file),{code:'ENOENT'});
+  assert.deepEqual(await readFile(f.control().path),journal); assert.equal(f.sessionCount(),sessions); assert.equal(f.enrollmentCount(),enrollments);
+});

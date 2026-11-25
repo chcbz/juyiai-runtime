@@ -1,3 +1,5 @@
+import { deliverMetered,meteredBatch } from './metered-usage-delivery.mjs'
+import { recoverStoppedMeteredRoot } from './metered-capture-closure.mjs'
 import { pendingProviderUsage } from './provider-usage-receipts.mjs'
 import { pendingNativeUsage, acknowledgeNativeUsage } from './native-usage-receipts.mjs'
 import { readNativeJson } from './native-json.mjs'
@@ -34,12 +36,12 @@ export class SkillUsageDelivery {
     if (endpoint.origin !== this.origin || endpoint.pathname !== path || endpoint.search || endpoint.hash) fail('SKILL_API_PATH_INVALID')
     const proof = this.headers(), headers = { ...proof, Accept: 'application/json' }
     if (call?.selectedInstallation) headers['X-Cyf-Selected-Installation']=call.selectedInstallation
-    if (call) headers['X-Request-Id'] = call.requestId
+    if(call){headers['X-Request-Id']=call.requestId;if(method==='POST' && call.callId)headers['Idempotency-Key']=call.callId}
     if (body !== undefined && !(body instanceof FormData)) headers['Content-Type'] = 'application/json'
     let response
-    try { response = await this.fetch(endpoint, { method, redirect: 'error', headers, ...(call ? {signal:call.signal} : {}),
+    try { response = await this.fetch(endpoint, { method, redirect: 'error', headers, ...(call?{signal:call.signal}:{}),
       ...(body === undefined ? {} : { body: body instanceof FormData ? body : JSON.stringify(body) }) }) }
-    catch (cause) { fail('SKILL_TRANSPORT_UNKNOWN', cause) }
+    catch (cause) { if(JSON.stringify(proof)!==JSON.stringify(this.headers()))fail('SKILL_SESSION_CHANGED');fail('SKILL_TRANSPORT_UNKNOWN', cause) }
     if (JSON.stringify(proof) !== JSON.stringify(this.headers())) {
       try { await response?.body?.cancel?.() } catch {}
       fail('SKILL_SESSION_CHANGED')
@@ -59,6 +61,7 @@ export class SkillUsageDelivery {
   resetPendingDiscovery() { this.pendingExecutionIds = null }
 
   pendingCommands() {
+    this.pendingMetered = []
     this.pendingCommandErrors = []
     this.pendingUsage = []; this.pendingUsageErrors = []
     const subject = resolve(this.root, skillDigest({ ...this.scope, apiOrigin: this.origin }))
@@ -78,7 +81,9 @@ export class SkillUsageDelivery {
       try {
         const stat = fstatSync(fd)
         if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.geteuid() || (stat.mode & 0o077)) fail('SKILL_STORE_UNSAFE')
-        try { command = parseSkillCommand(readFileSync(fd)) } catch (error) {
+        try {
+          command = parseSkillCommand(readFileSync(fd))
+        } catch (error) {
           // Historical commands without a current authority binding are not executable.
           // Preserve them and report their failure, but do not starve unrelated current work.
           if (error?.code !== 'SKILL_COMMAND_INVALID') throw error
@@ -89,8 +94,13 @@ export class SkillUsageDelivery {
       if (command.executionId !== id) fail('SKILL_STORE_IDENTITY_CONFLICT')
       const store = new SkillExecutionStore({ rootDirectory: this.root, scope: { ...this.scope, apiOrigin: this.origin }, command })
       try {
-        const usage = pendingNativeUsage(store), planner = command.skills.length>1 ? pendingNativeUsage(store,'planner') : null
-        for (const item of [...(usage ? [usage] : []), ...(planner ? [planner] : []), ...pendingProviderUsage(store)]) { this.pendingUsage.push({ command, store, ...item }); unresolved.add(id) }
+        const metered=command.usageMode==='RESPONSE_V2'
+        if (metered) {
+          this.pendingMetered.push({store,command}); unresolved.add(id)
+        } else {
+          const usage = pendingNativeUsage(store), planner = command.skills.length>1 ? pendingNativeUsage(store,'planner') : null
+          for (const item of [...(usage ? [usage] : []), ...(planner ? [planner] : []), ...pendingProviderUsage(store)]) { this.pendingUsage.push({ command, store, ...item }); unresolved.add(id) }
+        }
       } catch (error) {
         if (!['NATIVE_USAGE_RECEIPT_CONFLICT', 'NATIVE_USAGE_SOURCE_MISSING', 'PROVIDER_USAGE_SOURCE_INVALID'].includes(error?.code)) throw error
         this.pendingUsageErrors.push({ executionId: id, code: error.code }); unresolved.add(id)
@@ -104,7 +114,7 @@ export class SkillUsageDelivery {
     this.pendingExecutionIds = unresolved
     return pending
   }
-  async deliverPendingUsage() {
+  async deliverPendingUsage(live=true) {
     const errors = [...(this.pendingUsageErrors || [])]
     for (const item of this.pendingUsage) {
       const { command, store } = item
@@ -124,6 +134,16 @@ export class SkillUsageDelivery {
         errors.push({ executionId: command.executionId, code: error?.code || 'NATIVE_USAGE_DELIVERY_FAILED' })
       }
     }
+    if(live){
+      const batch=meteredBatch(),list=this.pendingMetered||[],start=(this.meteredCursor||0)%Math.max(1,list.length)
+      for(let i=0;i<list.length&&batch.left&&Date.now()<batch.until;i++){
+        const index=(start+i)%list.length,{store,command}=list[index];this.meteredCursor=index+1
+        const retry=this.usageRetries.get(command.executionId);if(retry&&this.now()<retry.nextAt)continue
+        try{await deliverMetered(store,this.request.bind(this),batch);this.usageRetries.delete(command.executionId)}
+        catch(error){if(/^SKILL_(?:SESSION|STORE|SCOPE)_/.test(error.code||''))throw error
+          const attempt=Math.min((retry?.attempt||0)+1,6);this.usageRetries.set(command.executionId,{attempt,nextAt:this.now()+Math.floor(Math.min(300000,15000*2**(attempt-1))*(0.8+0.2*this.random()))});errors.push({executionId:command.executionId,code:error.code||'METERED_USAGE_DELIVERY_FAILED'})}
+      }
+    }
     return errors
   }
 
@@ -136,14 +156,26 @@ export class SkillUsageDelivery {
       this.resetPendingDiscovery()
       this.pendingCommands()
       errors.push(...this.pendingCommandErrors.map(({ executionId, error }) => ({ executionId, code: error.code })))
-      errors.push(...await this.deliverPendingUsage())
+      errors.push(...await this.deliverPendingUsage(false))
       if (errors.length || !this.pendingUsage.length) break
     }
     this.resetPendingDiscovery()
     this.pendingCommands()
+    // Only flush() is called by the stopped subject under its QUIESCED writer gate.
+    // Discovery alone (also used live) is never permission to close a producer.
+    const captureStates=[],batch=meteredBatch();let outstanding=this.pendingMetered.length
+    for(const {store,command} of this.pendingMetered){
+      try {
+        const marker=await recoverStoppedMeteredRoot(store,()=>{
+          if(store.commandDigest!==skillDigest(command)) fail('SKILL_STORE_IDENTITY_CONFLICT')
+        })
+        const complete=await deliverMetered(store,this.request.bind(this),batch,true);if(complete)outstanding--
+        captureStates.push({executionId:command.executionId,captureState:'FINALIZED',closeState:marker.closeState,deliveryState:complete?'ACKED':'PENDING_ACK'})
+      }catch(error){errors.push({executionId:command.executionId,code:error?.code||'METERED_CAPTURE_RECOVERY_FAILED'})}
+    }
     const remainingErrors = [...this.pendingUsageErrors,
       ...this.pendingCommandErrors.map(({ executionId, error }) => ({ executionId, code: error.code }))]
-    return { confirmed: !errors.length && !remainingErrors.length && !this.pendingUsage.length,
-      pending: this.pendingUsage.length, errors: errors.length ? errors : remainingErrors }
+    return { confirmed: !errors.length && !remainingErrors.length && !this.pendingUsage.length && !outstanding,
+      ...(captureStates.length?{captureStates}:{}),pending: this.pendingUsage.length+outstanding, errors: errors.length ? errors : remainingErrors }
   }
 }
