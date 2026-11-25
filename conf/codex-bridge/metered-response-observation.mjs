@@ -4,7 +4,7 @@ import { skillId } from './skill-executor.mjs'
 import { projectedJson } from './metered-response-json.mjs'
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const count = value => Number.isSafeInteger(value) && value >= 0
-const fields = {input_tokens:null,output_tokens:null,total_tokens:null,input_tokens_details:['cached_tokens'],output_tokens_details:['reasoning_tokens']}
+const fields = {input_tokens:null,output_tokens:null,total_tokens:null,input_tokens_details:['cached_tokens','cache_write_tokens','cache_write_tokens_details'],output_tokens_details:['reasoning_tokens']}
 function quantities(raw, supported) {
   let unknown = false; const usage={}
   for(const [key,value] of Object.entries(object(raw)?raw:{})) {
@@ -12,10 +12,15 @@ function quantities(raw, supported) {
     if(fields[key] === null) { if(count(value)) usage[key]=value; else unknown=true; continue }
     if(!object(value)) { unknown=true; continue }
     const detail={};for(const [k,n] of Object.entries(value)) {
-      if(fields[key].includes(k) && count(n)) detail[k]=n; else unknown=true
+      if(k==='cache_write_tokens_details' && key==='input_tokens_details') {
+        if(!object(n)||Object.keys(n).length!==2||!['ttl_12h_tokens','ttl_30m_tokens'].every(x=>Object.hasOwn(n,x)&&n[x]===0))unknown=true
+        else detail[k]={ttl_12h_tokens:0,ttl_30m_tokens:0}
+      } else if(fields[key].includes(k) && count(n)) {detail[k]=n;if(k==='cache_write_tokens'&&n!==0)unknown=true}
+      else unknown=true
     }
     if(Object.keys(detail).length) usage[key]=detail
   }
+  if(usage.input_tokens_details?.cache_write_tokens_details && usage.input_tokens_details.cache_write_tokens!==0)unknown=true
   const {input_tokens:i,output_tokens:o,total_tokens:t}=usage,c=usage.input_tokens_details?.cached_tokens,r=usage.output_tokens_details?.reasoning_tokens
   const valid=supported && !unknown && [i,o,t,c,r].every(count) && i+o===t && c<=i && r<=o
   return {reportedUsage:Object.keys(usage).length?usage:null, measuredQuantities:valid?{normalizationBasis:'RESPONSES_TEXT_TOKENS_V1',tokens:{INPUT:String(i-c),CACHED_INPUT:String(c),OUTPUT:String(o)},coverage:'COMPLETE'}:null}

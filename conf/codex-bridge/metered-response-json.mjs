@@ -1,9 +1,11 @@
 // Incremental JSON grammar for the observation side only. Retain decoded member names
 // for duplicate detection while their object is open, never string values outside
 // the projection. Bounds exhaust the observer, not the forwarded HTTP stream.
+import { usageAttribution } from './metered-usage-attribution.mjs'
 const NUM = Symbol(), STR = Symbol(), IGNORE = Symbol()
-const detail = Object.freeze({cached_tokens:NUM}), outputDetail = Object.freeze({reasoning_tokens:NUM})
-const usage = {input_tokens:NUM,output_tokens:NUM,total_tokens:NUM,input_tokens_details:detail,output_tokens_details:outputDetail}
+const cacheWriteDetail = Object.freeze({ttl_12h_tokens:NUM,ttl_30m_tokens:NUM})
+const detail = Object.freeze({cached_tokens:NUM,cache_write_tokens:NUM,cache_write_tokens_details:cacheWriteDetail}), outputDetail = Object.freeze({reasoning_tokens:NUM})
+const usage = {attribution:IGNORE,input_tokens:NUM,output_tokens:NUM,total_tokens:NUM,input_tokens_details:detail,output_tokens_details:outputDetail}
 const response = {id:STR,status:STR,usage}, envelope = {type:STR,response}
 const syntax = () => { throw Error('RESPONSE_STREAM_INVALID') }
 const limit = () => { throw Error('OBSERVATION_WINDOW_EXCEEDED') }
@@ -12,21 +14,22 @@ const number = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/
 export function projectedJson(event, budget, inspect=null) {
   const root={state:'value',schema:inspect?IGNORE:event?envelope:response},stack=[root]
   let token='',raw='',keep=false,role=null,escape=false,hex=0,held=0
+  const attribution=inspect?null:usageAttribution(event)
   const top=()=>stack.at(-1)
   const schema=f=>f===root?f.schema:f.keys && f.schema && Object.hasOwn(f.schema,f.key)?f.schema[f.key]:IGNORE
   const visit=(f,kind)=>inspect?.value(f.role,f.keys?f.key:null,kind)
   function put(f,v) {
     if(f===root){f.value=v;f.state='done';return}
     if(f.out && Object.hasOwn(f.schema,f.key)) f.out[f.key]=v
-    else if(f.out && [usage,detail,outputDetail].includes(f.schema)) f.out.unsupported=null
+    else if(f.out && [usage,detail,outputDetail,cacheWriteDetail].includes(f.schema)) f.out.unsupported=null
     f.state='after'
   }
-  function endAtom(){const f=top(),s=schema(f);if(!['null','true','false'].includes(raw)&&!number.test(raw))syntax()
+  function endAtom(){const f=top(),s=schema(f);attribution?.atom(f.atomRole,raw);if(!['null','true','false'].includes(raw)&&!number.test(raw))syntax()
     put(f,s===NUM && /^(0|[1-9]\d*)$/.test(raw)?Number(raw):null);raw='';token=''}
   function open(c,f){const s=schema(f),obj=c==='{',out=obj && typeof s==='object'?Object.create(null):null
     if(stack.length>=Math.min(512,budget))limit()
-    const role=visit(f,obj?'object':'array');put(f,out);stack.push({role,state:obj?'firstKey':'firstItem',schema:s,keys:obj?new Set():null,out,held:0})}
-  function close(f,c){if((f.keys?'}':']')!==c)syntax();inspect?.close(f.role,f.keys);held-=f.held;stack.pop()}
+    const role=visit(f,obj?'object':'array'),attributionRole=attribution?.value(f.attributionRole,f.keys?f.key:null,obj?'object':'array');put(f,out);stack.push({role,attributionRole,state:obj?'firstKey':'firstItem',schema:s,keys:obj?new Set():null,out,held:0})}
+  function close(f,c){if((f.keys?'}':']')!==c)syntax();inspect?.close(f.role,f.keys);attribution?.close(f.attributionRole,f.keys);held-=f.held;stack.pop()}
   function stringChar(c,f){
     if(keep){if(held+raw.length+1>budget)limit();raw+=c}
     if(hex){if(!/[0-9A-Fa-f]/.test(c))syntax();hex--;return}
@@ -47,7 +50,7 @@ export function projectedJson(event, budget, inspect=null) {
     if(f.state==='colon'){if(c!==':')syntax();f.state='value';continue}
     if(f.state==='firstItem'&&c===']'){close(f,c);continue}
     if(c==='{'||c==='['){open(c,f);continue}
-    if(c==='"'){token='string';role=visit(f,'string');keep=schema(f)===STR||inspect?.read(role);raw=keep?'"':'';continue}
-    if(!/[-0-9ntf]/.test(c))syntax();visit(f,'atom');token='atom';raw=c
-  }},finish(){if(token==='atom')endAtom();if(token||stack.length!==1||root.state!=='done')syntax();return root.value}}
+    if(c==='"'){token='string';attribution?.value(f.attributionRole,f.keys?f.key:null,'string');role=visit(f,'string');keep=schema(f)===STR||inspect?.read(role);raw=keep?'"':'';continue}
+    if(!/[-0-9ntf]/.test(c))syntax();visit(f,'atom');f.atomRole=attribution?.value(f.attributionRole,f.keys?f.key:null,'atom');token='atom';raw=c
+  }},finish(){if(token==='atom')endAtom();if(token||stack.length!==1||root.state!=='done')syntax();const u=event?root.value?.response?.usage:root.value?.usage;if(u&&Object.hasOwn(u,'attribution'))delete u.attribution;if(u&&attribution?.invalid())u.unsupported=null;return root.value}}
 }

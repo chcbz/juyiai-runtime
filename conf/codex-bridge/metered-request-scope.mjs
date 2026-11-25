@@ -20,7 +20,7 @@ export function requestCostScope(budget,localArtifactCall) {
       if(harmlessScalar.has(key)&&!['object','array'].includes(kind))return 'skip'
     } else if(parent==='tools'&&kind==='object')return {tool:true,namespace:false}
     else if(parent.tool){
-      if(key==='type'&&kind==='string')return {typeOf:parent}
+      if(['type','execution'].includes(key)&&kind==='string')return {toolField:key,toolOwner:parent}
       if(key==='tools'&&kind==='array')return 'tools' // validate every nested declaration, regardless of member order
       if(['name','description'].includes(key)&&kind==='string'||key==='strict'&&kind==='atom'||['parameters','format'].includes(key)&&kind==='object')return 'skip'
     } else if(parent==='input'&&kind==='object')return {item:true}
@@ -39,9 +39,9 @@ export function requestCostScope(budget,localArtifactCall) {
     unknown();return 'skip'
   }
   const enums=new Set(['choice','partType','include'])
-  const inspect={value,read:role=>!!role?.typeOf||!!role?.itemOwner||enums.has(role),scalar(role,v){
+  const inspect={value,read:role=>!!role?.toolOwner||!!role?.itemOwner||enums.has(role),scalar(role,v){
     if(role==='choice'&&!['auto','none','required'].includes(v))unknown()
-    if(role?.typeOf){role.typeOf.namespace=v==='namespace';if(!['namespace','custom','function'].includes(v))flags.add('REQUEST_PROVIDER_TOOL_OR_UNKNOWN')}
+    if(role?.toolOwner){role.toolOwner[role.toolField]=v;role.toolOwner.namespace=role.toolOwner.type==='namespace'}
     if(role?.itemOwner)role.itemOwner[role.itemField]=v
     if(role==='partType'&&!['input_text','output_text'].includes(v))flags.add('REQUEST_NON_TEXT_INPUT')
     if(role==='include'&&v!=='reasoning.encrypted_content')unknown()
@@ -57,7 +57,13 @@ export function requestCostScope(budget,localArtifactCall) {
           !keys.has('output')||!allow('type','id','call_id','output','status')))flags.add('REQUEST_TOOL_HISTORY_UNBOUND')
       } else unknown()
     }
-    if(role?.tool&&(!keys.has('type')||role.namespace!==keys.has('tools')))unknown()
+    if(role?.tool){
+      if(!keys.has('type')||role.namespace!==keys.has('tools'))unknown()
+      // Client search is a local discovery declaration, not a hosted provider
+      // invocation. Its actual call/output still fails closed as unknown history.
+      if(!['namespace','custom','function'].includes(role.type)&&!(role.type==='tool_search'&&role.execution==='client'))flags.add('REQUEST_PROVIDER_TOOL_OR_UNKNOWN')
+      if(keys.has('execution')&&role.type!=='tool_search')unknown()
+    }
     if(role==='part'&&!keys.has('type'))unknown()
   }}
   parser=projectedJson(false,budget,inspect)

@@ -439,6 +439,7 @@ export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   "metered-responses-route.mjs",
   "metered-response-observation.mjs",
   "metered-response-json.mjs",
+  "metered-usage-attribution.mjs",
   "metered-request-scope.mjs",
   "native-usage-receipts.mjs",
   "provider-usage-receipts.mjs",

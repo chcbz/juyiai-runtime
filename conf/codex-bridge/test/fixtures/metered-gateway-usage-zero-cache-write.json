@@ -1,0 +1,102 @@
+{
+  "attribution": {
+    "items": {
+      "item_0": {
+        "cache_write_tokens": 0,
+        "cached_tokens": 0,
+        "content": [
+          {
+            "cache_write_tokens": 0,
+            "cached_tokens": 0,
+            "input_tokens": 22,
+            "output_tokens": 0
+          }
+        ],
+        "input_tokens": 22,
+        "output_tokens": 0
+      },
+      "item_1": {
+        "cache_write_tokens": 0,
+        "cached_tokens": 0,
+        "content": [
+          {
+            "cache_write_tokens": 0,
+            "cached_tokens": 0,
+            "input_tokens": 539,
+            "output_tokens": 0
+          },
+          {
+            "cache_write_tokens": 0,
+            "cached_tokens": 0,
+            "input_tokens": 118,
+            "output_tokens": 0
+          },
+          {
+            "cache_write_tokens": 0,
+            "cached_tokens": 0,
+            "input_tokens": 25,
+            "output_tokens": 0
+          }
+        ],
+        "input_tokens": 682,
+        "output_tokens": 0
+      },
+      "item_2": {
+        "cache_write_tokens": 0,
+        "cached_tokens": 0,
+        "content": [
+          {
+            "cache_write_tokens": 0,
+            "cached_tokens": 0,
+            "input_tokens": 204,
+            "output_tokens": 0
+          }
+        ],
+        "input_tokens": 204,
+        "output_tokens": 0
+      },
+      "item_3": {
+        "cache_write_tokens": 0,
+        "cached_tokens": 0,
+        "content": [
+          {
+            "cache_write_tokens": 0,
+            "cached_tokens": 0,
+            "input_tokens": 106,
+            "output_tokens": 0
+          }
+        ],
+        "input_tokens": 106,
+        "output_tokens": 0
+      },
+      "item_4": {
+        "cache_write_tokens": 0,
+        "cached_tokens": 0,
+        "input_tokens": 2,
+        "output_tokens": 69
+      }
+    },
+    "request_fields": {
+      "tools": {
+        "cache_write_tokens": 0,
+        "cached_tokens": 0,
+        "input_tokens": 1817,
+        "output_tokens": 0
+      }
+    }
+  },
+  "input_tokens": 2833,
+  "input_tokens_details": {
+    "cache_write_tokens": 0,
+    "cache_write_tokens_details": {
+      "ttl_12h_tokens": 0,
+      "ttl_30m_tokens": 0
+    },
+    "cached_tokens": 0
+  },
+  "output_tokens": 69,
+  "output_tokens_details": {
+    "reasoning_tokens": 0
+  },
+  "total_tokens": 2902
+}
