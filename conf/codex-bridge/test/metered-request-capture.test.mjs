@@ -469,7 +469,9 @@ for (const origin of ['configured','managed']) test(`durable discussion source k
     const prep=quotedPreparation({...catalog.prepareRequest,tenantId,clientId,ownerJiacn,canonicalAgentId});
     const candidate=await h.control().handle(prep);await h.control().handle(candidateRequest(prep,candidate,'ensure'));await h.settle();
     agent=h.host().agents.get(runtimeSubjectKey(candidate.manifest)).agent;
-    const hostingControlPath=join(f.root,'managed-hosting.json');await f.json(hostingControlPath,h.controlConfig);
+    const hostingControlPath=join(f.root,'managed-hosting.json'), hostSettings=structuredClone(h.controlConfig);
+    hostSettings.template.profile.codexBin=await (await import('node:fs/promises')).realpath(hostSettings.template.profile.codexBin);
+    await f.json(hostingControlPath,hostSettings);
     await f.json(f.path,{...f.raw,hostId:h.hostConfig.hostId,agents:[f.entries[1]],hostingControlPath});
     assert.equal(h.sessionCount(),1);
   }
