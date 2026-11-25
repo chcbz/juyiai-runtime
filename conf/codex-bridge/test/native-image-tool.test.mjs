@@ -1,16 +1,17 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { selectNativeImageTool, validateNativeImageSettings } from '../native-image-tool.mjs'
 import { NATIVE_SKILL_SCRIPT_POLICY, skillDigest, skillHash } from '../skill-executor.mjs'
 import { SkillExecutionStore } from '../skill-execution-store.mjs'
 import { SkillUsageDelivery } from '../skill-usage-delivery.mjs'
 import { runNativeExecution } from '../native-execution.mjs'
+import { checkPng, makePng, offlinePackage } from '../../skills/image-process/test/fixture.mjs'
 
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X8ZkAAAAASUVORK5CYII=', 'base64')
 const hash = 'a'.repeat(64), apiOrigin = 'https://api.example', agentId = 'agent1'
-function fixture(t, kind = 'TASK', operation = 'generate') {
+function fixture(t, kind = 'TASK', operation = 'generate', mountPinnedSkill = false) {
   const rootDir = mkdtempSync('/var/tmp/cyf-native-image-tool-')
   t.after(() => rmSync(rootDir, { recursive: true, force: true }))
   writeFileSync(resolve(rootDir, 'auth.json'), JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'fixture-key' }), { mode: 0o600 })
@@ -24,12 +25,12 @@ function fixture(t, kind = 'TASK', operation = 'generate') {
     skills: [{ skill: { key: skillKey, version: skillVersion, packageSha256: hash, manifestSha256: null }, executionBinding }],
     inputRefs: operation === 'edit' ? ['image1'] : [], outputs: { dataSchema: null, mimeTypes: ['image/png'], multiple: false, artifactsRequired: true } }
   const store = new SkillExecutionStore({ rootDirectory: resolve(rootDir, 'skill-runs'), scope: { ...scope, apiOrigin }, command })
-  const settings = validateNativeImageSettings({ model: 'image-model', [`${operation}PackageSha256`]: hash })
+  const settings = validateNativeImageSettings({ model: 'image-model', [`${operation}PackageSha256`]: hash, ...(mountPinnedSkill ? { mountPinnedSkill } : {}) })
   const chatProvider = { id: 'chat', baseUrl: 'https://gateway.example/v1', wireApi: 'responses' }
   const configReadback = () => ({ config: { cli_auth_credentials_store: 'file', model_provider: 'chat', model_providers: {
     chat: { base_url: chatProvider.baseUrl, requires_openai_auth: true, wire_api: 'responses' }
   } } })
-  const select = { settings, command, store, chatProvider, entries: [{ descriptor: { skillKey, skillVersion, skillInstallationId, packageSha256: hash } }] }
+  const select = { settings, command, store, chatProvider, entries: [{ descriptor: { skillKey, skillVersion, skillInstallationId, packageSha256: hash, packageRoot: resolve(rootDir, 'offline-package'), packageTreeDigest: hash } }] }
   return { rootDir, scope, select, configReadback }
 }
 for (const kind of ['TASK', 'PRIVATE']) for (const op of ['generate', 'edit']) test(`${kind} ${op} substitutes only the pinned operation and proposes the staged PNG`, async t => {
@@ -79,6 +80,64 @@ for (const kind of ['TASK', 'PRIVATE']) for (const op of ['generate', 'edit']) t
   const result = await runNativeExecution({ command, store, entries: [], inputs, checkActive() {}, profileRuntime, nativeImage })
   assert.equal(posted, 1)
   assert.deepEqual(store.readBlob(result.result.artifacts[0].outputId), png)
+})
+
+for (const [kind, op] of [['TASK', 'generate'], ['PRIVATE', 'edit']]) test(`${kind} native ${op}: Agent can choose offline processing and stage only the derivative`, async t => {
+  const { select, configReadback, rootDir } = fixture(t, kind, op, true)
+  const { command, store, settings, chatProvider, entries } = select
+  const operation = selectNativeImageTool(select)
+  const run = offlinePackage(entries[0].descriptor.packageRoot)
+  const original = makePng(40, 20), reference = makePng(30, 40)
+  const inputs = command.inputRefs.map(inputRef => ({ inputRef, byteLength: String(reference.length), sha256: skillHash(reference), contentMimeType: 'image/png' }))
+  store.write('inputs-snapshot', { schemaVersion: 1, inputs })
+  for (const input of inputs) await store.materializeInput(input, async () => [reference], () => {})
+  let calls = 0
+  const nativeImage = { operation, settings, chatProvider, configReadback, subjectHome: rootDir, fetchFn: async (url) => {
+    calls++
+    const response = new Response(JSON.stringify({ data: [{ b64_json: original.toString('base64') }] }), { headers: { 'Content-Type': 'application/json' } })
+    Object.defineProperty(response, 'url', { value: url })
+    return response
+  } }
+  const profileRuntime = { async suspendAdapter() {}, async openNativeExecutionAdapter(inputDir, _key, _binding, options) {
+    assert.equal(options.skills.length, 1)
+    assert.equal(options.skills[0].packageRoot, entries[0].descriptor.packageRoot)
+    assert.deepEqual(options.skillConfiguration, [])
+    assert.equal(options.nativeExecution.networkAccess, false)
+    return { async startOrResumeThread() { return { threadId: 'thread' } }, async runTurn({ onAccepted }) {
+      const turn = { threadId: 'thread', turnId: 'turn' }; onAccepted(turn)
+      const base = { ...turn, executionId: command.executionId }
+      const call = (tool, callId, args) => options.nativeExecution.callTool({ ...base, tool, callId, arguments: args })
+      const raw = await call(`native_image_${op}`, 'generate', { prompt: 'synthetic', ...(op === 'edit' ? { inputRefs: ['image1'] } : {}) })
+      assert.equal(raw.path, `/inputs/.tool-results/${raw.artifactRef}`)
+      const input = resolve(inputDir, raw.path.slice('/inputs/'.length)), output = resolve(options.draftsDirectory, 'resized.png')
+      assert.deepEqual(readFileSync(input), original)
+      const args = ['--input', input, '--output', output, '--background', 'white']
+      assert.equal(run([...args, '--size', 'invalid']).status, 1)
+      const result = run([...args, ...(op === 'edit' ? ['--size-from', resolve(inputDir, 'image1')] : ['--size', '800x600'])])
+      assert.equal(result.status, 0, result.stderr)
+      assert.deepEqual(readFileSync(input), original)
+      if (op === 'edit') assert.deepEqual(readFileSync(resolve(inputDir, 'image1')), reference)
+      const staged = await call('artifact_stage', 'stage', { path: '/outputs/resized.png', displayName: 'resized.png', mediaTypeHint: 'image/png' })
+      assert.notEqual(staged.artifactRef, raw.artifactRef)
+      await call('result_propose', 'propose', { artifactRefs: [staged.artifactRef], summary: 'fixture', data: null })
+      return { ...turn, finishReason: 'completed', content: 'fixture' }
+    } }
+  } }
+  const result = await runNativeExecution({ command, store, entries, inputs, checkActive() {}, profileRuntime, nativeImage })
+  assert.equal(calls, 1)
+  assert.equal(result.result.artifacts.length, 1)
+  checkPng(store.readBlob(result.result.artifacts[0].outputId), ...(op === 'edit' ? [30, 40] : [800, 600]))
+})
+
+test('native image does not start a profile with an altered package or sandbox credentials', async t => {
+  const { select } = fixture(t, 'TASK', 'generate', true)
+  const operation = selectNativeImageTool(select)
+  const { entries, settings, command, store } = select
+  const nativeImage = { operation, settings }
+  const profileRuntime = { async suspendAdapter() {}, async openNativeExecutionAdapter() { assert.fail('unauthorized profile opened') } }
+  const base = { command, store, entries, nativeImage, checkActive() {}, profileRuntime }
+  await assert.rejects(runNativeExecution({ ...base, entries: [{ descriptor: { ...entries[0].descriptor, packageSha256: 'b'.repeat(64) } }] }), { code: 'NATIVE_IMAGE_AUTHORIZATION_INVALID' })
+  await assert.rejects(runNativeExecution({ ...base, skillConfiguration: [{ configuration: { apiKey: 'synthetic' }, networkOrigins: ['https://fixture.invalid'] }] }), { code: 'NATIVE_IMAGE_AUTHORIZATION_INVALID' })
 })
 
 test('ordinary authority cannot select native Images; pinned execution cannot switch to scripts on restart', t => {

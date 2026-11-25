@@ -28,3 +28,24 @@ Rebuild with `python3 package-archive-maintenance.py`; different bytes at a vers
 The optional operator tool in `tools/audio-transcription/` supplies a local
 faster-whisper/pyannote HTTP service for the same 1.0.0 package; it is not bundled
 with the skill and requires separate protected deployment and scoped configuration.
+
+## Offline image processing candidate (2026-11-25)
+
+`image-process/` is an offline-only `INSTRUCTION` skill. Prepare the standalone
+`image-process` 1.0.0 and native-operation `image-generate`/`image-edit` 2.0.0
+packages with `python3 conf/skills/package-image-process.py <output-directory>`.
+The variants both bundle the same local processor and no provider script.
+Publishing and installing each package are separate catalog operations.
+
+For 2.0.0 native operations, configure `nativeImage` with the exact installed
+variant ZIP digest(s), `mountPinnedSkill: true`, and an image model. Use the
+existing Agent chat connection for the Images API. Only the verified package
+is mounted: no skill configuration or sandbox network is enabled by this
+setting. Standalone `image-process` does not need `nativeImage` at all.
+
+The native tool returns a read-only per-execution source path and a candidate
+reference. The Agent reads installed instructions and decides whether to run
+the processor; the Bridge does not call `resize` or interpret dimensions or
+background. Only the selected result is submitted. A local retry reuses the
+same source. The original opaque picture is not recolored; use the image
+model for semantic background changes. This is not a production release receipt.

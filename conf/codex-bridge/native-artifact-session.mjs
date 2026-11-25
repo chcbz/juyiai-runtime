@@ -59,7 +59,8 @@ export class NativeArtifactSession {
     this.requireBoundTurn(ctx)
     if (this.store.read('native-selection') || this.store.read('native-terminal')) fail('NATIVE_RESULT_ALREADY_FROZEN')
     this.store.write(`artifact-${outputId}`, artifact)
-    return { artifactRef: outputId, ...artifact, state: 'SNAPSHOTTED' }
+    const path = this.store.exposeToolFile(outputId, bytes)
+    return { artifactRef: outputId, ...artifact, path, state: 'SNAPSHOTTED' }
   }
   async callTool(ctx) {
     const binding = this.requireBoundTurn(ctx)

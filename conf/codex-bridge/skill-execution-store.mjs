@@ -123,6 +123,17 @@ export class SkillExecutionStore {
     if (skillHash(bytes) !== input.sha256 || String(bytes.length) !== String(input.byteLength)) fail('SKILL_INPUT_BYTES_INVALID')
     return { contentMimeType: input.contentMimeType, bytes }
   }
+  // Only the host writes this reserved namespace of the read-only sandbox input view.
+  // These are intermediate tool files, not authorized material refs or results.
+  exposeToolFile(name, bytes) {
+    if (!skillId(name) || !Buffer.isBuffer(bytes) || !bytes.length) fail('SKILL_STORE_KEY_INVALID')
+    const inputs = resolve(this.directory, 'inputs'); privateDirectory(inputs)
+    const directory = resolve(inputs, '.tool-results')
+    mkdirSync(directory, { recursive: true, mode: 0o700 }); privateDirectory(directory)
+    const path = resolve(directory, name)
+    writePrivate(path, bytes); syncDirectory(directory); syncDirectory(inputs)
+    return `/inputs/.tool-results/${name}`
+  }
   readBlob(name, expected) {
     if (!skillId(name)) fail('SKILL_STORE_KEY_INVALID')
     privateDirectory(resolve(this.directory, 'outputs'))

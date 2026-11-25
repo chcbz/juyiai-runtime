@@ -7,10 +7,11 @@ import { prepareNativeImageInvocation } from './native-image-invocation.mjs'
 const fail = (code, recoverableToolError = false) => { throw Object.assign(new Error(code), { code, recoverableToolError }) }
 const label = value => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(value)
 const packagePins = { 'image-generate': ['generate', 'generatePackageSha256'], 'image-edit': ['edit', 'editPackageSha256'] }
-const fields = ['model', 'generatePackageSha256', 'editPackageSha256', 'channel', 'tier', 'priceVersion']
+const fields = ['model', 'generatePackageSha256', 'editPackageSha256', 'channel', 'tier', 'priceVersion', 'mountPinnedSkill']
 export function validateNativeImageSettings(value) {
   if (value === undefined || value === null) return null
   if (typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !fields.includes(key))
+      || (value.mountPinnedSkill !== undefined && typeof value.mountPinnedSkill !== 'boolean')
       || !label(value.model) || ![value.generatePackageSha256, value.editPackageSha256].some(skillSha)
       || [value.generatePackageSha256, value.editPackageSha256].some(pin => pin !== undefined && !skillSha(pin))
       || [value.channel, value.tier, value.priceVersion].some(item => item !== undefined && !label(item))) fail('NATIVE_IMAGE_CONFIG_INVALID')
@@ -49,7 +50,7 @@ export function nativeImageToolPolicy({ operation, settings, chatProvider, confi
   }
   const edit = operation === 'edit'
   const tool = { type: 'function', name: edit ? 'native_image_edit' : 'native_image_generate',
-    description: `${edit ? 'Edit approved image inputRefs' : 'Generate one image'} through the Agent image model. This may be a paid operation. Call only for the authorized user request, at most once. Select the returned artifactRef with result_propose; do not submit it as a path.`,
+    description: `${edit ? 'Edit approved image inputRefs' : 'Generate one image'} through the Agent image model. This may be a paid operation. Call only for the authorized user request, at most once. The response includes a read-only file path and an already staged artifactRef. Select the reference only if the original meets the request; otherwise use the tools and authorized skills available for the task.`,
     inputSchema: { type: 'object', properties: { prompt: { type: 'string' },
       ...(edit ? { inputRefs: { type: 'array', minItems: 1, maxItems: 4, uniqueItems: true, items: { type: 'string' } } } : {}) },
     required: ['prompt', ...(edit ? ['inputRefs'] : [])], additionalProperties: false } }

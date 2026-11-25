@@ -4249,7 +4249,7 @@ export const bindMeasuredSkillSession = (state, binding) => {
           const nativeImage = operation ? { operation, settings, chatProvider,
             configReadback: () => state.appServerAdapter?.readback?.config, subjectHome: state.profile.codexHome,
             fetchFn: globalThis.fetch } : null
-          return runNativeExecution({ ...request, ...(operation ? { entries: [] } : {}), profileRuntime, skillConfiguration, nativeImage,
+          return runNativeExecution({ ...request, ...(operation && !settings.mountPinnedSkill ? { entries: [] } : {}), profileRuntime, skillConfiguration, nativeImage,
             model: state.profile.chatModel || state.profile.codexModel, effort: state.profile.chatReasoningEffort })
         },
         getRuntimeHeaders: () => state.runtimeTransport?.headers(), fetchFn: (url, opts) => state.runtimeTransport.nativeFetch(url, opts),
