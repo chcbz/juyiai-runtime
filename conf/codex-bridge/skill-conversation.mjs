@@ -110,7 +110,7 @@ export class SkillConversationLane extends SkillUsageDelivery {
       at = Math.min(at, this.unknownRetries.get(command.executionId)?.nextAt ?? this.now() + 3000)
     }
     for (const item of this.pendingUsage) at = Math.min(at,
-      this.usageRetries.get(item.command.executionId)?.nextAt ?? this.now() + 3000)
+      this.usageRetries.get(item.endpoint ? `${item.endpoint}:${item.command.executionId}` : item.command.executionId)?.nextAt ?? this.now() + 3000)
     return at
   }
 

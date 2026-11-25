@@ -99,7 +99,7 @@ export class SkillUsageDelivery {
           this.pendingMetered.push({store,command}); unresolved.add(id)
         } else {
           const usage = pendingNativeUsage(store), planner = command.skills.length>1 ? pendingNativeUsage(store,'planner') : null
-          for (const item of [...(usage ? [usage] : []), ...(planner ? [planner] : []), ...pendingProviderUsage(store)]) { this.pendingUsage.push({ command, store, ...item }); unresolved.add(id) }
+          for (const item of [...(usage ? [usage] : []), ...(planner ? [planner] : []), ...pendingProviderUsage(store, { hostOnly: Boolean(store.read('native-image-binding')) })]) { this.pendingUsage.push({ command, store, ...item }); unresolved.add(id) }
         }
       } catch (error) {
         if (!['NATIVE_USAGE_RECEIPT_CONFLICT', 'NATIVE_USAGE_SOURCE_MISSING', 'PROVIDER_USAGE_SOURCE_INVALID'].includes(error?.code)) throw error
@@ -118,19 +118,20 @@ export class SkillUsageDelivery {
     const errors = [...(this.pendingUsageErrors || [])]
     for (const item of this.pendingUsage) {
       const { command, store } = item
-      const retry = this.usageRetries.get(command.executionId)
+      const retryKey = item.endpoint ? `${item.endpoint}:${command.executionId}` : command.executionId
+      const retry = this.usageRetries.get(retryKey)
       if (retry && this.now() < retry.nextAt) continue
       try {
         const receipt = await this.request(`${BASE}/${command.executionId}/runs/${command.runId}/${item.endpoint || 'usage'}`, 'POST', item.payload)
         acknowledgeNativeUsage(store, item, receipt)
-        this.usageRetries.delete(command.executionId)
+        this.usageRetries.delete(retryKey)
       } catch (error) {
         if (/^SKILL_(?:SESSION|STORE|SCOPE)_/.test(error?.code || '')) throw error
         // Only delivery retries; this path never calls process(), resumes a lease,
         // or invokes a model. A failed write/unknown HTTP reply remains on disk.
         const attempt = Math.min((retry?.attempt ?? 0) + 1, 6)
         const delay = Math.floor(Math.min(300000, 15000 * 2 ** (attempt - 1)) * (0.8 + 0.2 * this.random()))
-        this.usageRetries.set(command.executionId, { attempt, nextAt: this.now() + delay })
+        this.usageRetries.set(retryKey, { attempt, nextAt: this.now() + delay })
         errors.push({ executionId: command.executionId, code: error?.code || 'NATIVE_USAGE_DELIVERY_FAILED' })
       }
     }

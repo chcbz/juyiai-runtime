@@ -5,6 +5,7 @@ import { resolve } from 'node:path'
 import { skillDigest, NATIVE_DOMAIN_API_POLICY, NATIVE_LOCAL_FILES_POLICY } from './skill-executor.mjs'
 import { NATIVE_SKILL_SCRIPT_POLICY } from './native-skill-config.mjs'
 import { NativeArtifactSession, nativeArtifactOutputTools } from './native-artifact-session.mjs'
+import { nativeImageToolPolicy } from './native-image-tool.mjs'
 import { validateNativeOutputSnapshot } from './native-output-format.mjs'
 const fail = code => { throw Object.assign(new Error(code), { code }) }
 export const nativeExecutionRequestBinding = command => ({ schemaVersion: 1,
@@ -30,7 +31,7 @@ export function compareProspectiveTaskConfiguration(profileRuntime, { scopeKind,
     localArtifactOnly:onlyLocalArtifactTools(scopeKind, privateTools, entries, skillConfiguration, toolPolicyRef),
     networkAccess:selectedNetworkAccess(skillConfiguration), tools:nativeArtifactOutputTools(outputs), toolPolicyRef, instructionsSha256 })
 }
-export async function runNativeExecution({ command, inputs, entries, store, checkActive, signal, profileRuntime, model, effort, mayStartTurn = true, skillConfiguration = [], exchangeBusiness, bindInstallation }) {
+export async function runNativeExecution({ command, inputs, entries, store, checkActive, signal, profileRuntime, model, effort, mayStartTurn = true, skillConfiguration = [], exchangeBusiness, bindInstallation, nativeImage = null }) {
   if (!profileRuntime?.openNativeExecutionAdapter) fail('NATIVE_EXECUTION_PROFILE_UNAVAILABLE')
   if (skillConfiguration.length && command.toolPolicyRef !== NATIVE_SKILL_SCRIPT_POLICY) fail('NATIVE_SKILL_CONFIG_POLICY_MISMATCH')
   const networkAccess = selectedNetworkAccess(skillConfiguration)
@@ -55,7 +56,19 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
     if (signal?.aborted) fail('SKILL_LEASE_UNCERTAIN')
     checkActive()
     const local = session.policy()
-    const nativeExecution = { ...local, networkAccess }
+    if (nativeImage) {
+      const imageBinding = store.read('native-image-binding')
+      const pinned = entries[0]?.descriptor
+      if (skillConfiguration.length || domainSocket || imageBinding?.operation !== nativeImage.operation
+          || imageBinding.settingsSha256 !== skillDigest(nativeImage.settings)
+          || (nativeImage.settings.mountPinnedSkill
+            ? entries.length !== 1 || pinned.packageSha256 !== imageBinding.packageSha256 || pinned.skillInstallationId !== imageBinding.installationId
+            : entries.length !== 0)) fail('NATIVE_IMAGE_AUTHORIZATION_INVALID')
+    }
+    const image = nativeImage ? nativeImageToolPolicy({ ...nativeImage, store, checkActive, signal, session, reconcileOnly: Boolean(store.read('native-start-attempt')) }) : null
+    const nativeExecution = image ? { ...local, networkAccess, tools: [...local.tools, image.tool], callTool(ctx) {
+      return ctx.tool === image.tool.name ? image.call(ctx) : local.callTool(ctx)
+    } } : { ...local, networkAccess }
     if (domainSocket) {
       if (entries.length !== 1 || typeof exchangeBusiness !== 'function') fail('NATIVE_BUSINESS_API_UNAVAILABLE')
       businessSocket = await openBusinessSocket(store.directory, async (...args) => {
@@ -67,7 +80,7 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
     }
     const adapter = await profileRuntime.openNativeExecutionAdapter(resolve(store.directory, 'inputs'), requestKey, binding, {
       scratchDirectory: resolve(store.directory, 'scratch'), draftsDirectory: resolve(store.directory, 'drafts'),
-      ...(command.usageMode === 'RESPONSE_V2' ? { meteredAdmission: { store, instructionsSha256, localArtifactOnly:onlyLocalArtifactTools(command.scope?.kind, command.privateTools, entries, skillConfiguration, command.toolPolicyRef), model: model ?? null, effort: effort ?? null } } : {}),
+      ...(command.usageMode === 'RESPONSE_V2' ? { meteredAdmission: { store, instructionsSha256, localArtifactOnly:!image && onlyLocalArtifactTools(command.scope?.kind, command.privateTools, entries, skillConfiguration, command.toolPolicyRef), model: model ?? null, effort: effort ?? null } } : {}),
       skills: selectedPackages(entries),
       skillConfiguration, nativeExecution, requireExistingState: Boolean(existing)
     })

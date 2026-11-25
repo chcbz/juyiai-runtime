@@ -27,8 +27,7 @@ export function nativeSkillOrigins(values) {
 export function nativeSkillConfigurationPath(directory, scope) {
   return resolve(directory, `${skillDigest(scopeKeys.map(key => scope[key]))}.json`)
 }
-export function loadNativeSkillConfiguration({ file, scope, command, entries, directory = process.env.CYF_NATIVE_SKILL_CONFIG_DIR }) {
-  if (command.toolPolicyRef !== NATIVE_SKILL_SCRIPT_POLICY || !entries.length) return Object.freeze([])
+export function readNativeSkillSubjectConfig({ file, scope, directory = process.env.CYF_NATIVE_SKILL_CONFIG_DIR }) {
   const derived = !file && Boolean(directory)
   if (derived) {
     try {
@@ -39,7 +38,7 @@ export function loadNativeSkillConfiguration({ file, scope, command, entries, di
     }
     file = nativeSkillConfigurationPath(directory, scope)
   }
-  if (!file) return Object.freeze([])
+  if (!file) return null
   let config
   try {
     if (!isAbsolute(file) || realpathSync(file) !== resolve(file)) fail('NATIVE_SKILL_CONFIG_UNSAFE')
@@ -54,12 +53,21 @@ export function loadNativeSkillConfiguration({ file, scope, command, entries, di
   } catch (error) {
     // A configured file can disappear or become unreadable during customer
     // maintenance. Scope that I/O failure to this execution, not the whole poll.
-    if (derived && error.code === 'ENOENT') return Object.freeze([])
+    if (derived && error.code === 'ENOENT') return null
     if (typeof error?.code === 'string' && /^E[A-Z]+$/.test(error.code)) fail('NATIVE_SKILL_CONFIG_UNAVAILABLE')
     throw error
   }
   if (!object(config) || config.schemaVersion !== 1 || !object(config.scope) || !object(config.installations)
       || scopeKeys.some(key => typeof scope?.[key] !== 'string' || config.scope[key] !== scope[key])) fail('NATIVE_SKILL_CONFIG_SCOPE_MISMATCH')
+  return config
+}
+export function loadNativeSkillConfiguration(options) {
+  const { command, entries } = options
+  if (command.toolPolicyRef !== NATIVE_SKILL_SCRIPT_POLICY || !entries.length) return Object.freeze([])
+  return resolveNativeSkillConfiguration(command, entries, readNativeSkillSubjectConfig(options))
+}
+export function resolveNativeSkillConfiguration(command, entries, config) {
+  if (!config || command.toolPolicyRef !== NATIVE_SKILL_SCRIPT_POLICY || !entries.length) return Object.freeze([])
   const selected = entries.flatMap(({ descriptor }) => {
     const commandSkill = command.skills.find(item => item.executionBinding.skillInstallationId === descriptor.skillInstallationId)
     if (!commandSkill || commandSkill.skill.key !== descriptor.skillKey || commandSkill.skill.packageSha256 !== descriptor.packageSha256) fail('NATIVE_SKILL_CONFIG_BINDING_INVALID')

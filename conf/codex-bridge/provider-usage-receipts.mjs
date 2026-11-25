@@ -3,10 +3,11 @@ import { constants, openSync, closeSync, fstatSync, readFileSync, readdirSync, l
 import { resolve } from 'node:path'
 import { skillDigest } from './skill-executor.mjs'
 const fail = code => { throw Object.assign(new Error(code), { code }) }
-export function pendingProviderUsage(store) {
+export function pendingProviderUsage(store, { hostOnly = false } = {}) {
   const directory = resolve(store.directory, 'scratch/.provider-usage')
   let files
-  try {
+  if (hostOnly) files = []
+  else try {
     const stat = lstatSync(directory)
     if (!stat.isDirectory() || realpathSync(directory) !== directory || stat.uid !== process.geteuid() || stat.mode & 0o077) fail('SKILL_STORE_UNSAFE')
     files = readdirSync(directory)
@@ -31,6 +32,7 @@ export function pendingProviderUsage(store) {
         if (observation.invocationId !== id || observation.phase !== phase.toUpperCase()) fail('PROVIDER_USAGE_SOURCE_INVALID')
         store.write(key, observation)
       }
+      if (observation.invocationId !== id || observation.phase !== phase.toUpperCase()) fail('PROVIDER_USAGE_SOURCE_INVALID')
       const payload = { executionId: store.command.executionId, observation }
       const evidenceSha256 = skillDigest(payload), receiptName = `${key}-receipt`
       const receipt = store.read(receiptName)

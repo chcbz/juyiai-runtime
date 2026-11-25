@@ -3,7 +3,7 @@
 import { existsSync, renameSync, unlinkSync, openSync, closeSync, fsyncSync, constants } from 'node:fs'
 import { resolve, basename } from 'node:path'
 import { snapshotNativeArtifact } from './native-artifact-snapshot.mjs'
-import { skillDigest, skillId } from './skill-executor.mjs'
+import { skillDigest, skillHash, skillId } from './skill-executor.mjs'
 import { validateSkillData } from './skill-manifest.mjs'
 
 const fail = (code, recoverableToolError = false) => { throw Object.assign(new Error(code), { code, recoverableToolError }) }
@@ -65,6 +65,19 @@ export class NativeArtifactSession {
     const binding = this.store.read('native-turn')
     if (!binding || ['executionId', 'threadId', 'turnId'].some(k => ctx[k] !== binding[k]) || typeof ctx.callId !== 'string' || !ctx.callId) fail('NATIVE_TOOL_BINDING_INVALID')
     return binding
+  }
+  async stageHostImage(ctx, bytes) {
+    const binding = this.requireBoundTurn(ctx), contentMimeType = 'image/png'
+    if (!this.command.outputs.mimeTypes.includes(contentMimeType) || this.store.read('native-selection') || this.store.read('native-terminal')) fail('NATIVE_RESULT_ALREADY_FROZEN')
+    const outputId = `output_${skillDigest({ binding, callId: ctx.callId, tool: ctx.tool })}`
+    this.store.writeBlob(outputId, bytes)
+    const artifact = { outputId, displayName: 'image.png', contentMimeType, sha256: skillHash(bytes), byteLength: String(bytes.length) }
+    if (await this.validateSnapshot(this.store.verifyBlob(outputId, artifact).path, contentMimeType) !== contentMimeType) fail('NATIVE_OUTPUT_FORMAT_INVALID')
+    this.requireBoundTurn(ctx)
+    if (this.store.read('native-selection') || this.store.read('native-terminal')) fail('NATIVE_RESULT_ALREADY_FROZEN')
+    this.store.write(`artifact-${outputId}`, artifact)
+    const path = this.store.exposeToolFile(outputId, bytes)
+    return { artifactRef: outputId, ...artifact, path, state: 'SNAPSHOTTED' }
   }
   async callTool(ctx) {
     const binding = this.requireBoundTurn(ctx)

@@ -1,3 +1,4 @@
+import { validateNativeImageSettings } from '../../codex-bridge/native-image-tool.mjs';
 import { validateModelAuth } from '../../codex-bridge/model-auth.mjs';
 // Operator-only local config. No control request can select these paths or keys.
 import { createHash } from 'node:crypto';
@@ -12,7 +13,7 @@ export const exactHostingId = value => typeof value === 'string' && value.length
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const fields = (value, allowed) => object(value) && Object.keys(value).length === allowed.length && allowed.every(key => Object.hasOwn(value, key));
 export const MANAGED_PROFILE_FIELDS = Object.freeze(['codexBin', 'codexModel', 'codexSandbox', 'codexApproval', 'codexSessionMode',
-  'chatEngine', 'chatModel', 'chatReasoningEffort', 'chatSandbox', 'chatToolPolicy',
+  'nativeImage', 'chatEngine', 'chatModel', 'chatReasoningEffort', 'chatSandbox', 'chatToolPolicy',
   'appServerSchemaContractId', 'workspacePolicyId', 'workspaceRole',
   'workspaceNoTaskPolicy', 'workspaceNonCodingCommandTypes', 'executionReportCommandTypes', 'nativeConversationHttpPollEnabled',
   'nativeExecutionProviderId', 'nativeExecutionProviderBaseUrl', 'nativeExecutionProviderWireApi', 'nativeExecutionNetworkConnectTimeoutMs',
@@ -60,6 +61,7 @@ export function validateHostingConfig(value) {
   if (!object(profile) || Object.keys(profile).some(key => !MANAGED_PROFILE_FIELDS.includes(key) && !RETIRED_CHAT_SWITCHES.includes(key))
       || !exactHostingId(profile.codexBin) || !isAbsolute(profile.codexBin)
       || typeof codexConfig !== 'string' || !codexConfig.trim() || codexConfig.includes('\0')) throw hostingError('HOSTING_TEMPLATE_INVALID');
+  try { validateNativeImageSettings(profile.nativeImage); } catch { throw hostingError('HOSTING_TEMPLATE_INVALID'); }
   // Deliberately small TOML subset, not a second general-purpose TOML parser.
   // Exactly one provider table and scalar allowlists exclude includes, alternate
   // credential stores, headers, duplicate settings and multiline auth fallback.

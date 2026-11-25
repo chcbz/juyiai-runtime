@@ -1,3 +1,4 @@
+import { selectNativeImageTool, validateNativeImageSettings } from './native-image-tool.mjs'
 import { readModelAuthFile } from './model-auth.mjs'
 import { isDeepStrictEqual } from 'node:util'
 import { NativeExecutionProfileRuntime, nativeExecutionProfile } from './native-execution-runtime.mjs'
@@ -47,7 +48,7 @@ import { materialProfileFromInputCarriers } from './skill-config-candidate.mjs'
 import { SkillConversationLane } from './skill-conversation.mjs'
 import { compareProspectiveTaskConfiguration, nativeExecutionRequestBinding, runNativeExecution } from './native-execution.mjs'
 import { initializeNativeToolchain } from './native-document-toolchain.mjs'
-import { loadNativeSkillConfiguration } from './native-skill-config.mjs'
+import { NATIVE_SKILL_SCRIPT_POLICY, readNativeSkillSubjectConfig, resolveNativeSkillConfiguration } from './native-skill-config.mjs'
 import { createLocalScriptRunner } from './skill-runners/local-script.mjs'
 import { buildActionChatFinal, publishActionChatFinal } from './action-chat-final.mjs'
 import { resolveChatMaterials, prepareChatMaterials, chatConversationKey, materialsEngineBinding, buildMaterialsChatFinal, publishMaterialsChatFinal } from './materials-chat.mjs'
@@ -609,6 +610,7 @@ export const normalizeProfile = (profile, fallback = {}, index = 0, { isolated =
     nativeConversationHttpPollEnabled: parseEnabledFlag(
       profile.nativeConversationHttpPollEnabled ?? fallback.nativeConversationHttpPollEnabled
     ),
+    nativeImage: validateNativeImageSettings(profile.nativeImage ?? fallback.nativeImage),
     skillExecutionConfigFile: String(profile.skillExecutionConfigFile ?? fallback.skillExecutionConfigFile ?? '').trim(),
     skillBindingsFile: String(profile.skillBindingsFile ?? fallback.skillBindingsFile ?? '').trim(),
     inputCarriers: profile.inputCarriers ?? fallback.inputCarriers ?? null,
@@ -4235,9 +4237,22 @@ export const bindMeasuredSkillSession = (state, binding) => {
           // Pin the baseline shell/file tools and the actual runtime Node, not all host programs.
           // The profile rechecks this manifest before mounting each execution.
           await initializeNativeToolchain(profileRuntime)
-          const skillConfiguration = loadNativeSkillConfiguration({ file: state.profile.skillExecutionConfigFile,
-            scope: binding.scope, command: request.command, entries: request.entries })
-          return runNativeExecution({ ...request, profileRuntime, skillConfiguration,
+          const chatProvider = runtimeFileAuthProvider(state.profile)
+          let config
+          const subjectConfig = () => {
+            if (config === undefined) config = request.command.toolPolicyRef === NATIVE_SKILL_SCRIPT_POLICY && request.entries.length
+              ? readNativeSkillSubjectConfig({ file: state.profile.skillExecutionConfigFile, scope: binding.scope }) : null
+            return config
+          }
+          const settings = state.profile.nativeImage ?? (request.entries.some(({ descriptor }) => ['image-generate', 'image-edit'].includes(descriptor.skillKey))
+            ? validateNativeImageSettings(subjectConfig()?.nativeImage) : null)
+          const operation = selectNativeImageTool({ ...request, settings, chatProvider })
+          const skillConfiguration = operation ? [] : resolveNativeSkillConfiguration(request.command, request.entries, subjectConfig())
+          if (operation && !request.store.read('native-start-attempt') && !state.appServerAdapter) await state.ensureAppServer?.()
+          const nativeImage = operation ? { operation, settings, chatProvider,
+            configReadback: () => state.appServerAdapter?.readback?.config, subjectHome: state.profile.codexHome,
+            fetchFn: globalThis.fetch } : null
+          return runNativeExecution({ ...request, ...(operation && !settings.mountPinnedSkill ? { entries: [] } : {}), profileRuntime, skillConfiguration, nativeImage,
             model: state.profile.chatModel || state.profile.codexModel, effort: state.profile.chatReasoningEffort })
         },
         getRuntimeHeaders: () => state.runtimeTransport?.headers(), fetchFn: (url, opts) => state.runtimeTransport.nativeFetch(url, opts),
