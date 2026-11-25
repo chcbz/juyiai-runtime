@@ -451,13 +451,29 @@ test('deferred successor blocks bootstrap egress and persists the source before 
 })
 
 // Source-only adapter seam: API enrollment is an explicit fixture, never inferred from historical records.
-test('durable discussion source keeps original turn/dispatch/context across restart without a workspace command', async t => {
+for (const origin of ['configured','managed']) test(`durable discussion source keeps original turn/dispatch/context across restart without a workspace command (${origin})`, async t => {
   const {PersistentChatInbox, canonicalSha256, validateChatDispatch} = await import('../chat-runtime.mjs')
   const {startDiscussionCapture,recoverStoppedDiscussionCapture} = await import('../metered-request-capture.mjs')
   const wire = JSON.parse(await readFile(new URL('../contracts/api-hosted-wire-v1.json', import.meta.url),'utf8'))
   const {fixture}=await import('../../cyf-agent-runtime-v1/test/channel-fixture.mjs')
   const f=await fixture(t,{count:2,firstIdentity:{tenantId:wire.tenantId,clientId:wire.clientId,canonicalAgentId:wire.targetAgentId}})
-  const config=await f.config(),agent=config.agents[0],rootDir=join(agent.stateRoot,'inbox')
+  const config=await f.config();let agent=config.agents[0];
+  if (origin==='managed') {
+    // Real HostingControl journal + materialization. From the first capture, put the
+    // original dispatch and all seven receipt revisions in that subject's own inbox.
+    const {hostingFixture,quotedPreparation,candidateRequest}=await import('../../cyf-agent-runtime-v1/test/hosting-fixture.mjs');
+    const {runtimeSubjectKey}=await import('../../cyf-agent-runtime-v1/lib/manifest.mjs');
+    const {tenantId,clientId,ownerJiacn,targetAgentId:canonicalAgentId}=wire;
+    const h=await hostingFixture(t,{scope:{tenantId,clientId,ownerJiacn}});
+    const catalog=JSON.parse(await readFile(new URL('../../cyf-agent-runtime-v1/test/fixtures/gss-hosting-control-v1.json',import.meta.url)));
+    const prep=quotedPreparation({...catalog.prepareRequest,tenantId,clientId,ownerJiacn,canonicalAgentId});
+    const candidate=await h.control().handle(prep);await h.control().handle(candidateRequest(prep,candidate,'ensure'));await h.settle();
+    agent=h.host().agents.get(runtimeSubjectKey(candidate.manifest)).agent;
+    const hostingControlPath=join(f.root,'managed-hosting.json');await f.json(hostingControlPath,h.controlConfig);
+    await f.json(f.path,{...f.raw,hostId:h.hostConfig.hostId,agents:[f.entries[1]],hostingControlPath});
+    assert.equal(h.sessionCount(),1);
+  }
+  const rootDir=join(agent.stateRoot,'inbox')
   const {spawnSync}=await import('node:child_process'),{fileURLToPath}=await import('node:url')
   const cli=fileURLToPath(new URL('../../cyf-agent-runtime-v1/agent-runtime.mjs',import.meta.url))
   const report=(subject=agent.subjectKey,extra=[])=>spawnSync(process.execPath,[cli,'inspect-discussion-receipts','--config',f.path,'--subject',subject,...extra],
