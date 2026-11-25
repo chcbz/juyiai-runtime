@@ -101,8 +101,12 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     const {inspectLocalDiscussionEvidence}=await import('./lib/evidence-handover.mjs');
     let expected;
     if (options['expected-sources']) {
-      const manifest=await readPrivateJson(options['expected-sources'],null);
-      if (manifest?.subjectKey!==agent.subjectKey || !Array.isArray(manifest.captureIds) || !manifest.captureIds.length
+      const entry=await readPrivateJson(options['expected-sources'],null);
+      const {origin,manifest}=entry ?? {};
+      const local=agent.manifest;
+      if (!origin || origin.tenant_id!==local.tenantId || origin.client_id!==local.clientId
+          || origin.target_agent_id!==local.canonicalAgentId || origin.installation_id!==local.installationId
+          || origin.host_id!==config.hostId || manifest?.subjectKey!==agent.subjectKey || !Array.isArray(manifest.captureIds) || !manifest.captureIds.length
           || manifest.captureIds.some(id=>typeof id!=='string'||id.length!==64||!/^[0-9a-f]+$/.test(id))
           || new Set(manifest.captureIds).size!==manifest.captureIds.length) throw failure('RUNTIME_EXPECTED_SOURCES_INVALID');
       expected=manifest.captureIds;

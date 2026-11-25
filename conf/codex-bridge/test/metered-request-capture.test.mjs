@@ -457,7 +457,7 @@ for (const origin of ['configured','managed']) test(`durable discussion source k
   const wire = JSON.parse(await readFile(new URL('../contracts/api-hosted-wire-v1.json', import.meta.url),'utf8'))
   const {fixture}=await import('../../cyf-agent-runtime-v1/test/channel-fixture.mjs')
   const f=await fixture(t,{count:2,firstIdentity:{tenantId:wire.tenantId,clientId:wire.clientId,canonicalAgentId:wire.targetAgentId}})
-  const config=await f.config();let agent=config.agents[0];
+  const config=await f.config();let agent=config.agents[0],inspectionHost=config.hostId;
   if (origin==='managed') {
     // Real HostingControl journal + materialization. From the first capture, put the
     // original dispatch and all seven receipt revisions in that subject's own inbox.
@@ -468,7 +468,7 @@ for (const origin of ['configured','managed']) test(`durable discussion source k
     const catalog=JSON.parse(await readFile(new URL('../../cyf-agent-runtime-v1/test/fixtures/gss-hosting-control-v1.json',import.meta.url)));
     const prep=quotedPreparation({...catalog.prepareRequest,tenantId,clientId,ownerJiacn,canonicalAgentId});
     const candidate=await h.control().handle(prep);await h.control().handle(candidateRequest(prep,candidate,'ensure'));await h.settle();
-    agent=h.host().agents.get(runtimeSubjectKey(candidate.manifest)).agent;
+    agent=h.host().agents.get(runtimeSubjectKey(candidate.manifest)).agent;inspectionHost=h.hostConfig.hostId;
     const hostingControlPath=join(f.root,'managed-hosting.json'), hostSettings=structuredClone(h.controlConfig);
     hostSettings.template.profile.codexBin=await (await import('node:fs/promises')).realpath(hostSettings.template.profile.codexBin);
     await f.json(hostingControlPath,hostSettings);
@@ -570,12 +570,17 @@ for (const origin of ['configured','managed']) test(`durable discussion source k
   const planAck=join(ackDir,'plan.json'),sourceAck=join(ackDir,'source-0.json'),planBytes=await fs.readFile(planAck)
   counts({sources:1,acknowledged:1,pending:0,unverified:0},0)
   const roster=join(agent.stateRoot,'expected-sources.json'),actual=cap.captureId,absentId='0'.repeat(64)
+  const deviceOrigin={tenant_id:wire.tenantId,client_id:wire.clientId,target_agent_id:wire.targetAgentId,
+    installation_id:agent.manifest.installationId,host_id:inspectionHost,runtime_instance_id:'original-runtime',session_generation:'1'}
+  const entry=(ids,changes={})=>({origin:{...deviceOrigin,...changes},manifest:{subjectKey:agent.subjectKey,captureIds:ids}})
   for(const [ids,status,missing,unexpected] of [[[actual],0,0,0],[[actual,absentId],2,1,0],[[absentId],2,1,1]]){
-    await writeFile(roster,JSON.stringify({subjectKey:agent.subjectKey,captureIds:ids}),{mode:0o600})
+    await writeFile(roster,JSON.stringify(entry(ids)),{mode:0o600})
     const r=report(agent.subjectKey,['--expected-sources',roster]);assert.equal(r.status,status,r.stderr)
     assert.deepEqual(JSON.parse(r.stdout),{sources:1,acknowledged:1,pending:0,unverified:0,expected:ids.length,missing,unexpected})
   }
-  for(const manifest of [{subjectKey:agent.subjectKey,captureIds:[actual,actual]},{subjectKey:'other',captureIds:[actual]}]){
+  for(const manifest of [entry([actual,actual]),{...entry([actual]),manifest:{subjectKey:'other',captureIds:[actual]}},
+    entry([actual],{installation_id:'other-installation'}),entry([actual],{host_id:'other-host'}),entry([actual],{target_agent_id:'other-agent'}),
+    entry([actual],{installation_id:undefined}),entry([actual],{host_id:undefined}),entry([actual]).manifest]){
     await writeFile(roster,JSON.stringify(manifest));const r=report(agent.subjectKey,['--expected-sources',roster]);assert.notEqual(r.status,0);assert.equal(r.stdout,'')
   }
   assert.equal(await inspect(),true)
