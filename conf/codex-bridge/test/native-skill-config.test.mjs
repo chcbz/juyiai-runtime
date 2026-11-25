@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, rmSync, chmodSync, symlinkSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { tmpdir } from 'node:os'
-import { loadNativeSkillConfiguration, nativeSkillOrigins, nativeSkillConfigurationPath } from '../native-skill-config.mjs'
+import { loadNativeSkillConfiguration, nativeSkillOrigins, nativeSkillConfigurationPath, readNativeSkillSubjectConfig } from '../native-skill-config.mjs'
 function fixture(t) {
   const root = mkdtempSync(resolve(tmpdir(), 'native-config-')); t.after(() => rmSync(root, { recursive: true, force: true }))
   const scope = { tenantId: 'tenant', ownerJiacn: 'owner', clientId: 'client', agentId: 'agent' }
@@ -89,7 +89,15 @@ test('explicit profile config retains precedence and local-only work never reads
   assert.deepEqual(loadNativeSkillConfiguration({ ...f, file: undefined, directory: undefined }), [])
 })
 
-test('domain execution never loads installation environment, search or network origins', t => {
+test('managed subject can configure a native image model without image skill credentials or a template change', t => {
   const f = fixture(t)
-  assert.deepEqual(loadNativeSkillConfiguration({...f,file:'/missing',command:{...f.command,toolPolicyRef:'NATIVE_DOMAIN_API_V1'}}),[])
+  const settings = { model: 'image-model', generatePackageSha256: 'a'.repeat(64) }
+  const options = { directory: f.root, scope: f.scope }
+  assert.equal(readNativeSkillSubjectConfig(options), null)
+  const path = nativeSkillConfigurationPath(f.root, f.scope)
+  writeFileSync(path, JSON.stringify({ schemaVersion: 1, scope: f.scope, installations: {}, nativeImage: settings }), { mode: 0o600 })
+  assert.deepEqual(readNativeSkillSubjectConfig(options).nativeImage, settings)
+  assert.deepEqual(loadNativeSkillConfiguration({ ...options, command: f.command, entries: f.entries }), [])
+  assert.equal(readNativeSkillSubjectConfig({ ...options, scope: { ...f.scope, agentId: 'other' } }), null)
+  assert.throws(() => readNativeSkillSubjectConfig({ file: path, scope: { ...f.scope, agentId: 'other' } }), /SCOPE_MISMATCH/)
 })
