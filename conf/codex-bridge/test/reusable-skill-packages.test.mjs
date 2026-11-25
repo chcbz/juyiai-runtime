@@ -9,7 +9,7 @@ import { zip, hash, binding, profile, headers, command, activate } from './fixtu
 
 for (const skillKey of ['document-workbench', 'browser-workbench', 'image-understanding', 'web-research', 'skill-management', 'model-maintenance', 'text-file', 'analysis']) {
   test(`${skillKey}: same ordinary package installs independently for two agents and resolves only its authorized binding`, async t => {
-    const version = skillKey === 'document-workbench' ? '1.0.1' : skillKey === 'skill-management' ? '1.2.0' : ['text-file', 'analysis','model-maintenance'].includes(skillKey) ? '1.1.0' : '1.0.0'
+    const version = skillKey === 'document-workbench' ? '1.0.2' : skillKey === 'skill-management' ? '1.2.0' : ['text-file', 'analysis','model-maintenance'].includes(skillKey) ? '1.1.0' : '1.0.0'
     const source = new URL(`../../skills/${skillKey}/`, import.meta.url), entries = []
     const collect = (prefix = '') => {
       for (const entry of readdirSync(new URL(prefix || './', source), { withFileTypes: true })) {
@@ -19,7 +19,7 @@ for (const skillKey of ['document-workbench', 'browser-workbench', 'image-unders
       }
     }
     collect()
-    assert.ok(entries.every(e => e.name === 'SKILL.md' || e.name.startsWith('references/') || e.name.startsWith('scripts/')))
+    assert.ok(entries.every(e => e.name === 'SKILL.md' || e.name.startsWith('references/') || (skillKey === 'document-workbench' ? e.name === 'scripts/text-pdf.mjs' : e.name.startsWith('scripts/'))))
     const bytes = zip(entries), root = mkdtempSync(resolve(tmpdir(), 'cyf-reusable-skills-'))
     t.after(() => rmSync(root, { recursive: true, force: true }))
     const installed = []

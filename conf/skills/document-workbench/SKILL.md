@@ -2,11 +2,15 @@
 name: document-workbench
 description: 核对和整理已授权的 TXT、Markdown、HTML、DOCX、XLSX、PPTX 或文本型 PDF，生成可下载文档、表格及中文 PDF；适用于资料交叉核对和多格式交付，不包含扫描件 OCR。
 metadata:
-  version: "1.0.1"
+  version: "1.0.2"
 ---
 # 文档与表格工作台
 
 使用本次任务提供的实际输入路径和输出要求，不从文件名猜内容。先确定需要读取、修改还是生成；不为简单文本任务调用浏览器，也不强制生成全部格式。
+
+## 直接生成纯文本版式的中文 PDF
+
+以实际资料起草 UTF-8 文本，使用当前执行提供的 Node 和本技能文件直接生成：`node <本技能目录>/scripts/text-pdf.mjs <本次文本路径> /outputs/activity-plan.pdf`。只传真实路径，不需要用 `ls`、`which`、`cat` 等命令探查工具或技能目录；需要读文件时用 Node `fs`。脚本不覆盖已有成果，不访问外站。复杂表格/排版沿用下文 HTML 方法。生成后仍按下文检查页数和正文，再暂存并提交。
 
 ## 环境与方法
 
