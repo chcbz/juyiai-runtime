@@ -14,6 +14,7 @@ test('observed gateway zero-write breakdown does not double count or retain item
  for(const sse of [false,true]){
   const o=observation(fixture,sse)
   assert.deepEqual(o.measuredQuantities.tokens,{INPUT:'2833',CACHED_INPUT:'0',OUTPUT:'69'})
+  assert.deepEqual(o.reportedUsage,{input_tokens:2833,input_tokens_details:{cached_tokens:0},output_tokens:69,output_tokens_details:{reasoning_tokens:0},total_tokens:2902});
   assert.deepEqual(o.reasonCodes,['BILLING_IDENTITY_UNKNOWN']);assert.equal(o.actualBillingIdentity,null)
   assert.ok(!JSON.stringify(o).includes('item_'));assert.ok(!JSON.stringify(o).includes('attribution'))
  }

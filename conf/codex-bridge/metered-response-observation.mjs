@@ -14,13 +14,13 @@ function quantities(raw, supported) {
     const detail={};for(const [k,n] of Object.entries(value)) {
       if(k==='cache_write_tokens_details' && key==='input_tokens_details') {
         if(!object(n)||Object.keys(n).length!==2||!['ttl_12h_tokens','ttl_30m_tokens'].every(x=>Object.hasOwn(n,x)&&n[x]===0))unknown=true
-        else detail[k]={ttl_12h_tokens:0,ttl_30m_tokens:0}
-      } else if(fields[key].includes(k) && count(n)) {detail[k]=n;if(k==='cache_write_tokens'&&n!==0)unknown=true}
+        // Storage contract intentionally retains only cached/reasoning details.
+      } else if(fields[key].includes(k) && count(n)) {if(k==='cache_write_tokens'){if(n!==0)unknown=true}else detail[k]=n}
       else unknown=true
     }
     if(Object.keys(detail).length) usage[key]=detail
   }
-  if(usage.input_tokens_details?.cache_write_tokens_details && usage.input_tokens_details.cache_write_tokens!==0)unknown=true
+  if(object(raw?.input_tokens_details)&&Object.hasOwn(raw.input_tokens_details,'cache_write_tokens_details')&&raw.input_tokens_details.cache_write_tokens!==0)unknown=true
   const {input_tokens:i,output_tokens:o,total_tokens:t}=usage,c=usage.input_tokens_details?.cached_tokens,r=usage.output_tokens_details?.reasoning_tokens
   const valid=supported && !unknown && [i,o,t,c,r].every(count) && i+o===t && c<=i && r<=o
   return {reportedUsage:Object.keys(usage).length?usage:null, measuredQuantities:valid?{normalizationBasis:'RESPONSES_TEXT_TOKENS_V1',tokens:{INPUT:String(i-c),CACHED_INPUT:String(c),OUTPUT:String(o)},coverage:'COMPLETE'}:null}
