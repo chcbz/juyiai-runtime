@@ -37,6 +37,37 @@ const privateFile = async (path, bytes) => {
   } finally { await unlink(temporary).catch(() => {}); }
 };
 
+const managedSubjectRoot = (hosting, key) => resolve(hosting.managedRoot, key);
+
+// Inspection projects only the identity and inbox location. Do not initialize HostingControl:
+// initialization takes writer ownership and can reconcile enrollment or materialize state.
+export async function receiptInspectionAgent(config, key) {
+  const fail = () => { throw hostingError('RUNTIME_EXACT_SUBJECT_REQUIRED'); };
+  if (typeof key !== 'string' || key.length !== 64 || !/^[a-f0-9]+$/.test(key)) fail();
+  const fixed = config.agents.find(agent => agent.subjectKey === key);
+  const hosting = config.hostingControl;
+  if (!hosting) return fixed || fail();
+  await requireOwnedPrivateRoot(hosting.managedRoot);
+  const journal = await readPrivateJson(resolve(hosting.managedRoot, 'hosting-journal.json'), null);
+  if (journal?.formatVersion !== 2 || journal.hostId !== config.hostId || !journal.subjects ||
+      typeof journal.subjects !== 'object' || Array.isArray(journal.subjects)) fail();
+  if (!Object.hasOwn(journal.subjects, key)) return fixed || fail();
+  const subject = journal.subjects[key];
+  const manifest = validateManifest(subject.manifest);
+  if (runtimeSubjectKey(manifest) !== key) fail();
+  if (fixed || subject.staticProfileId !== undefined) {
+    if (!fixed || fixed.profile.profileId !== subject.staticProfileId || !same(fixed.manifest, manifest)) fail();
+    return fixed;
+  }
+  const root = managedSubjectRoot(hosting, key);
+  await requireOwnedPrivateRoot(root);
+  if (!same(await readPrivateJson(resolve(root, 'subject.json'), null), { manifest }) ||
+      !same(await readPrivateJson(resolve(root, 'manifest.json'), null), manifest)) fail();
+  const stateRoot = resolve(root, 'state');
+  await requireOwnedPrivateRoot(stateRoot);
+  return { subjectKey: key, stateRoot, manifest, profile: { agentId: manifest.canonicalAgentId } };
+}
+
 export class HostingControl {
   constructor({ host, config, apiOrigin, clientFactory = settings => new RuntimeV1Client(settings), workspacePolicies = new Map(), now = Date.now, logger = () => {}, observeInventory = observeInstalledSkillInventory }) {
     this.host = host; this.config = validateHostingConfig(config); this.apiOrigin = apiOrigin; this.clientFactory = clientFactory; this.workspacePolicies = workspacePolicies; this.now = now; this.logger = logger;
@@ -59,7 +90,7 @@ export class HostingControl {
       if (!configured || runtimeSubjectKey(configured.manifest) !== key) throw hostingError('HOSTING_SUBJECT_STATIC_CONFLICT');
       return { ...configured, manifest: subject.manifest };
     }
-    const root = resolve(this.config.managedRoot, key);
+    const root = managedSubjectRoot(this.config, key);
     return { subjectKey: key, manifest: subject.manifest, stateRoot: resolve(root, 'state'),
       manifestPath: resolve(root, 'manifest.json'), profilePath: resolve(root, 'profile.json'),
       publicFiles: Object.freeze({ 'config.toml': subject.template.codexConfig, 'auth.json': serializeModelAuth(subject.template.modelAuth) }),

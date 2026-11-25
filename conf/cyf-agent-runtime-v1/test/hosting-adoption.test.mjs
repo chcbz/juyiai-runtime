@@ -42,6 +42,10 @@ test('adoption preserves exact static installation, executor, private files and 
   assert.equal(await readFile(resolve(peer.profile.codexHome, 'private.txt'), 'utf8'), 'private-canary');
   assert.equal(control.managesActivation(peer.subjectKey), false);
   control.validateJournal();
+  const {receiptInspectionAgent} = await import('../lib/hosting-control.mjs');
+  const config={...f.hostConfig, hostingControl:f.controlConfig};
+  assert.equal(await receiptInspectionAgent(config,peer.subjectKey),peer);
+  await assert.rejects(receiptInspectionAgent({...config,agents:[]},peer.subjectKey),code('RUNTIME_EXACT_SUBJECT_REQUIRED'));
   const current = await control.handle({ ...initial(request), method: 'current' });
   assert.equal(current.installationId, peer.manifest.installationId); assert.equal(current.outcome, 'CURRENT');
   assert.equal((await control.handle({ ...request, method: 'observe' })).outcome, 'UNKNOWN');

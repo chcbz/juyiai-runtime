@@ -95,8 +95,9 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   const { command, options } = parseArgs(argv);
   const config = await readRuntimeHostConfig(resolve(options.config));
   if (command === 'inspect-discussion-receipts') {
-    const agent=config.agents.find(a=>a.subjectKey===options.subject);
-    if (!agent || Object.keys(options).some(k=>!['subject','config','expected-sources'].includes(k))) throw failure('RUNTIME_EXACT_SUBJECT_REQUIRED');
+    if (Object.keys(options).some(k=>!['subject','config','expected-sources'].includes(k))) throw failure('RUNTIME_EXACT_SUBJECT_REQUIRED');
+    const {receiptInspectionAgent}=await import('./lib/hosting-control.mjs');
+    const agent=await receiptInspectionAgent(config,options.subject);
     const {inspectLocalDiscussionEvidence}=await import('./lib/evidence-handover.mjs');
     let expected;
     if (options['expected-sources']) {
