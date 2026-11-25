@@ -50,7 +50,7 @@ async function discussionPeer({discussion,port,session,rotate,cutover}){
   assert.ok(Number.isInteger(port)&&port>0&&port<=65535)
   const m=validateChatDispatch(discussion),apiOrigin=`http://127.0.0.1:${port}`
   const client=new RuntimeV1Client({apiBaseUrl:apiOrigin,manifest:{}});client.currentSession=session
-  const rootDir=cutover?join(tmpdir(),'cutover-inbox'):await mkdtemp(join(tmpdir(),'discussion-api-peer-'))
+  const rootDir=cutover?join(tmpdir(),cutover==='live'?'inbox':'cutover-inbox'):await mkdtemp(join(tmpdir(),'discussion-api-peer-'))
   try{
     const profile={agentId:session.canonicalAgentId},scope={...profile,clientId:m.clientId,tenantId:m.tenantId}
     const inbox=new PersistentChatInbox({rootDir,profile});inbox.initialize()
