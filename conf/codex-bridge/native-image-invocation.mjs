@@ -19,7 +19,7 @@ function selectCounters(value, fields) {
 }
 
 export function prepareNativeImageInvocation({ store, checkActive, inputRefs = [], pricing = {},
-  operation, model, subjectHome, chatProvider, configReadback, fetchFn }) {
+  operation, model, childRouteSha256, subjectHome, chatProvider, configReadback, fetchFn }) {
   if (typeof checkActive !== 'function' || !label(model)) fail('NATIVE_IMAGE_CONFIG_INVALID')
   if (!Array.isArray(inputRefs) || inputRefs.length > 4 || new Set(inputRefs).size !== inputRefs.length
       || (operation === 'edit') !== Boolean(inputRefs.length)) fail('NATIVE_IMAGE_INPUT_INVALID')
@@ -50,7 +50,10 @@ export function prepareNativeImageInvocation({ store, checkActive, inputRefs = [
         checkActive()
         // One image effect per execution, not per model call ID or output filename.
         const id = randomUUID()
-        if (!store.reserve('native-image-start', {invocationId:id})) return false
+        const reservation = { invocationId:id }
+        if (store.command.usageMode === 'RESPONSE_V2' && childRouteSha256) Object.assign(reservation, {
+          executionId: store.command.executionId, runId: store.command.runId, snapshotDigest: store.command.snapshotDigest, childRouteSha256 })
+        if (!store.reserve('native-image-start', reservation)) return false
         invocationId = id
         try { record('STARTED', null) } catch (error) { invocationId = null; throw error }
         return true

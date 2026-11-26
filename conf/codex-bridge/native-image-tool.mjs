@@ -83,7 +83,7 @@ export function nativeImageToolPolicy({ operation, settings, chatProvider, confi
       if (store.read('native-selection') || store.read('native-terminal')) fail('NATIVE_RESULT_ALREADY_FROZEN')
     }
     try {
-      const invoke = prepareNativeImageInvocation({ operation, model: settings.model, pricing: settings, subjectHome,
+      const invoke = prepareNativeImageInvocation({ operation, model: settings.model, pricing: settings, childRouteSha256: nativeImageRouteDigest(operation, settings, chatProvider), subjectHome,
         chatProvider, configReadback: configReadback(), fetchFn, inputRefs: args.inputRefs, checkActive: active, store })
       const bytes = await invoke({ prompt: args.prompt, signal })
       return await session.stageHostImage(ctx, bytes)

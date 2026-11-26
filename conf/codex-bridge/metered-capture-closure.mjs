@@ -1,5 +1,6 @@
 /** Source-only closure for the metered HTTP root epoch. No lease, model adapter,
  * provider credential, command dispatch or wallet dependency in recovery. */
+import { meteredImageReference } from './metered-image-reference.mjs'
 import { resolve } from 'node:path'
 import { skillDigest, skillId, skillSha } from './skill-executor.mjs'
 import { directory, readPrivate, persist, first, rootEpochDirectories } from './metered-capture-files.mjs'
@@ -82,7 +83,11 @@ async function auditSubject(parent,{executionId,runId,snapshotDigest},assertStop
   // Current local-artifact admission proves only epoch zero (design §4.2.3).
   if(epochs.length>1 && plan.observation.coveragePolicyVersion==='NATIVE_LOCAL_ARTIFACT_TEXT_V1')allReasons.add('UNSUPPORTED_COST_SOURCE')
   const reasonCodes=[...allReasons].sort(),closeState=reasonCodes.length?'SEALED_INCOMPLETE':'DRAINED'
-  const captureFinal=await final(dir,names,'capture-final-1','CAPTURE_FINAL',[],{planEvidenceSha256:plan.evidenceSha256,sourceCount:String(finals.length),sourcesSha256:skillDigest([...finals].sort(([a],[b])=>a<b?-1:1)),closeState,reasonCodes})
+  // Re-verify references on replay, but never reinterpret an older or incomplete final as a newer one.
+  const sealed=names.has('capture-final-1.json') ? await readPrivate(dir,'capture-final-1') : null
+  const child=plan.observation.coveragePolicyVersion==='NATIVE_PINNED_IMAGE_V1' && (!sealed || sealed.observation.imageInvocation)
+    ? await meteredImageReference(parent,{executionId,runId,snapshotDigest}) : null
+  const captureFinal=await final(dir,names,'capture-final-1','CAPTURE_FINAL',[],{...(child?{imageInvocation:child}:{}),planEvidenceSha256:plan.evidenceSha256,sourceCount:String(finals.length),sourcesSha256:skillDigest([...finals].sort(([a],[b])=>a<b?-1:1)),closeState,reasonCodes})
   const marker={...binding,...(finals.length===1?{sourceFinal:finals[0]}:{sourceFinals:finals}),captureFinal:tuple(captureFinal),closeState}
   if(names.has('usage-capture-finalized.json'))yes(skillDigest(await readPrivate(dir,'usage-capture-finalized'))===skillDigest(marker))
   else {yes(assertStopped);await assertStopped();await persist(dir,'usage-capture-finalized',marker)}

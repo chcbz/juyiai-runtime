@@ -635,3 +635,17 @@ test('pinned Images enables only parent text-token observation, never complete c
   assert.equal(capture.textTokenProtocol,true);
   assert.equal((await capture.sealStopped(()=>{})).closeState,'SEALED_INCOMPLETE');
 });
+
+test('image final links only the single reserved child in the same run and re-verifies both phase digests',async t=>{
+  const args={coveragePolicyVersion:'NATIVE_PINNED_IMAGE_V1'}
+  const id='11111111-1111-4111-8111-111111111111',route='e'.repeat(64)
+  async function prepare(runId){
+    const f=await openRoot(t,args);f.store.reserve('native-image-start',{invocationId:id,runId,executionId:'exec1',snapshotDigest:'a'.repeat(64),childRouteSha256:route});f.store.write('native-image-binding',{operation:'generate',packageSha256:'b'.repeat(64)})
+    const start={schemaVersion:1,invocationId:id,operation:'generate',protocol:'openai-images-v1',channel:'test',tier:'test',priceVersion:'v',requestedModel:'im',observedAt:4,phase:'STARTED',evidence:null},end={...start,observedAt:5,phase:'TERMINAL',evidence:{providerRequestId:'image-response',usage:{total_tokens:123}}};
+    f.store.write(`provider-usage-${id}-started`,start);f.store.write(`provider-usage-${id}-terminal`,end);await f.capture.markStopped(()=>{});return {...f,start,end}
+  }
+  const f=await prepare('run1');await recoverStoppedMeteredRoot(f.store,()=>{});const o=(await f.read('capture-final-1')).observation
+  assert.deepEqual(o.imageInvocation,{invocationId:id,operation:'generate',childRouteSha256:route,startedSha256:skillDigest(f.start),terminalSha256:skillDigest(f.end)});assert.equal(o.closeState,'SEALED_INCOMPLETE')
+  f.store.write(`provider-usage-${id}-terminal`,{...f.end,observedAt:6});await assert.rejects(recoverStoppedMeteredRoot(f.store,()=>{}),{code:'METERED_CAPTURE_SOURCE_CONFLICT'})
+  const g=await prepare('foreign-run');await recoverStoppedMeteredRoot(g.store,()=>{});assert.equal((await g.read('capture-final-1')).observation.imageInvocation,undefined)
+})
