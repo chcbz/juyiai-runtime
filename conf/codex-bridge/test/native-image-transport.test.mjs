@@ -1,10 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { prepareNativeImageCall } from '../native-image-transport.mjs'
 
-const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X8ZkAAAAASUVORK5CYII=', 'base64')
+const png = readFileSync(new URL('./fixtures/native-edit-input.png', import.meta.url))
 function fixture(t, overrides = {}) {
   const home = mkdtempSync('/var/tmp/cyf-image-transport-')
   t.after(() => rmSync(home, { recursive: true, force: true }))

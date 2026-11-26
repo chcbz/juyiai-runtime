@@ -9,7 +9,7 @@ import { SkillUsageDelivery } from '../skill-usage-delivery.mjs'
 import { runNativeExecution } from '../native-execution.mjs'
 import { checkPng, makePng, offlinePackage } from '../../skills/image-process/test/fixture.mjs'
 
-const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X8ZkAAAAASUVORK5CYII=', 'base64')
+const png = readFileSync(new URL('./fixtures/native-edit-input.png', import.meta.url))
 const hash = 'a'.repeat(64), apiOrigin = 'https://api.example', agentId = 'agent1'
 function fixture(t, kind = 'TASK', operation = 'generate', mountPinnedSkill = false, metered = false) {
   const rootDir = mkdtempSync('/var/tmp/cyf-native-image-tool-')
@@ -92,7 +92,9 @@ for (const kind of ['TASK', 'PRIVATE']) for (const op of ['generate', 'edit']) t
     assert.equal(options.nativeExecution.networkAccess, false)
     assert.deepEqual(options.nativeExecution.tools.map(t => t.name), ['artifact_stage', 'result_propose', tool])
     const { callTool } = options.nativeExecution
-    return { async startOrResumeThread() { return { threadId: 'thread' } }, async runTurn({ onAccepted }) {
+    return { async startOrResumeThread() { return { threadId: 'thread' } }, async runTurn({ onAccepted, input }) {
+      // Pinned edit passes the authorized original to the parent vision carrier as well as the child tool.
+      assert.deepEqual(input.filter(item => item.type === 'localImage'), op === 'edit' ? [{type:'localImage', path:'/inputs/image1'}] : [])
       const turn = { threadId: 'thread', turnId: 'turn' }
       onAccepted(turn)
       const ctx = { ...turn, executionId: 'exec', tool, callId: 'paid', arguments: { prompt: 'fixture', ...(op === 'edit' ? { inputRefs: ['image1'] } : {}) } }
