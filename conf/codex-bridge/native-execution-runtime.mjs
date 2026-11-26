@@ -114,7 +114,7 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
           const options = { executionId:binding.authorizationId, runId:store.command.runId,
             executionConfigSha256:skillDigest([layout.digest,store.commandDigest,engineVersion,channelNamespace,model,effort]),
             dispatchGroup:nativeDispatchGroup(layout.binding,{binarySha256:schema.binarySha256,engineVersion,channelNamespace,model,effort,
-              instructionsSha256:slot.meteredAdmission.instructionsSha256,toolPolicyRef:store.command.toolPolicyRef,coveragePolicyVersion}),
+              childRouteSha256:slot.meteredAdmission.childRouteSha256, instructionsSha256:slot.meteredAdmission.instructionsSha256,toolPolicyRef:store.command.toolPolicyRef,coveragePolicyVersion}),
             engineVersion,coveragePolicyVersion,rootSourceId:'source_model',channelNamespace,adapterVersion:'RESPONSES_TEXT_TOKENS_V1',checkActive,deferUntilThread:mode==='BEFORE_FIRST_TURN' }
           slot.meteredCapture=mode===null?await startMeteredRoot(store,options):await resumeStoppedMeteredRoot(store,options,mode)
         } catch (error) { if (error.code === 'EEXIST') fail('SKILL_RESULT_UNKNOWN'); throw error }

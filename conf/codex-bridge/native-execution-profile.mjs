@@ -206,10 +206,12 @@ export const NATIVE_NEUTRAL_MOUNT_TARGETS = Object.freeze(['.git', '.codex', '.a
 
 // Compatibility evidence about the local launch, not a provider invoice or a coverage verdict.
 // Call only with the validated layout. Keep the original per-run layout/command commitment separately.
-export function nativeDispatchGroup(binding, {binarySha256, engineVersion, channelNamespace, model, effort, instructionsSha256, toolPolicyRef, coveragePolicyVersion}) {
+export function nativeDispatchGroup(binding, {binarySha256, engineVersion, channelNamespace, model, effort, instructionsSha256, toolPolicyRef, coveragePolicyVersion, childRouteSha256}) {
   if ([model, effort, instructionsSha256, toolPolicyRef, engineVersion, binarySha256, channelNamespace, coveragePolicyVersion]
       .some(value => typeof value !== 'string' || !value.trim()) || engineVersion === 'unknown') return null
-  const routeSha256 = skillDigest(['NATIVE_LOCAL_ROUTE_V1', channelNamespace, model])
+  if (childRouteSha256 !== undefined && !hash(childRouteSha256)) return null
+  const routeSha256 = childRouteSha256 === undefined ? skillDigest(['NATIVE_LOCAL_ROUTE_V1', channelNamespace, model])
+    : skillDigest(['NATIVE_COMPOSITE_ROUTE_V1', channelNamespace, model, childRouteSha256])
   const toolConfigSha256 = skillDigest(['NATIVE_LOCAL_TOOLS_V1', toolPolicyRef, binding.tools,
     binding.skills.map(x => [x.skillKey,x.packageTreeDigest]), binding.skillConfiguration,
     binding.toolchain.shell, binding.toolchain.files.map(x => [x.sandboxPath,x.sha256]),

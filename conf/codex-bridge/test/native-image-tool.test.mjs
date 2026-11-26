@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { selectNativeImageTool, validateNativeImageSettings } from '../native-image-tool.mjs'
+import { nativeImageRouteDigest, nativeImageToolDefinition, selectNativeImageTool, validateNativeImageSettings } from '../native-image-tool.mjs'
 import { NATIVE_SKILL_SCRIPT_POLICY, skillDigest, skillHash } from '../skill-executor.mjs'
 import { SkillExecutionStore } from '../skill-execution-store.mjs'
 import { SkillUsageDelivery } from '../skill-usage-delivery.mjs'
@@ -33,6 +33,20 @@ function fixture(t, kind = 'TASK', operation = 'generate', mountPinnedSkill = fa
   const select = { settings, command, store, chatProvider, entries: [{ descriptor: { skillKey, skillVersion, skillInstallationId, packageSha256: hash, packageRoot: resolve(rootDir, 'offline-package'), packageTreeDigest: hash } }] }
   return { rootDir, scope, select, configReadback }
 }
+test('image reference routes separate model, mode, package, gateway and tier but not tariff revisions', t => {
+  const { select } = fixture(t), { chatProvider: provider } = select
+  const settings = {...select.settings, editPackageSha256:hash, channel:'gateway', tier:'standard', priceVersion:'p1'}
+  const before = nativeImageRouteDigest('generate',settings,provider)
+  assert.match(before,/^[0-9a-f]{64}$/)
+  assert.equal(nativeImageRouteDigest('generate',{...settings,priceVersion:'p2'},{...provider,baseUrl:provider.baseUrl+'/'}),before)
+  for(const changed of [{model:'other'},{tier:'priority'},{channel:'other'},{generatePackageSha256:'b'.repeat(64)},{mountPinnedSkill:true}])
+    assert.notEqual(nativeImageRouteDigest('generate',{...settings,...changed},provider),before)
+  assert.notEqual(nativeImageRouteDigest('edit',settings,provider),before)
+  assert.notEqual(nativeImageRouteDigest('generate',settings,{...provider,baseUrl:'https://other.example/v1'}),before)
+  assert.equal(nativeImageRouteDigest('generate',{...settings,channel:null},provider),null)
+  assert.equal(nativeImageRouteDigest('generate',settings,{...provider,baseUrl:'https://private:secret@other.example/v1'}),null)
+  assert.notDeepEqual(nativeImageToolDefinition('generate'),nativeImageToolDefinition('edit'))
+})
 for (const kind of ['TASK', 'PRIVATE']) for (const op of ['generate', 'edit']) test(`${kind} ${op} substitutes only the pinned operation and proposes the staged PNG`, async t => {
   const { select, configReadback, rootDir } = fixture(t, kind, op)
   const { store, command, settings, chatProvider } = select

@@ -44,16 +44,33 @@ export function selectNativeImageTool({ command, entries, store, settings, chatP
   return operation
 }
 
-export function nativeImageToolPolicy({ operation, settings, chatProvider, configReadback, subjectHome, store, checkActive, signal, session, fetchFn, reconcileOnly }) {
-  if (!reconcileOnly) {
-    try { nativeImagesEndpoint(operation, chatProvider, configReadback()) } catch { fail('NATIVE_IMAGE_CONFIG_INVALID') }
-  }
+// A route commitment identifies comparable measured work, not a rate, permission, or proof of complete usage.
+// No prompt, input, credential, execution ID, installation ID or historical tariff in this digest.
+export function nativeImageRouteDigest(operation, settings, provider) {
+  const spec = Object.values(packagePins).find(([op]) => op === operation)
+  if (!spec || !settings || !skillSha(settings[spec[1]]) || ![settings.model, settings.channel, settings.tier, settings.priceVersion].every(label)
+      || !provider?.id || provider.wireApi !== 'responses') return null
+  let base; try { base = new URL(provider.baseUrl) } catch { return null }
+  if (base.protocol !== 'https:' || base.username || base.password || base.search || base.hash || !/^\/v1\/?$/.test(base.pathname)) return null
+  return skillDigest(['NATIVE_PROVIDER_ROUTE_V1','openai-images-v1',operation,settings[spec[1]],settings.mountPinnedSkill === true,
+    provider.id,base.origin + '/v1',settings.model,settings.channel,settings.tier,'openai-images-modalities-v1'])
+}
+
+export function nativeImageToolDefinition(operation) {
+  if (!['generate','edit'].includes(operation)) fail('NATIVE_IMAGE_CONFIG_INVALID')
   const edit = operation === 'edit'
-  const tool = { type: 'function', name: edit ? 'native_image_edit' : 'native_image_generate',
+  return { type: 'function', name: edit ? 'native_image_edit' : 'native_image_generate',
     description: `${edit ? 'Edit approved image inputRefs' : 'Generate one image'} through the Agent image model. This may be a paid operation. Call only for the authorized user request, at most once. The response includes a read-only file path and an already staged artifactRef. Select the reference only if the original meets the request; otherwise use the tools and authorized skills available for the task.`,
     inputSchema: { type: 'object', properties: { prompt: { type: 'string' },
       ...(edit ? { inputRefs: { type: 'array', minItems: 1, maxItems: 4, uniqueItems: true, items: { type: 'string' } } } : {}) },
     required: ['prompt', ...(edit ? ['inputRefs'] : [])], additionalProperties: false } }
+}
+
+export function nativeImageToolPolicy({ operation, settings, chatProvider, configReadback, subjectHome, store, checkActive, signal, session, fetchFn, reconcileOnly }) {
+  if (!reconcileOnly) {
+    try { nativeImagesEndpoint(operation, chatProvider, configReadback()) } catch { fail('NATIVE_IMAGE_CONFIG_INVALID') }
+  }
+  const edit = operation === 'edit', tool = nativeImageToolDefinition(operation)
   return { tool, async call(ctx) {
     session.requireBoundTurn(ctx)
     if (store.read('result') || store.read('native-terminal') || store.read('native-selection')) fail('NATIVE_RESULT_ALREADY_FROZEN')

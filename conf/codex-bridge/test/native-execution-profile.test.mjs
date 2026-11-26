@@ -830,6 +830,11 @@ test('prospective comparison measures actual installed policy without starting o
     rmSync(f.execution,{recursive:true})
     const options = {skills,toolchain,stateRoot,skillConfiguration,tools:nativeExecution.tools,networkAccess:false,modelCatalogSha256:null}
     const before = measureProspectiveNativeGroup(options,settings)
+    const composite = {...settings,childRouteSha256:'a'.repeat(64)}
+    assert.deepEqual(measureProspectiveNativeGroup(options,composite),nativeDispatchGroup(launch.binding,composite))
+    assert.notEqual(nativeDispatchGroup(launch.binding,composite).routeSha256,expected.routeSha256)
+    assert.notEqual(nativeDispatchGroup(launch.binding,composite).executionConfigSha256,expected.executionConfigSha256)
+    assert.equal(nativeDispatchGroup(launch.binding,{...settings,childRouteSha256:null}),null)
     assert.deepEqual(before,expected); assert.deepEqual(Object.keys(before).sort(),['executionConfigSha256','routeSha256','toolConfigSha256','version'])
     for (const key of ['skills','skillConfiguration','networkAccess','modelCatalogSha256']) assert.equal(measureProspectiveNativeGroup({...options,[key]:undefined},settings),null)
     for (const key of Object.keys(settings)) assert.equal(measureProspectiveNativeGroup(options,{...settings,[key]:undefined}),null)

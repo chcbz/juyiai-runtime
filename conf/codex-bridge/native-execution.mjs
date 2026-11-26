@@ -5,7 +5,7 @@ import { resolve } from 'node:path'
 import { skillDigest, NATIVE_DOMAIN_API_POLICY, NATIVE_LOCAL_FILES_POLICY } from './skill-executor.mjs'
 import { NATIVE_SKILL_SCRIPT_POLICY } from './native-skill-config.mjs'
 import { NativeArtifactSession, nativeArtifactOutputTools } from './native-artifact-session.mjs'
-import { nativeImageToolPolicy } from './native-image-tool.mjs'
+import { nativeImageToolPolicy, nativeImageRouteDigest } from './native-image-tool.mjs'
 import { validateNativeOutputSnapshot } from './native-output-format.mjs'
 const fail = code => { throw Object.assign(new Error(code), { code }) }
 export const nativeExecutionRequestBinding = command => ({ schemaVersion: 1,
@@ -80,7 +80,7 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
     }
     const adapter = await profileRuntime.openNativeExecutionAdapter(resolve(store.directory, 'inputs'), requestKey, binding, {
       scratchDirectory: resolve(store.directory, 'scratch'), draftsDirectory: resolve(store.directory, 'drafts'),
-      ...(command.usageMode === 'RESPONSE_V2' ? { meteredAdmission: { store, instructionsSha256, localArtifactOnly:!image && onlyLocalArtifactTools(command.scope?.kind, command.privateTools, entries, skillConfiguration, command.toolPolicyRef), model: model ?? null, effort: effort ?? null } } : {}),
+      ...(command.usageMode === 'RESPONSE_V2' ? { meteredAdmission: { store, instructionsSha256, ...(image ? {childRouteSha256:nativeImageRouteDigest(nativeImage.operation,nativeImage.settings,nativeImage.chatProvider)} : {}), localArtifactOnly:!image && onlyLocalArtifactTools(command.scope?.kind, command.privateTools, entries, skillConfiguration, command.toolPolicyRef), model: model ?? null, effort: effort ?? null } } : {}),
       skills: selectedPackages(entries),
       skillConfiguration, nativeExecution, requireExistingState: Boolean(existing)
     })
