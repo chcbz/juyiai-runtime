@@ -1,6 +1,7 @@
 /** Opt-in substitution of one verified ordinary platform image package. A package
  * name, a prompt, or a locally installed script alone never opens host egress. */
 import { skillDigest, skillSha, NATIVE_SKILL_SCRIPT_POLICY } from './skill-executor.mjs'
+import { assertFileAuthConfig } from './model-auth.mjs'
 import { nativeImagesEndpoint } from './native-image-transport.mjs'
 import { prepareNativeImageInvocation } from './native-image-invocation.mjs'
 
@@ -21,7 +22,17 @@ export function validateNativeImageSettings(value) {
 export const pinnedImageOperation = (descriptor, settings) => settings && Object.hasOwn(packagePins, descriptor.skillKey)
   && skillSha(descriptor.packageSha256) && settings[packagePins[descriptor.skillKey][1]] === descriptor.packageSha256 ? packagePins[descriptor.skillKey][0] : null
 
-export function selectNativeImageTool({ command, entries, store, settings, chatProvider }) {
+// The isolated parent does not inherit the subject home. Only promote an explicit
+// setting read back from this same model/provider if launch will pass it to turn/start.
+// Absence is not an engine default and never proves a dispatch group.
+export function imageParentEffortFallback(profile, provider, readback) {
+  const model = profile?.chatModel || profile?.codexModel, config = readback?.config
+  if (profile?.chatReasoningEffort || !model || !provider || config?.model !== model
+      || !['none','minimal','low','medium','high','xhigh'].includes(config.model_reasoning_effort)) return null
+  try { assertFileAuthConfig(readback, provider) } catch { return null }
+  return config.model_reasoning_effort
+}
+export function selectNativeImageTool({ command, entries, store, settings, chatProvider, parentProfile, configReadback }) {
   const previous = store.read('native-image-binding')
   const matches = entries.filter(({descriptor}) => pinnedImageOperation(descriptor,settings))
   if (!matches.length) {
@@ -39,7 +50,11 @@ export function selectNativeImageTool({ command, entries, store, settings, chatP
       || executionBinding.executionId !== command.executionId || executionBinding.scopeSha256 !== skillDigest(command.scope)
       || !chatProvider?.id || typeof chatProvider.baseUrl !== 'string' || chatProvider.wireApi !== 'responses') fail('NATIVE_IMAGE_AUTHORIZATION_INVALID')
   const operation = packagePins[descriptor.skillKey][0]
-  const binding = { operation, installationId: descriptor.skillInstallationId, packageSha256: descriptor.packageSha256,
+  // Recovery consumes the original decision, including an older no-override binding;
+  // a restarted chat adapter must not change a turn already bound for execution.
+  const fallback = previous ? previous.parentEffort : command.scope.kind === 'TASK'
+    ? imageParentEffortFallback(parentProfile,chatProvider,configReadback) : null
+  const binding = { ...(fallback ? {parentEffort:fallback} : {}), operation, installationId: descriptor.skillInstallationId, packageSha256: descriptor.packageSha256,
     settingsSha256: skillDigest(settings), providerSha256: skillDigest(chatProvider) }
   if (previous && skillDigest(binding) !== skillDigest(previous)) fail('SKILL_RESULT_UNKNOWN')
   if (!previous) store.write('native-image-binding', binding)

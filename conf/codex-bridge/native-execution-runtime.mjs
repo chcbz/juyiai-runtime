@@ -49,7 +49,7 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
   }
   // Only internal dispatch preparation supplies the selected tools/skills and instruction commitment.
   // The executable, model, effort, route, toolchain and loaded model catalogue are profile-owned.
-  prospectiveNativeGroup({skills,skillConfiguration,tools,networkAccess,toolPolicyRef,instructionsSha256,localArtifactOnly,preparedLocalBudget=false,profileTools,childRouteSha256,pricingImage}) {
+  prospectiveNativeGroup({skills,skillConfiguration,tools,networkAccess,toolPolicyRef,instructionsSha256,localArtifactOnly,preparedLocalBudget=false,profileTools,childRouteSha256,pricingImage,imageParentEffort}) {
     const profile = this.profile, schema = this.nativeBinaryMeasurement
     if (!this.nativeExecutionDeclaration() || !this.nativeToolchain || profile.typedInspectionProviderNetwork !== 'restricted-proxy'
         || !profile.typedInspectionProviderId || !profile.typedInspectionProviderBaseUrl || !isCurrentAppServerMeasurement(profile,schema)) return null
@@ -58,7 +58,7 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
     return measureProspectiveNativeGroup({verifiedOnly:preparedLocalBudget,profileTools,pricingImage,skills,skillConfiguration,tools,networkAccess,stateRoot:this.stateRoot,
       toolchain:this.nativeToolchain,modelCatalogSha256:this.nativeModelCatalog?.sha256 ?? null}, {
       ...route, childRouteSha256, binarySha256:schema.binarySha256, model:profile.chatModel || profile.codexModel,
-      effort:profile.chatReasoningEffort, toolPolicyRef, instructionsSha256 })
+      effort:profile.chatReasoningEffort || (childRouteSha256 && imageParentEffort), toolPolicyRef, instructionsSha256 })
   }
   openNativeExecutionAdapter(inputDirectory, requestKey, requestBinding, { scratchDirectory, draftsDirectory, skills = [], skillConfiguration = [], nativeExecution, meteredCapture = null, meteredAdmission = null, requireExistingState = false } = {}) {
     if (nativeExecution) nativeExecution = Object.freeze({ ...nativeExecution, tools: structuredClone(nativeExecution.tools), ...(this.nativeModelCatalog ? { modelCatalogSha256: this.nativeModelCatalog.sha256 } : {}) })

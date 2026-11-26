@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { nativeImageRouteDigest, nativeImageToolDefinition, selectNativeImageTool, validateNativeImageSettings } from '../native-image-tool.mjs'
+import { imageParentEffortFallback, nativeImageRouteDigest, nativeImageToolDefinition, selectNativeImageTool, validateNativeImageSettings } from '../native-image-tool.mjs'
 import { NATIVE_SKILL_SCRIPT_POLICY, skillDigest, skillHash } from '../skill-executor.mjs'
 import { SkillExecutionStore } from '../skill-execution-store.mjs'
 import { SkillUsageDelivery } from '../skill-usage-delivery.mjs'
@@ -33,6 +33,23 @@ function fixture(t, kind = 'TASK', operation = 'generate', mountPinnedSkill = fa
   const select = { settings, command, store, chatProvider, entries: [{ descriptor: { skillKey, skillVersion, skillInstallationId, packageSha256: hash, packageRoot: resolve(rootDir, 'offline-package'), packageTreeDigest: hash } }] }
   return { rootDir, scope, select, configReadback }
 }
+test('image TASK freezes only a same-model same-provider operator effort; no guessed defaults or retrospective upgrades', t => {
+  const {select,configReadback}=fixture(t), profile={chatModel:'parent'}, config=configReadback()
+  Object.assign(config.config,{model:'parent',model_reasoning_effort:'high'})
+  const compare=(p=profile,r=config)=>imageParentEffortFallback(p,select.chatProvider,r)
+  assert.equal(compare(),'high');assert.equal(compare({...profile,chatReasoningEffort:'low'}),null)
+  for(const update of [{model:'other'},{model_reasoning_effort:null},{model_reasoning_effort:'unrecognized'},{model_provider:'other'}])
+    assert.equal(compare(profile,{config:{...config.config,...update}}),null)
+  selectNativeImageTool({...select,parentProfile:profile,configReadback:config})
+  assert.equal(select.store.read('native-image-binding').parentEffort,'high')
+  assert.equal(selectNativeImageTool(select),'generate') // restart before chat readback
+  for(const kind of ['TASK','PRIVATE']) {
+    const old=fixture(t,kind).select
+    selectNativeImageTool(kind==='PRIVATE'?{...old,parentProfile:profile,configReadback:config}:old)
+    selectNativeImageTool({...old,parentProfile:profile,configReadback:config})
+    assert.equal(old.store.read('native-image-binding').parentEffort,undefined)
+  }
+})
 test('image reference routes separate model, mode, package, gateway and tier but not tariff revisions', t => {
   const { select } = fixture(t), { chatProvider: provider } = select
   const settings = {...select.settings, editPackageSha256:hash, channel:'gateway', tier:'standard', priceVersion:'p1'}

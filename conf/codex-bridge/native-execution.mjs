@@ -5,7 +5,7 @@ import { resolve } from 'node:path'
 import { skillDigest, skillId, NATIVE_DOMAIN_API_POLICY, NATIVE_LOCAL_FILES_POLICY } from './skill-executor.mjs'
 import { NATIVE_SKILL_SCRIPT_POLICY } from './native-skill-config.mjs'
 import { NativeArtifactSession, nativeArtifactOutputTools } from './native-artifact-session.mjs'
-import { nativeImageToolPolicy, nativeImageRouteDigest, nativeImageToolDefinition, pinnedImageOperation } from './native-image-tool.mjs'
+import { imageParentEffortFallback, nativeImageToolPolicy, nativeImageRouteDigest, nativeImageToolDefinition, pinnedImageOperation } from './native-image-tool.mjs'
 import { nativeImagesEndpoint } from './native-image-transport.mjs'
 import { skillPackageTreeDigest } from './skill-manifest.mjs'
 import { validateNativeOutputSnapshot } from './native-output-format.mjs'
@@ -43,7 +43,7 @@ export function comparePreparedImage(profileRuntime, outputs, entry, settings, p
   nativeImagesEndpoint(operation,provider,config)
   if (!settings.mountPinnedSkill && skillPackageTreeDigest(entry.descriptor.packageRoot) !== entry.descriptor.packageTreeDigest) return null
   const tools = out => [...nativeArtifactOutputTools(out),nativeImageToolDefinition(operation)]
-  return profileRuntime.prospectiveNativeGroup({preparedLocalBudget:true,
+  return profileRuntime.prospectiveNativeGroup({preparedLocalBudget:true,imageParentEffort:imageParentEffortFallback(profileRuntime.profile,provider,config),
     ...(pricingDescriptor ? {pricingImage:{operation,model:settings.model,channel:settings.channel,tier:settings.tier,packageSha256:entry.descriptor.packageSha256,skillInstallationId:entry.descriptor.skillInstallationId,skillKey:entry.descriptor.skillKey,
       captureTools:[false,true].flatMap(artifactsRequired=>[false,true].map(multiple=>tools({dataSchema:null,artifactsRequired,multiple})))}} : {}), skills:settings.mountPinnedSkill ? selectedPackages([entry]) : [],
     skillConfiguration:[],networkAccess:false,localArtifactOnly:false,childRouteSha256,tools:tools(outputs),profileTools:tools({dataSchema:null}),

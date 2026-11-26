@@ -4246,14 +4246,14 @@ export const bindMeasuredSkillSession = (state, binding) => {
           }
           const settings = state.profile.nativeImage ?? (request.entries.some(({ descriptor }) => ['image-generate', 'image-edit'].includes(descriptor.skillKey))
             ? validateNativeImageSettings(subjectConfig()?.nativeImage) : null)
-          const operation = selectNativeImageTool({ ...request, settings, chatProvider })
+          const operation = selectNativeImageTool({ ...request, settings, chatProvider, parentProfile:state.profile, configReadback:state.appServerAdapter?.readback?.config })
           const skillConfiguration = operation ? [] : resolveNativeSkillConfiguration(request.command, request.entries, subjectConfig())
           if (operation && !request.store.read('native-start-attempt') && !state.appServerAdapter) await state.ensureAppServer?.()
           const nativeImage = operation ? { operation, settings, chatProvider,
             configReadback: () => state.appServerAdapter?.readback?.config, subjectHome: state.profile.codexHome,
             fetchFn: globalThis.fetch } : null
           return runNativeExecution({ ...request, ...(operation && !settings.mountPinnedSkill ? { entries: [] } : {}), profileRuntime, skillConfiguration, nativeImage,
-            model: state.profile.chatModel || state.profile.codexModel, effort: state.profile.chatReasoningEffort })
+            model: state.profile.chatModel || state.profile.codexModel, effort: (operation && request.store.read('native-image-binding')?.parentEffort) || state.profile.chatReasoningEffort })
         },
         getRuntimeHeaders: () => state.runtimeTransport?.headers(), fetchFn: (url, opts) => state.runtimeTransport.nativeFetch(url, opts),
         onFailed: command => state.nativeExecutionProfileRuntime?.releaseAdapter(`native:${command.executionId}:${command.snapshotDigest}`, { requestBinding: nativeExecutionRequestBinding(command) }),
