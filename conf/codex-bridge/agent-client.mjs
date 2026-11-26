@@ -1,4 +1,4 @@
-import { selectNativeImageTool, validateNativeImageSettings } from './native-image-tool.mjs'
+import { pinnedImageOperation, selectNativeImageTool, validateNativeImageSettings } from './native-image-tool.mjs'
 import { readModelAuthFile } from './model-auth.mjs'
 import { isDeepStrictEqual } from 'node:util'
 import { NativeExecutionProfileRuntime, nativeExecutionProfile } from './native-execution-runtime.mjs'
@@ -6361,6 +6361,22 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
           if (!runtime || entry.closed || entry.state.disposed || entry.state.profileClosing) return null
           return compareProspectiveTaskConfiguration(runtime,{scopeKind:'TASK',outputs,entries:[],skillConfiguration:[],
             toolPolicyRef:'NATIVE_LOCAL_FILES_V1',privateTools:null},true)
+        },
+        // Capability publication, not dispatch. No task payload, remote provider, or engine startup.
+        pricingProfiles: fence => {
+          const state=entry.state, registry=state?.skillRegistry, catalog=registry?.declaration()
+          if (!catalog || !state.nativeExecutionProfileRuntime || entry.closed || state.disposed || state.profileClosing) return []
+          const settings=state.profile.nativeImage ?? validateNativeImageSettings(readNativeSkillSubjectConfig({file:state.profile.skillExecutionConfigFile,scope:registry.scope})?.nativeImage)
+          const byOp=new Map()
+          for (const item of catalog.skills) {
+            const operation=pinnedImageOperation(item,settings)
+            if (!operation || !item.enabled) continue
+            const selected=registry.preparedInstruction({key:item.skillKey,version:item.skillVersion,installationId:item.skillInstallationId,packageSha256:item.packageSha256,policy:'NATIVE_SKILL_SCRIPT_V1'},fence)
+            if (!selected) continue
+            const proof=comparePreparedImage(state.nativeExecutionProfileRuntime,{mimeTypes:['image/png'],dataSchema:null},selected,settings,runtimeFileAuthProvider(state.profile),state.appServerAdapter?.readback?.config,true)
+            byOp.set(operation,byOp.has(operation)?null:proof)
+          }
+          return [...byOp.values()].filter(Boolean).sort((a,b)=>a.operation.localeCompare(b.operation))
         },
         comparePreparedInstruction: (outputs,pin,fence) => {
           const state=entry.state

@@ -99,6 +99,14 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
         return {sequence:profileSequence.toString(),profileSha256:profileSha};
       };
       const profileDigest = group => typeof group?.profileSha256 === 'string' && /^[0-9a-f]{64}$/.test(group.profileSha256) ? group.profileSha256 : null;
+      let pricingSequence=0n, pricingSha=null;
+      const pricingReport = healthy => {
+        let profiles=[];
+        if (healthy) try { profiles=executor.pricingProfiles?.(client.currentSession) ?? []; } catch { /* no valid profile, withdraw the cached proof */ }
+        const sha=createHash('sha256').update(JSON.stringify(profiles),'utf8').digest('hex');
+        if(pricingSha!==sha){pricingSequence++;pricingSha=sha;}
+        return {version:'NATIVE_PRICING_PROFILES_V1',sequence:String(pricingSequence),sha256:sha,profiles};
+      };
       let registrationEpoch = 0;
       let managementSession = null; // Confirmed session authority survives catalog-only re-registration.
       const inFlightSkillReceipts = new Set();
@@ -128,7 +136,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
         if (!client.currentSession || socket?.readyState !== 1) return false;
         const healthy = durable(); const retainConfirmed = channelConfirmed && declaredHealthy && healthy;
         declaredHealthy = healthy; requestTypes = healthy ? executor.readyCommandTypes() : [];
-        const envelope = module.buildProtocolEnvelope('agent.register', { ...executor.registrationPayload(),
+        const envelope = module.buildProtocolEnvelope('agent.register', { ...executor.registrationPayload(),pricingProfiles:pricingReport(healthy),
           messageId: randomUUID(), durableStateHealthy: healthy, readyCommandTypes: requestTypes }, executor.state().profile, instanceId);
         // Updating the capability catalog is not a new authenticated connection.
         // Initial registration/disconnect/rejection still withdraw authority; health
@@ -150,7 +158,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
         replay = Promise.resolve().then(() => executor.resume()).catch(error => logger('runtime-replay-failed', { code: error.code || 'REPLAY_FAILED' }));
         void replay.finally(() => { replay = null; });
       };
-      const disconnect = () => { profileSequence=0n;profileSha=null;recheckProfile=null;registrationEpoch++; channelState = 'disconnected'; lastPresenceAckAt = null; registeredAt = null; serviceReadyAt = null; channelConfirmed = false; managementSession = null; observer?.disconnect(); executor.disconnected(); client.invalidateSession(); };
+      const disconnect = () => { pricingSequence=0n;pricingSha=null;profileSequence=0n;profileSha=null;recheckProfile=null;registrationEpoch++; channelState = 'disconnected'; lastPresenceAckAt = null; registeredAt = null; serviceReadyAt = null; channelConfirmed = false; managementSession = null; observer?.disconnect(); executor.disconnected(); client.invalidateSession(); };
       const connectOnce = async signal => {
         channelState = 'connecting';
         const session = await client.session({ signal });

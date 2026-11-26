@@ -35,7 +35,7 @@ export function compareProspectiveTaskConfiguration(profileRuntime, { scopeKind,
 }
 // Read the same selected package, mounted tools, gateway readback and model route as launch.
 // This function owns no store, network transport, adapter factory or execution authority.
-export function comparePreparedImage(profileRuntime, outputs, entry, settings, provider, config) {
+export function comparePreparedImage(profileRuntime, outputs, entry, settings, provider, config, pricingDescriptor = false) {
   if (!entry || !outputs?.mimeTypes?.includes('image/png')) return null
   const operation = pinnedImageOperation(entry.descriptor, settings)
   const childRouteSha256 = nativeImageRouteDigest(operation,settings,provider)
@@ -43,7 +43,8 @@ export function comparePreparedImage(profileRuntime, outputs, entry, settings, p
   nativeImagesEndpoint(operation,provider,config)
   if (!settings.mountPinnedSkill && skillPackageTreeDigest(entry.descriptor.packageRoot) !== entry.descriptor.packageTreeDigest) return null
   const tools = out => [...nativeArtifactOutputTools(out),nativeImageToolDefinition(operation)]
-  return profileRuntime.prospectiveNativeGroup({preparedLocalBudget:true, skills:settings.mountPinnedSkill ? selectedPackages([entry]) : [],
+  return profileRuntime.prospectiveNativeGroup({preparedLocalBudget:true,
+    ...(pricingDescriptor ? {pricingImage:{operation,model:settings.model,channel:settings.channel,tier:settings.tier,packageSha256:entry.descriptor.packageSha256}} : {}), skills:settings.mountPinnedSkill ? selectedPackages([entry]) : [],
     skillConfiguration:[],networkAccess:false,localArtifactOnly:false,childRouteSha256,tools:tools(outputs),profileTools:tools({dataSchema:null}),
     toolPolicyRef:NATIVE_SKILL_SCRIPT_POLICY,instructionsSha256})
 }

@@ -885,6 +885,16 @@ test('prepared pinned image measures the same mounted or substituted tool group 
       const p=comparePreparedImage({prospectiveNativeGroup:p=>p},outputs,{descriptor},settings,provider,config);
       const route={model:'model',effort:'medium',engineVersion:'codex-cli-0.167.0',channelNamespace:'provider',binarySha256:'binary',coveragePolicyVersion:'NATIVE_PINNED_IMAGE_V1',childRouteSha256:nativeImageRouteDigest('generate',settings,provider),toolPolicyRef:p.toolPolicyRef,instructionsSha256:p.instructionsSha256};
       const group=measureProspectiveNativeGroup({...p,stateRoot:f.options.stateRoot,toolchain,modelCatalogSha256:null,verifiedOnly:true},route);
+      const q=comparePreparedImage({prospectiveNativeGroup:p=>p},outputs,{descriptor},settings,provider,config,true);
+      const portable=(params={},settingsChange={})=>measureProspectiveNativeGroup({...q,stateRoot:f.options.stateRoot,toolchain,modelCatalogSha256:null,verifiedOnly:true,...params},
+        {...route,binarySha256:'d'.repeat(64),...settingsChange});
+      const proof=portable();assert.equal(proof.operation,'generate');assert.equal(proof.childModel,settings.model);assert.equal(proof.parentModel,route.model);
+      const moved=portable({},{channelNamespace:'different-private-route'});
+      assert.equal(moved.contextPolicyVersion,proof.contextPolicyVersion);assert.equal(moved.toolPolicyVersion,proof.toolPolicyVersion);assert.notEqual(moved.referenceRouteSha256,proof.referenceRouteSha256);
+      assert.notEqual(portable({},{effort:'high'}).contextPolicyVersion,proof.contextPolicyVersion);
+      assert.notEqual(portable({pricingImage:{...q.pricingImage,packageSha256:'b'.repeat(64)}}).toolPolicyVersion,proof.toolPolicyVersion);
+      assert.equal(portable({},{coveragePolicyVersion:'NATIVE_EXECUTION_UNVERIFIED_V1'}),null);
+      for(const text of [f.options.stateRoot,provider.baseUrl,descriptor.packageRoot,'developerInstructions'])assert.ok(!JSON.stringify(proof).includes(text));
       const skills=mountPinnedSkill?[{...f.options.skills[0],skillKey:descriptor.skillKey}]:[];
       const actual=prepareNativeExecutionLayout({...f.options,skills,nativeExecution:{...f.options.nativeExecution,tools:[...nativeArtifactOutputTools(outputs),nativeImageToolDefinition('generate')]}});
       const {profileSha256,...observed}=group;assert.match(profileSha256,/^[a-f0-9]{64}$/);assert.deepEqual(observed,nativeDispatchGroup(actual.binding,route));
