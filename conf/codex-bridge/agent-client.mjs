@@ -46,7 +46,7 @@ import { isManagementMessage } from './skill-management-wire.mjs'
 import { SkillInstallManager, WORK_RESULT_RECEIPT_TYPE, defaultSkillInstallStateRoot } from './skill-install-manager.mjs'
 import { materialProfileFromInputCarriers } from './skill-config-candidate.mjs'
 import { SkillConversationLane } from './skill-conversation.mjs'
-import { compareProspectiveTaskConfiguration, nativeExecutionRequestBinding, runNativeExecution } from './native-execution.mjs'
+import { comparePreparedImage, compareProspectiveTaskConfiguration, nativeExecutionRequestBinding, runNativeExecution } from './native-execution.mjs'
 import { initializeNativeToolchain } from './native-document-toolchain.mjs'
 import { NATIVE_SKILL_SCRIPT_POLICY, readNativeSkillSubjectConfig, resolveNativeSkillConfiguration } from './native-skill-config.mjs'
 import { createLocalScriptRunner } from './skill-runners/local-script.mjs'
@@ -6361,6 +6361,14 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
           if (!runtime || entry.closed || entry.state.disposed || entry.state.profileClosing) return null
           return compareProspectiveTaskConfiguration(runtime,{scopeKind:'TASK',outputs,entries:[],skillConfiguration:[],
             toolPolicyRef:'NATIVE_LOCAL_FILES_V1',privateTools:null},true)
+        },
+        comparePreparedInstruction: (outputs,pin,fence) => {
+          const state=entry.state
+          if (!state?.nativeExecutionProfileRuntime || entry.closed || state.disposed || state.profileClosing) return null
+          const selected=state.skillRegistry?.preparedInstruction(pin,fence)
+          if (!selected) return null
+          const settings=state.profile.nativeImage ?? validateNativeImageSettings(readNativeSkillSubjectConfig({file:state.profile.skillExecutionConfigFile,scope:state.skillRegistry.scope})?.nativeImage)
+          return comparePreparedImage(state.nativeExecutionProfileRuntime,outputs,selected,settings,runtimeFileAuthProvider(state.profile),state.appServerAdapter?.readback?.config)
         },
         nativeWorkAvailable: () => { entry.state.conversationNativeWakeup?.wake() },
         matchesSkillManagementAck: envelope => entry.state?.skillInstallManager.matchesDurableAckEnvelope(envelope) === true,

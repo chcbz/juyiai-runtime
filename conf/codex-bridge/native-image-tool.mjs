@@ -18,10 +18,12 @@ export function validateNativeImageSettings(value) {
   return Object.freeze({ ...value })
 }
 
+export const pinnedImageOperation = (descriptor, settings) => settings && Object.hasOwn(packagePins, descriptor.skillKey)
+  && skillSha(descriptor.packageSha256) && settings[packagePins[descriptor.skillKey][1]] === descriptor.packageSha256 ? packagePins[descriptor.skillKey][0] : null
+
 export function selectNativeImageTool({ command, entries, store, settings, chatProvider }) {
   const previous = store.read('native-image-binding')
-  const matches = settings ? entries.filter(({ descriptor }) => Object.hasOwn(packagePins, descriptor.skillKey)
-    && settings[packagePins[descriptor.skillKey][1]] === descriptor.packageSha256) : []
+  const matches = entries.filter(({descriptor}) => pinnedImageOperation(descriptor,settings))
   if (!matches.length) {
     if (previous) fail('SKILL_RESULT_UNKNOWN') // never recover with the replaced script
     return null

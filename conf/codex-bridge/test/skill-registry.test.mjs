@@ -221,3 +221,14 @@ test('native binding resolves null-manifest instruction and forbids executable d
   assert.equal(item.enabled, false); assert.equal(item.readiness, 'NOT_EXECUTABLE')
   await assert.rejects(registry.requireExact(item), /SKILL_EXECUTION_BINDING_CHANGED/)
 })
+test('prepared instruction uses current enabled exact installation only, never retained execution authority',async()=>{
+  const row={...installed(),kind:'INSTRUCTION',manifest:null,manifestSha256:null,packageTreeDigest:hash};
+  const registry=create({rows:[row],loadRetained:()=>assert.fail('no retained execution lookup')});
+  const pin={policy:'NATIVE_SKILL_SCRIPT_V1',key:row.skillKey,version:row.skillVersion,installationId:row.skillInstallationId,packageSha256:hash};
+  assert.equal(registry.preparedInstruction(pin,fence),null);await registry.refresh();
+  assert.equal(registry.preparedInstruction(pin,fence)?.descriptor.skillKey,row.skillKey);
+  for(const k of Object.keys(pin)) assert.equal(registry.preparedInstruction({...pin,[k]:'wrong'},fence),null);
+  assert.equal(registry.preparedInstruction(pin,{...fence,sessionGeneration:'25'}),null);
+  row.enabled=false;await registry.refresh();assert.equal(registry.preparedInstruction(pin,fence),null);
+  registry.setSession(null);assert.equal(registry.preparedInstruction(pin,fence),null);
+});

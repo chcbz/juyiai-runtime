@@ -93,7 +93,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
       let nativeWorkEnabled = false;
       // O(1) state per activated subject, no per-task subscriptions. Presence samples only after an
       // authenticated comparison requested observation. A new server session fences the entire sequence.
-      let profileSequence = 0n, profileSha = null;
+      let profileSequence = 0n, profileSha = null, recheckProfile = null;
       const observeProfile = sha => {
         if (profileSequence === 0n || profileSha !== sha) { profileSha = sha; profileSequence++; }
         return {sequence:profileSequence.toString(),profileSha256:profileSha};
@@ -150,7 +150,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
         replay = Promise.resolve().then(() => executor.resume()).catch(error => logger('runtime-replay-failed', { code: error.code || 'REPLAY_FAILED' }));
         void replay.finally(() => { replay = null; });
       };
-      const disconnect = () => { profileSequence=0n;profileSha=null;registrationEpoch++; channelState = 'disconnected'; lastPresenceAckAt = null; registeredAt = null; serviceReadyAt = null; channelConfirmed = false; managementSession = null; observer?.disconnect(); executor.disconnected(); client.invalidateSession(); };
+      const disconnect = () => { profileSequence=0n;profileSha=null;recheckProfile=null;registrationEpoch++; channelState = 'disconnected'; lastPresenceAckAt = null; registeredAt = null; serviceReadyAt = null; channelConfirmed = false; managementSession = null; observer?.disconnect(); executor.disconnected(); client.invalidateSession(); };
       const connectOnce = async signal => {
         channelState = 'connecting';
         const session = await client.session({ signal });
@@ -247,19 +247,28 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
             }
             // Read-only, task preparation only. No command ingress, durable ACK, engine startup or remote action.
             if (frame.messageType === 'runtime.task.configuration.probe') {
-              const keys=['messageType','messageId','requestId','installationId','tenantId','clientId','agentId','hostId','runtimeInstanceId','sessionGeneration','intentSha256','preparationKind','outputs'];
-              if (!ready() || !executor.comparePreparedLocalTask || Object.keys(frame).some(k=>!keys.includes(k)) || frame.agentId!==session.canonicalAgentId
+              const instruction = frame.preparationKind === 'TASK_NATIVE_INSTRUCTION_V1';
+              const pin = frame.instructionSkill;
+              if (instruction && (!pin || typeof pin !== 'object' || Object.keys(pin).length !== 5
+                  || !['installationId','key','version'].every(k => typeof pin[k] === 'string' && pin[k].trim() === pin[k] && pin[k].length)
+                  || pin.policy !== 'NATIVE_SKILL_SCRIPT_V1' || typeof pin.packageSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(pin.packageSha256))) return;
+              const keys=['messageType','messageId','requestId','installationId','tenantId','clientId','agentId','hostId','runtimeInstanceId','sessionGeneration','intentSha256','preparationKind','outputs',...(instruction?['instructionSkill']:[])];
+              if (!ready() || !(instruction ? executor.comparePreparedInstruction : executor.comparePreparedLocalTask) || Object.keys(frame).some(k=>!keys.includes(k)) || frame.agentId!==session.canonicalAgentId
                   || ['installationId','tenantId','clientId','hostId','runtimeInstanceId','sessionGeneration'].some(k=>frame[k]!==session[k])
-                  || frame.preparationKind!=='TASK_NATIVE_LOCAL_FILES_V1' || typeof frame.intentSha256!=='string' || !/^[0-9a-f]{64}$/.test(frame.intentSha256)
+                  || (!instruction && frame.preparationKind!=='TASK_NATIVE_LOCAL_FILES_V1') || typeof frame.intentSha256!=='string' || !/^[0-9a-f]{64}$/.test(frame.intentSha256)
                   || !frame.outputs || !Object.hasOwn(frame.outputs,'dataSchema') || !Array.isArray(frame.outputs.mimeTypes)
                   || typeof frame.outputs.multiple!=='boolean' || typeof frame.outputs.artifactsRequired!=='boolean'
                   || Buffer.byteLength(bytes)>16384 || (frame.outputs.dataSchema!==null && (typeof frame.outputs.dataSchema!=='object'||Array.isArray(frame.outputs.dataSchema)))) return;
+              // Keep only the last authenticated subject probe. Re-read registry and live profile
+              // at presence; never replace a selected skill with a local-text baseline.
+              const compare = instruction ? outputs => executor.comparePreparedInstruction(outputs,pin,session) : outputs => executor.comparePreparedLocalTask(outputs);
+              recheckProfile = () => compare(frame.outputs);
               let measurement=null, sha=null;
               try {
-                const group=executor.comparePreparedLocalTask(frame.outputs);
+                const group=recheckProfile();
                 sha=profileDigest(group);
                 if(sha && group?.version==='NATIVE_DISPATCH_GROUP_V1' && ['executionConfigSha256','routeSha256','toolConfigSha256'].every(k=>typeof group[k]==='string' && /^[0-9a-f]{64}$/.test(group[k])))
-                  measurement={version:group.version,executionConfigSha256:group.executionConfigSha256,routeSha256:group.routeSha256,toolConfigSha256:group.toolConfigSha256,capturePolicyVersion:'NATIVE_LOCAL_ARTIFACT_TEXT_V1'};
+                  measurement={version:group.version,executionConfigSha256:group.executionConfigSha256,routeSha256:group.routeSha256,toolConfigSha256:group.toolConfigSha256,capturePolicyVersion:instruction?'NATIVE_PINNED_IMAGE_V1':'NATIVE_LOCAL_ARTIFACT_TEXT_V1'};
               } catch { /* drift or unavailable: never infer a configuration */ }
               send({messageType:'runtime.task.configuration.measured',messageId:randomUUID(),requestId:frame.requestId,correlationId:frame.messageId,intentSha256:frame.intentSha256,measurement,configurationEpoch:observeProfile(measurement?sha:null)});
               return;
@@ -365,7 +374,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
           if (profileSequence !== 0n) {
             let sha=null;
             if (readyWithHealth(healthy)) try {
-              sha=profileDigest(executor.comparePreparedLocalTask({mimeTypes:[],multiple:false,artifactsRequired:false,dataSchema:null}));
+              sha=profileDigest(recheckProfile?.());
             } catch { /* a changed/unavailable toolchain withdraws, never warms the engine */ }
             epoch=observeProfile(sha);
           }

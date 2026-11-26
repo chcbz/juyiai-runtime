@@ -1995,5 +1995,14 @@ test('prepared local task measurement is correlation and session bound without c
   assert.deepEqual(await heartbeat(),{sequence:'3',profileSha256:null});
   state.preparedGroup={...reply.measurement,profileSha256:'d'.repeat(64)};socket.receive(request);
   assert.deepEqual(socket.sent.at(-1).configurationEpoch,{sequence:'4',profileSha256:'d'.repeat(64)});
+  const pin={installationId:'si_image',key:'image-generate',version:'1.0.0',packageSha256:'e'.repeat(64),policy:'NATIVE_SKILL_SCRIPT_V1'};
+  const selected={...request,data:{...request.data,preparationKind:'TASK_NATIVE_INSTRUCTION_V1',instructionSkill:pin}};
+  for(const data of [{...selected.data,instructionSkill:{...pin,grant:true}},{...selected.data,sessionGeneration:'999'},{...request.data,instructionSkill:pin}]) socket.receive({...request,data});
+  assert.equal(state.instructionReads,undefined);
+  state.preparedGroup.profileSha256='e'.repeat(64);socket.receive(selected);
+  reply=socket.sent.at(-1);assert.equal(reply.measurement.capturePolicyVersion,'NATIVE_PINNED_IMAGE_V1');
+  assert.deepEqual(state.instructionReads,[[outputs,pin,fence.sessionGeneration]]);
+  assert.deepEqual(await heartbeat(),reply.configurationEpoch);assert.equal(state.instructionReads.length,2);
+  state.preparedGroup=null;assert.deepEqual(await heartbeat(),{sequence:'6',profileSha256:null});
   assert.deepEqual(state.accepted,[]);
 });

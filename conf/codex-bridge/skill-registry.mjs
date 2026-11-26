@@ -104,6 +104,13 @@ export class SkillRegistry {
       return null
     }
   }
+  // Discovery only. Do not consult retained packages or manufacture an execution grant.
+  preparedInstruction(pin, fence) {
+    if (!this.cached || !fence || !this.fence || fenceFields.some(k => this.fence[k] !== fence[k]) || pin?.policy !== 'NATIVE_SKILL_SCRIPT_V1') return null
+    const entry = this.entries.get(identity({skillKey:pin.key,skillVersion:pin.version})), row = entry?.descriptor
+    return row?.enabled === true && row.kind === 'INSTRUCTION' && row.skillInstallationId === pin.installationId
+      && row.packageSha256 === pin.packageSha256 && exact(row.packageRoot) && hash(row.packageTreeDigest) ? entry : null
+  }
   // Resolve only the API-authorized immutable package. Installation storage
   // verifies its tree/marker; readiness and tool authorization are separate.
   // Do not use this method to grant tool, network or Provider permissions.

@@ -5,7 +5,9 @@ import { resolve } from 'node:path'
 import { skillDigest, NATIVE_DOMAIN_API_POLICY, NATIVE_LOCAL_FILES_POLICY } from './skill-executor.mjs'
 import { NATIVE_SKILL_SCRIPT_POLICY } from './native-skill-config.mjs'
 import { NativeArtifactSession, nativeArtifactOutputTools } from './native-artifact-session.mjs'
-import { nativeImageToolPolicy, nativeImageRouteDigest } from './native-image-tool.mjs'
+import { nativeImageToolPolicy, nativeImageRouteDigest, nativeImageToolDefinition, pinnedImageOperation } from './native-image-tool.mjs'
+import { nativeImagesEndpoint } from './native-image-transport.mjs'
+import { skillPackageTreeDigest } from './skill-manifest.mjs'
 import { validateNativeOutputSnapshot } from './native-output-format.mjs'
 const fail = code => { throw Object.assign(new Error(code), { code }) }
 export const nativeExecutionRequestBinding = command => ({ schemaVersion: 1,
@@ -30,6 +32,20 @@ export function compareProspectiveTaskConfiguration(profileRuntime, { scopeKind,
     ...(preparedLocalBudget ? {profileTools:nativeArtifactOutputTools({dataSchema:null})} : {}), skills:selectedPackages(entries), skillConfiguration,
     localArtifactOnly:onlyLocalArtifactTools(scopeKind, privateTools, entries, skillConfiguration, toolPolicyRef),
     networkAccess:selectedNetworkAccess(skillConfiguration), tools:nativeArtifactOutputTools(outputs), toolPolicyRef, instructionsSha256 })
+}
+// Read the same selected package, mounted tools, gateway readback and model route as launch.
+// This function owns no store, network transport, adapter factory or execution authority.
+export function comparePreparedImage(profileRuntime, outputs, entry, settings, provider, config) {
+  if (!entry || !outputs?.mimeTypes?.includes('image/png')) return null
+  const operation = pinnedImageOperation(entry.descriptor, settings)
+  const childRouteSha256 = nativeImageRouteDigest(operation,settings,provider)
+  if (!childRouteSha256) return null
+  nativeImagesEndpoint(operation,provider,config)
+  if (!settings.mountPinnedSkill && skillPackageTreeDigest(entry.descriptor.packageRoot) !== entry.descriptor.packageTreeDigest) return null
+  const tools = out => [...nativeArtifactOutputTools(out),nativeImageToolDefinition(operation)]
+  return profileRuntime.prospectiveNativeGroup({preparedLocalBudget:true, skills:settings.mountPinnedSkill ? selectedPackages([entry]) : [],
+    skillConfiguration:[],networkAccess:false,localArtifactOnly:false,childRouteSha256,tools:tools(outputs),profileTools:tools({dataSchema:null}),
+    toolPolicyRef:NATIVE_SKILL_SCRIPT_POLICY,instructionsSha256})
 }
 export async function runNativeExecution({ command, inputs, entries, store, checkActive, signal, profileRuntime, model, effort, mayStartTurn = true, skillConfiguration = [], exchangeBusiness, bindInstallation, nativeImage = null }) {
   if (!profileRuntime?.openNativeExecutionAdapter) fail('NATIVE_EXECUTION_PROFILE_UNAVAILABLE')

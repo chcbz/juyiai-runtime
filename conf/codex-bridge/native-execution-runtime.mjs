@@ -34,12 +34,12 @@ export const nativeExecutionProfile = profile => {
 
 export { nativeDispatchGroup } from './native-execution-profile.mjs'
 
-const nativeMeteringRoute = (profile, schema, localArtifactOnly) => {
+const nativeMeteringRoute = (profile, schema, localArtifactOnly, childRouteSha256) => {
   const channelNamespace = skillDigest(['METERED_PROVIDER_NAMESPACE_V1', profile.typedInspectionProviderId, new URL(profile.typedInspectionProviderBaseUrl).href.replace(/\/$/, '')])
   const engineVersion = /^\d+\.\d+\.\d+$/.test(schema.cliVersion) ? `codex-cli-${schema.cliVersion}` : 'unknown'
   // Local tool dispatch is known here; actual uploaded shapes and response usage are checked per request.
   const coveragePolicyVersion = localArtifactOnly === true && engineVersion === 'codex-cli-0.167.0'
-    && new URL(profile.typedInspectionProviderBaseUrl).protocol === 'https:' ? 'NATIVE_LOCAL_ARTIFACT_TEXT_V1' : 'NATIVE_EXECUTION_UNVERIFIED_V1'
+    && new URL(profile.typedInspectionProviderBaseUrl).protocol === 'https:' ? 'NATIVE_LOCAL_ARTIFACT_TEXT_V1' : typeof childRouteSha256 === 'string' && engineVersion === 'codex-cli-0.167.0' && new URL(profile.typedInspectionProviderBaseUrl).protocol === 'https:' ? 'NATIVE_PINNED_IMAGE_V1' : 'NATIVE_EXECUTION_UNVERIFIED_V1'
   return { channelNamespace, engineVersion, coveragePolicyVersion }
 }
 
@@ -49,15 +49,15 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
   }
   // Only internal dispatch preparation supplies the selected tools/skills and instruction commitment.
   // The executable, model, effort, route, toolchain and loaded model catalogue are profile-owned.
-  prospectiveNativeGroup({skills,skillConfiguration,tools,networkAccess,toolPolicyRef,instructionsSha256,localArtifactOnly,preparedLocalBudget=false,profileTools}) {
+  prospectiveNativeGroup({skills,skillConfiguration,tools,networkAccess,toolPolicyRef,instructionsSha256,localArtifactOnly,preparedLocalBudget=false,profileTools,childRouteSha256}) {
     const profile = this.profile, schema = this.nativeBinaryMeasurement
     if (!this.nativeExecutionDeclaration() || !this.nativeToolchain || profile.typedInspectionProviderNetwork !== 'restricted-proxy'
         || !profile.typedInspectionProviderId || !profile.typedInspectionProviderBaseUrl || !isCurrentAppServerMeasurement(profile,schema)) return null
-    const route=nativeMeteringRoute(profile,schema,localArtifactOnly)
-    if (preparedLocalBudget && route.coveragePolicyVersion !== 'NATIVE_LOCAL_ARTIFACT_TEXT_V1') return null
+    const route=nativeMeteringRoute(profile,schema,localArtifactOnly,childRouteSha256)
+    if (preparedLocalBudget && route.coveragePolicyVersion !== (childRouteSha256 === undefined ? 'NATIVE_LOCAL_ARTIFACT_TEXT_V1' : 'NATIVE_PINNED_IMAGE_V1')) return null
     return measureProspectiveNativeGroup({verifiedOnly:preparedLocalBudget,profileTools,skills,skillConfiguration,tools,networkAccess,stateRoot:this.stateRoot,
       toolchain:this.nativeToolchain,modelCatalogSha256:this.nativeModelCatalog?.sha256 ?? null}, {
-      ...route, binarySha256:schema.binarySha256, model:profile.chatModel || profile.codexModel,
+      ...route, childRouteSha256, binarySha256:schema.binarySha256, model:profile.chatModel || profile.codexModel,
       effort:profile.chatReasoningEffort, toolPolicyRef, instructionsSha256 })
   }
   openNativeExecutionAdapter(inputDirectory, requestKey, requestBinding, { scratchDirectory, draftsDirectory, skills = [], skillConfiguration = [], nativeExecution, meteredCapture = null, meteredAdmission = null, requireExistingState = false } = {}) {
@@ -109,7 +109,7 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
         }
         const { channelNamespace, engineVersion, coveragePolicyVersion } = nativeMeteringRoute(this.profile, schema, slot.meteredAdmission.localArtifactOnly &&
           !layout.binding.networkAccess && !layout.binding.networkOrigins.length && !layout.binding.webSearch &&
-          !layout.binding.skills.length && !layout.binding.skillConfiguration.length && typeof nativeExecution.localArtifactCall === 'function')
+          !layout.binding.skills.length && !layout.binding.skillConfiguration.length && typeof nativeExecution.localArtifactCall === 'function',slot.meteredAdmission.childRouteSha256)
         try {
           const options = { executionId:binding.authorizationId, runId:store.command.runId,
             executionConfigSha256:skillDigest([layout.digest,store.commandDigest,engineVersion,channelNamespace,model,effort]),

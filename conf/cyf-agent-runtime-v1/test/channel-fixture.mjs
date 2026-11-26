@@ -91,6 +91,7 @@ export async function channelFixture(t, { ackRegistration = true, nativeWorkNoti
             return true;
           },
           bindWorkNotifications: version => { state.workNotificationVersion = version; },
+          comparePreparedInstruction: (outputs,pin,session) => { (state.instructionReads ||= []).push([outputs,pin,session.sessionGeneration]);return state.preparedGroup; },
           comparePreparedLocalTask: outputs => { (state.preparedReads ||= []).push(outputs);return comparePrepared ? comparePrepared(outputs) : state.preparedGroup; },
           nativeWorkAvailable: () => { state.workHints = (state.workHints || 0) + 1; },
           bindWorkspaceFileWorkNotifications: version => { state.fileWorkNotificationVersion = version; },

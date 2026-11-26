@@ -277,9 +277,9 @@ export function measureProspectiveNativeGroup({ skills, skillConfiguration, tool
   if (!verifiedOnly || !group) return group
   // Both commitments derive from the same verified measurement. Normalize only the task-specific
   // output contract. A profile epoch is NOT a dispatch group: never persist it in the actual-use PLAN.
-  if (!Array.isArray(profileTools) || skills.length || skillConfiguration.length || networkAccess) return null
+  if (!Array.isArray(profileTools) || (skills.length && !hash(settings.childRouteSha256)) || skillConfiguration.length || networkAccess) return null
   const baseline = nativeDispatchGroup({...binding,tools:profileTools},settings)
-  return {...group,profileSha256:skillDigest(['PREPARED_LOCAL_PROFILE_V1',baseline.executionConfigSha256])}
+  return {...group,profileSha256:skillDigest([settings.childRouteSha256 ? 'PREPARED_IMAGE_PROFILE_V1' : 'PREPARED_LOCAL_PROFILE_V1',baseline.executionConfigSha256])}
 }
 
 export const prepareNativeExecutionLayout = ({ inputDirectory, scratchDirectory, draftsDirectory, skills = [], skillConfiguration = [], nativeExecution, toolchain, stateRoot, sourceHome }) => {

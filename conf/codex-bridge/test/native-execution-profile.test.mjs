@@ -869,3 +869,27 @@ test('task pre-dispatch uses the artifact owner output tool contract and rejects
   for(const change of [{scopeKind:'PRIVATE'},{outputs:{}},{entries:undefined},{skillConfiguration:undefined},{privateTools:undefined},{privateTools:{tools:[]}}, {toolPolicyRef:'NATIVE_SKILL_SCRIPT_V1'}])
     assert.equal(compareProspectiveTaskConfiguration(call,{...intent,...change}),null)
 })
+
+test('prepared pinned image measures the same mounted or substituted tool group as launch without execution',async()=>{
+  const {comparePreparedImage}=await import('../native-execution.mjs');
+  const {nativeImageRouteDigest,nativeImageToolDefinition}=await import('../native-image-tool.mjs');
+  const {nativeArtifactOutputTools}=await import('../native-artifact-session.mjs');
+  const f=fixture();try {
+    const descriptor={...f.options.skills[0],skillKey:'image-generate',packageSha256:'a'.repeat(64)};
+    const outputs={mimeTypes:['image/png'],dataSchema:null};
+    const provider={id:'gateway',wireApi:'responses',baseUrl:'https://example.invalid/v1'};
+    const config={config:{cli_auth_credentials_store:'file',model_provider:'gateway',model_providers:{gateway:{base_url:provider.baseUrl,wire_api:'responses',requires_openai_auth:true}}}};
+    const toolchain=validateNativeExecutionToolchain(f.options.toolchain);
+    for(const mountPinnedSkill of [true,false]) {
+      const settings={generatePackageSha256:descriptor.packageSha256,model:'image',channel:'standard',tier:'base',priceVersion:'v1',mountPinnedSkill};
+      const p=comparePreparedImage({prospectiveNativeGroup:p=>p},outputs,{descriptor},settings,provider,config);
+      const route={model:'model',effort:'medium',engineVersion:'codex-cli-0.167.0',channelNamespace:'provider',binarySha256:'binary',coveragePolicyVersion:'NATIVE_PINNED_IMAGE_V1',childRouteSha256:nativeImageRouteDigest('generate',settings,provider),toolPolicyRef:p.toolPolicyRef,instructionsSha256:p.instructionsSha256};
+      const group=measureProspectiveNativeGroup({...p,stateRoot:f.options.stateRoot,toolchain,modelCatalogSha256:null,verifiedOnly:true},route);
+      const skills=mountPinnedSkill?[{...f.options.skills[0],skillKey:descriptor.skillKey}]:[];
+      const actual=prepareNativeExecutionLayout({...f.options,skills,nativeExecution:{...f.options.nativeExecution,tools:[...nativeArtifactOutputTools(outputs),nativeImageToolDefinition('generate')]}});
+      const {profileSha256,...observed}=group;assert.match(profileSha256,/^[a-f0-9]{64}$/);assert.deepEqual(observed,nativeDispatchGroup(actual.binding,route));
+      assert.equal(comparePreparedImage(null,outputs,{descriptor},{...settings,priceVersion:null},provider,config),null);
+      assert.throws(()=>comparePreparedImage(null,outputs,{descriptor},settings,provider,{}),/CONFIG_INVALID/);
+    }
+  }finally{f.cleanup()}
+});
