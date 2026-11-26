@@ -908,3 +908,15 @@ test('prepared pinned image measures the same mounted or substituted tool group 
     }
   }finally{f.cleanup()}
 });
+
+test('terminal capture seals under the joined writer fence while retaining Home; resumable suspension only stops',async()=>{
+  for(const terminalCapture of [false,true]){
+    const f=fixture(),{runtime}=stubRuntime(f);try{
+      const adapter=await open(runtime,f),active=runtime.activeAdapters.get(f.binding.requestKey),home=active.engineState.directory,events=[]
+      const abort=new AbortController();active.egress.lifecycle={signal:abort.signal};active.egress.dispose=async()=>abort.abort()
+      adapter.shutdown=async()=>{adapter.childClosed=true};const verify=async (op,fence)=>{await fence();assert.equal(runtime.activeAdapters.get(f.binding.requestKey),active);events.push(op)}
+      active.slot.meteredCapture={markStopped:fence=>verify('stop',fence),sealStopped:fence=>verify('seal',fence)}
+      await runtime.suspendAdapter(f.binding.requestKey,{terminalCapture});assert.deepEqual(events,[terminalCapture?'seal':'stop']);assert.ok(existsSync(home));assert.ok(!runtime.activeAdapters.has(f.binding.requestKey))
+    }finally{await runtime.dispose();f.cleanup()}
+  }
+})

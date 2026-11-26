@@ -389,8 +389,8 @@ export class IsolatedEngineProfileRuntime {
     readback.credentialIsolation = sealCredential(adapter.typedInspectionEngineState, pid)
     return readback
   }
-  suspendAdapter(requestKey) { return this.releaseAdapter(requestKey, { preserveState: true }) }
-  async releaseAdapter(requestKey, { preserveState = false, requestBinding = null, conversationKey = null } = {}) {
+  suspendAdapter(requestKey, { terminalCapture = false } = {}) { return this.releaseAdapter(requestKey, { preserveState: true, terminalCapture }) }
+  async releaseAdapter(requestKey, { preserveState = false, terminalCapture = false, requestBinding = null, conversationKey = null } = {}) {
     const inspectionStart = this.pendingInspectionAdapters?.get(requestKey)
     if (inspectionStart) await inspectionStart.catch(() => {})
     if (conversationKey !== null && (!/^sha256:[a-f0-9]{64}$/.test(conversationKey) || !requestBinding)) fail('TYPED_INSPECTION_ENGINE_STATE_BINDING_INVALID')
@@ -452,7 +452,7 @@ export class IsolatedEngineProfileRuntime {
       if (active.nativeLayout) rmSync(resolve(active.engineState.directory, 'skill-config'), { recursive: true, force: true })
       if (active.slot?.meteredCapture) {
         const capture=active.slot.meteredCapture
-        await (preserveState ? capture.markStopped : capture.sealStopped)(() => {
+        await (preserveState && !terminalCapture ? capture.markStopped : capture.sealStopped)(() => {
           if (!active.adapter.childClosed || !active.egress.lifecycle.signal.aborted || this.activeAdapters.get(requestKey)!==active) fail('METERED_PRODUCER_STOP_UNCONFIRMED')
         })
       }

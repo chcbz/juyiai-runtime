@@ -67,6 +67,7 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
   // Bind cancellation before opening the profile: network/bootstrap setup may
   // still be in flight when the lease is revoked. The profile owns cancellation
   // of pending startup as well as an already-running engine.
+  let durableResult
   let businessSocket
   const abort = () => { void profileRuntime.suspendAdapter(requestKey).catch(() => {}) }
   signal?.addEventListener('abort', abort, { once: true })
@@ -131,7 +132,7 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
       if (recovered.terminalStatus === 'interrupted') fail('TURN_INTERRUPTED')
       if (recovered.terminalStatus !== 'completed') fail('SKILL_RESULT_UNKNOWN')
       if (!turn) session.bindTurn({ threadId: thread.threadId, turnId: recovered.turnId })
-      return session.finalize({ threadId: thread.threadId, turnId: recovered.turnId, finishReason: 'completed' }, receipts)
+      return durableResult = session.finalize({ threadId: thread.threadId, turnId: recovered.turnId, finishReason: 'completed' }, receipts)
     }
     if (existing && command.usageMode==='RESPONSE_V2') {
       // Only the never-attempted path can reach here; load the exact original thread, not a new one.
@@ -163,7 +164,7 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
       ...(result.usageEvidence ? { usageEvidence: result.usageEvidence, requestedModel: model || null } : {}) })
     // A late terminal observation is history, not permission to commit a cancelled task.
     checkActive()
-    return session.finalize(result, receipts)
+    return durableResult = session.finalize(result, receipts)
   } catch (cause) {
     // Persist source evidence before cancellation/error normalization. A cancelled
     // turn never reaches the business failure-receipt owner; cost recovery must
@@ -188,6 +189,8 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
     signal?.removeEventListener('abort', abort)
     // Stop tool processes before any result upload; preserve engine state for
     // reconciliation until the API commit receipt authorizes cleanup.
-    await profileRuntime.suspendAdapter(requestKey)
+    // Only a completed local result (including reconciliation of the original turn) ends
+    // capture. Ambiguous outcomes and lease cancellation retain a resumable producer epoch.
+    await profileRuntime.suspendAdapter(requestKey, { terminalCapture: Boolean(durableResult) && command.usageMode === 'RESPONSE_V2' })
   }
 }
