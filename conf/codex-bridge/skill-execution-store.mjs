@@ -107,9 +107,9 @@ export class SkillExecutionStore {
   }
   // Existence alone blocks another attempt, even if the writer died before fsync.
   // A successful reservation is synced before the caller can start an external effect.
-  reserve(name) {
+  reserve(name, value = {}) {
     privateDirectory(this.directory)
-    try { writePrivate(this.path(name), Buffer.from('{}')) }
+    try { writePrivate(this.path(name), Buffer.from(skillCanonicalJson(value))) }
     catch (error) { if (error.code === 'EEXIST') return false; throw error }
     syncDirectory(this.directory)
     return true

@@ -2,7 +2,7 @@
 import { selectInstallation } from './native-installation-selection.mjs'
 import { openBusinessSocket } from './execution-business-api.mjs'
 import { resolve } from 'node:path'
-import { skillDigest, NATIVE_DOMAIN_API_POLICY, NATIVE_LOCAL_FILES_POLICY } from './skill-executor.mjs'
+import { skillDigest, skillId, NATIVE_DOMAIN_API_POLICY, NATIVE_LOCAL_FILES_POLICY } from './skill-executor.mjs'
 import { NATIVE_SKILL_SCRIPT_POLICY } from './native-skill-config.mjs'
 import { NativeArtifactSession, nativeArtifactOutputTools } from './native-artifact-session.mjs'
 import { nativeImageToolPolicy, nativeImageRouteDigest, nativeImageToolDefinition, pinnedImageOperation } from './native-image-tool.mjs'
@@ -82,8 +82,16 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
             : entries.length !== 0)) fail('NATIVE_IMAGE_AUTHORIZATION_INVALID')
     }
     const image = nativeImage ? nativeImageToolPolicy({ ...nativeImage, store, checkActive, signal, session, reconcileOnly: Boolean(store.read('native-start-attempt')) }) : null
-    const nativeExecution = image ? { ...local, networkAccess, tools: [...local.tools, image.tool], callTool(ctx) {
-      return ctx.tool === image.tool.name ? image.call(ctx) : local.callTool(ctx)
+    // Parent Responses usage and child Images usage are separate. Recognize the single
+    // successfully staged host call in subsequent parent tool history, never as zero child cost.
+    let imageCallId=null
+    const nativeExecution = image ? { ...local, networkAccess, tools: [...local.tools, image.tool],
+      ...(local.localArtifactCall ? {localArtifactCall:id=>id === imageCallId && !local.localArtifactCall(id) ? image.tool.name : id === imageCallId ? undefined : local.localArtifactCall(id)} : {}),
+      async callTool(ctx) {
+      if (ctx.tool !== image.tool.name) return local.callTool(ctx)
+      const result=await image.call(ctx)
+      if (skillId(ctx.callId)) imageCallId=ctx.callId
+      return result
     } } : { ...local, networkAccess }
     if (domainSocket) {
       if (entries.length !== 1 || typeof exchangeBusiness !== 'function') fail('NATIVE_BUSINESS_API_UNAVAILABLE')

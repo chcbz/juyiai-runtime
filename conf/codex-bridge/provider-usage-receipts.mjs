@@ -12,9 +12,20 @@ export function pendingProviderUsage(store, { hostOnly = false } = {}) {
     if (!stat.isDirectory() || realpathSync(directory) !== directory || stat.uid !== process.geteuid() || stat.mode & 0o077) fail('SKILL_STORE_UNSAFE')
     files = readdirSync(directory)
   } catch (error) { if (error.code === 'ENOENT') files = []; else throw error }
-  const pending = []
   const names = new Set(files.filter(name => /^[a-f0-9-]{36}-started\.json$/.test(name)))
   for (const name of readdirSync(store.directory)) if (/^provider-usage-[a-f0-9-]{36}-started\.json$/.test(name)) names.add(name.slice('provider-usage-'.length))
+  return readPhases(store,names,files,directory)
+}
+// RESPONSE_V2 owns the parent HTTP meter. Only the single reserved host image invocation
+// can publish a child on this path; never scan script scratch or import old unbound journals.
+export function pendingMeteredImageUsage(store) {
+  const id=store.read('native-image-start')?.invocationId
+  if (id == null) return []
+  if (typeof id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id)) fail('PROVIDER_USAGE_SOURCE_INVALID')
+  return readPhases(store,[`${id}-started.json`],[],null)
+}
+function readPhases(store,names,files,directory) {
+  const pending=[]
   for (const filename of [...names].sort()) {
     const id = filename.slice(0, -13)
     for (const phase of ['started', 'terminal']) {

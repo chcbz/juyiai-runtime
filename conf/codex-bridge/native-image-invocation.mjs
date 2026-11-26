@@ -49,8 +49,9 @@ export function prepareNativeImageInvocation({ store, checkActive, inputRefs = [
       reserveOnce() {
         checkActive()
         // One image effect per execution, not per model call ID or output filename.
-        if (!store.reserve('native-image-start')) return false
-        invocationId = randomUUID()
+        const id = randomUUID()
+        if (!store.reserve('native-image-start', {invocationId:id})) return false
+        invocationId = id
         try { record('STARTED', null) } catch (error) { invocationId = null; throw error }
         return true
       },

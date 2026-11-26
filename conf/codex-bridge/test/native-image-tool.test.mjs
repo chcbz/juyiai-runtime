@@ -11,7 +11,7 @@ import { checkPng, makePng, offlinePackage } from '../../skills/image-process/te
 
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X8ZkAAAAASUVORK5CYII=', 'base64')
 const hash = 'a'.repeat(64), apiOrigin = 'https://api.example', agentId = 'agent1'
-function fixture(t, kind = 'TASK', operation = 'generate', mountPinnedSkill = false) {
+function fixture(t, kind = 'TASK', operation = 'generate', mountPinnedSkill = false, metered = false) {
   const rootDir = mkdtempSync('/var/tmp/cyf-native-image-tool-')
   t.after(() => rmSync(rootDir, { recursive: true, force: true }))
   writeFileSync(resolve(rootDir, 'auth.json'), JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'fixture-key' }), { mode: 0o600 })
@@ -20,7 +20,7 @@ function fixture(t, kind = 'TASK', operation = 'generate', mountPinnedSkill = fa
   const executionScope = { kind, taskId: kind === 'TASK' ? 'task' : null, conversationId: 'conversation', conversationGeneration: '1' }
   const executionBinding = { executionId: 'exec', agentId, scopeSha256: skillDigest(executionScope), grantRevision: '1',
     approvedPermissionsSha256: hash, packageSha256: hash, manifestSha256: null, skillVersion, skillKey, skillInstallationId, productVersionId: 'version1' }
-  const command = { executionProtocolVersion: 6, executionId: 'exec', runId: 'run', commandId: 'cmd', messageId: 'message', scope: executionScope,
+  const command = { ...(metered?{usageMode:'RESPONSE_V2',captureProtocol:'METERED_CAPTURE_V2'}:{}),executionProtocolVersion: 6, executionId: 'exec', runId: 'run', commandId: 'cmd', messageId: 'message', scope: executionScope,
     toolPolicyRef: NATIVE_SKILL_SCRIPT_POLICY, snapshotDigest: hash, instruction: 'authorized image action', parameters: {},
     skills: [{ skill: { key: skillKey, version: skillVersion, packageSha256: hash, manifestSha256: null }, executionBinding }],
     inputRefs: operation === 'edit' ? ['image1'] : [], outputs: { dataSchema: null, mimeTypes: ['image/png'], multiple: false, artifactsRequired: true } }
@@ -48,7 +48,7 @@ test('image reference routes separate model, mode, package, gateway and tier but
   assert.notDeepEqual(nativeImageToolDefinition('generate'),nativeImageToolDefinition('edit'))
 })
 for (const kind of ['TASK', 'PRIVATE']) for (const op of ['generate', 'edit']) test(`${kind} ${op} substitutes only the pinned operation and proposes the staged PNG`, async t => {
-  const { select, configReadback, rootDir } = fixture(t, kind, op)
+  const { select, configReadback, rootDir } = fixture(t, kind, op, false, true)
   const { store, command, settings, chatProvider } = select
   const operation = selectNativeImageTool(select)
   assert.equal(operation, op)
@@ -83,7 +83,9 @@ for (const kind of ['TASK', 'PRIVATE']) for (const op of ['generate', 'edit']) t
       await assert.rejects(callTool({ ...ctx, arguments: { ...ctx.arguments, apiKey: 'not authorized' } }), { code: 'NATIVE_TOOL_ARGUMENTS_INVALID' })
       if (op === 'edit') await assert.rejects(callTool({ ...ctx, arguments: { ...ctx.arguments, inputRefs: ['foreign'] } }), { code: 'SKILL_INPUT_SNAPSHOT_INVALID' })
       assert.equal(posted, 0)
+      assert.equal(options.nativeExecution.localArtifactCall('paid'),undefined)
       const artifact = await callTool(ctx)
+      assert.equal(options.nativeExecution.localArtifactCall('paid'),tool)
       assert.equal(store.loadResult(), null)
       assert.equal(artifact.sha256, skillHash(png))
       await assert.rejects(callTool({ ...ctx, callId: 'second' }), { code: 'NATIVE_IMAGE_ALREADY_STARTED' })
@@ -168,8 +170,8 @@ test('ordinary authority cannot select native Images; pinned execution cannot sw
   assert.equal(selectNativeImageTool(legacy.select), null)
 })
 
-test('chat and host Images have independent receipt discovery; script scratch cannot impersonate host Images', async t => {
-  const { select, rootDir, scope } = fixture(t, 'TASK', 'generate')
+for (const metered of [false,true]) test(`metered=${metered}: independent host Images receipts without script injection or duplicate parent delivery`, async t => {
+  const { select, rootDir, scope } = fixture(t, 'TASK', 'generate',false,metered)
   const { store } = select
   selectNativeImageTool(select)
   // Fixtures: a separate chat record and one host invocation, plus untrusted script scratch.
@@ -179,6 +181,7 @@ test('chat and host Images have independent receipt discovery; script scratch ca
   const scratch = resolve(store.directory, 'scratch/.provider-usage')
   mkdirSync(scratch, { mode: 0o700 })
   writeFileSync(resolve(scratch, 'a8d66394-3ffb-433d-b860-a39cbcaac0c4-started.json'), '{}', { mode: 0o600 })
+  if(metered)store.reserve('native-image-start',{invocationId})
   const prefix = `provider-usage-${invocationId}`
   store.write(`${prefix}-started`, { invocationId, phase: 'STARTED' })
   store.write(`${prefix}-terminal`, { invocationId, phase: 'TERMINAL' })
@@ -197,7 +200,7 @@ test('chat and host Images have independent receipt discovery; script scratch ca
   }
   for (let i = 0; i < 3; i++) {
     lane.pendingCommands()
-    assert.deepEqual(await lane.deliverPendingUsage(), [])
+    assert.deepEqual(await lane.deliverPendingUsage(false), [])
   }
-  assert.deepEqual(phases, ['CHAT:STARTED', 'STARTED', 'CHAT:TERMINAL', 'TERMINAL'])
+  assert.deepEqual(phases, metered?['STARTED','TERMINAL']:['CHAT:STARTED', 'STARTED', 'CHAT:TERMINAL', 'TERMINAL'])
 })

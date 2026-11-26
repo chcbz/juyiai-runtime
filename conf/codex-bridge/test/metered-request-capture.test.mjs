@@ -629,3 +629,9 @@ test('discussion budget excludes local audit and charges failed and successful t
   clock+=9000;assert.equal(batch.remaining(),590)
   await batch.measure(async()=>{clock+=590});assert.equal(batch.remaining(),0)
 })
+
+test('pinned Images enables only parent text-token observation, never complete coverage of the child',async t=>{
+  const {capture}=await openRoot(t,{engineVersion:'codex-cli-0.167.0',adapterVersion:'RESPONSES_TEXT_TOKENS_V1',coveragePolicyVersion:'NATIVE_PINNED_IMAGE_V1'});
+  assert.equal(capture.textTokenProtocol,true);
+  assert.equal((await capture.sealStopped(()=>{})).closeState,'SEALED_INCOMPLETE');
+});

@@ -1,6 +1,6 @@
 import { deliverMetered,meteredBatch } from './metered-usage-delivery.mjs'
 import { recoverStoppedMeteredRoot } from './metered-capture-closure.mjs'
-import { pendingProviderUsage } from './provider-usage-receipts.mjs'
+import { pendingProviderUsage, pendingMeteredImageUsage } from './provider-usage-receipts.mjs'
 import { pendingNativeUsage, acknowledgeNativeUsage } from './native-usage-receipts.mjs'
 import { readNativeJson } from './native-json.mjs'
 import { constants, closeSync, existsSync, fstatSync, lstatSync, openSync, readFileSync, realpathSync, readdirSync } from 'node:fs'
@@ -97,6 +97,7 @@ export class SkillUsageDelivery {
         const metered=command.usageMode==='RESPONSE_V2'
         if (metered) {
           this.pendingMetered.push({store,command}); unresolved.add(id)
+          if (store.read('native-image-binding')) for (const child of pendingMeteredImageUsage(store)) this.pendingUsage.push({command,store,...child})
         } else {
           const usage = pendingNativeUsage(store), planner = command.skills.length>1 ? pendingNativeUsage(store,'planner') : null
           for (const item of [...(usage ? [usage] : []), ...(planner ? [planner] : []), ...pendingProviderUsage(store, { hostOnly: Boolean(store.read('native-image-binding')) })]) { this.pendingUsage.push({ command, store, ...item }); unresolved.add(id) }
