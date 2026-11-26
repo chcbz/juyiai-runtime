@@ -44,7 +44,8 @@ export function comparePreparedImage(profileRuntime, outputs, entry, settings, p
   if (!settings.mountPinnedSkill && skillPackageTreeDigest(entry.descriptor.packageRoot) !== entry.descriptor.packageTreeDigest) return null
   const tools = out => [...nativeArtifactOutputTools(out),nativeImageToolDefinition(operation)]
   return profileRuntime.prospectiveNativeGroup({preparedLocalBudget:true,
-    ...(pricingDescriptor ? {pricingImage:{operation,model:settings.model,channel:settings.channel,tier:settings.tier,packageSha256:entry.descriptor.packageSha256}} : {}), skills:settings.mountPinnedSkill ? selectedPackages([entry]) : [],
+    ...(pricingDescriptor ? {pricingImage:{operation,model:settings.model,channel:settings.channel,tier:settings.tier,packageSha256:entry.descriptor.packageSha256,skillInstallationId:entry.descriptor.skillInstallationId,skillKey:entry.descriptor.skillKey,
+      captureTools:[false,true].flatMap(artifactsRequired=>[false,true].map(multiple=>tools({dataSchema:null,artifactsRequired,multiple})))}} : {}), skills:settings.mountPinnedSkill ? selectedPackages([entry]) : [],
     skillConfiguration:[],networkAccess:false,localArtifactOnly:false,childRouteSha256,tools:tools(outputs),profileTools:tools({dataSchema:null}),
     toolPolicyRef:NATIVE_SKILL_SCRIPT_POLICY,instructionsSha256})
 }

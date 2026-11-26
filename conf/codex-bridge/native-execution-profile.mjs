@@ -284,13 +284,18 @@ export function measureProspectiveNativeGroup({ skills, skillConfiguration, tool
         || !hash(settings.instructionsSha256) || !hash(pricingImage.packageSha256) || !['generate','edit'].includes(pricingImage.operation)) return null
     // Do not promote installation/owner-specific route or dispatch digests to compatibility identities.
     // Only the fixed output-tool contract, verified portable package and sandboxed toolchain enter this identity.
+    const dispatch={}
+    for(const [index,tools] of pricingImage.captureTools.entries()){
+      const actual=nativeDispatchGroup({...binding,tools},settings)
+      dispatch[`execution${index}`]=actual.executionConfigSha256;dispatch[`tools${index}`]=actual.toolConfigSha256
+    }
     return {operation:pricingImage.operation,contextPolicyId:'native-image-context-1',
       contextPolicyVersion:skillDigest(['native-image-context-1',settings.binarySha256,settings.engineVersion,settings.effort,settings.instructionsSha256,binding.modelCatalogSha256 ?? null]),
       toolPolicyVersion:skillDigest(['native-image-tools-1',settings.toolPolicyRef,pricingImage.packageSha256,profileTools,binding.skills.map(x=>[x.skillKey,x.packageTreeDigest]),
         binding.toolchain.shell,binding.toolchain.files.map(x=>[x.sandboxPath,x.sha256]),binding.sandboxUser,binding.neutralMountTargets]),
       capturePolicyVersion:settings.coveragePolicyVersion,parentModel:settings.model,parentRouteNamespace:settings.channelNamespace,
       childChannel:pricingImage.channel,childModel:pricingImage.model,childTier:pricingImage.tier,childBasis:'openai-images-modalities-v1',
-      parentBasis:'RESPONSES_TEXT_TOKENS_V1',referenceRouteSha256:baseline.routeSha256}
+      parentBasis:'RESPONSES_TEXT_TOKENS_V1',referenceRouteSha256:baseline.routeSha256,skillKey:pricingImage.skillKey,skillInstallationId:pricingImage.skillInstallationId,packageSha256:pricingImage.packageSha256,...dispatch}
   }
   return {...group,profileSha256:skillDigest([settings.childRouteSha256 ? 'PREPARED_IMAGE_PROFILE_V1' : 'PREPARED_LOCAL_PROFILE_V1',baseline.executionConfigSha256])}
 }

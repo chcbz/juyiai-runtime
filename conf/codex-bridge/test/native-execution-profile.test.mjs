@@ -875,7 +875,7 @@ test('prepared pinned image measures the same mounted or substituted tool group 
   const {nativeImageRouteDigest,nativeImageToolDefinition}=await import('../native-image-tool.mjs');
   const {nativeArtifactOutputTools}=await import('../native-artifact-session.mjs');
   const f=fixture();try {
-    const descriptor={...f.options.skills[0],skillKey:'image-generate',packageSha256:'a'.repeat(64)};
+    const descriptor={...f.options.skills[0],skillKey:'image-generate',skillInstallationId:'installed',packageSha256:'a'.repeat(64)};
     const outputs={mimeTypes:['image/png'],dataSchema:null};
     const provider={id:'gateway',wireApi:'responses',baseUrl:'https://example.invalid/v1'};
     const config={config:{cli_auth_credentials_store:'file',model_provider:'gateway',model_providers:{gateway:{base_url:provider.baseUrl,wire_api:'responses',requires_openai_auth:true}}}};
@@ -897,6 +897,11 @@ test('prepared pinned image measures the same mounted or substituted tool group 
       for(const text of [f.options.stateRoot,provider.baseUrl,descriptor.packageRoot,'developerInstructions'])assert.ok(!JSON.stringify(proof).includes(text));
       const skills=mountPinnedSkill?[{...f.options.skills[0],skillKey:descriptor.skillKey}]:[];
       const actual=prepareNativeExecutionLayout({...f.options,skills,nativeExecution:{...f.options.nativeExecution,tools:[...nativeArtifactOutputTools(outputs),nativeImageToolDefinition('generate')]}});
+      const fullRoute={...route,binarySha256:'d'.repeat(64)}
+      for(const [i,tools] of q.pricingImage.captureTools.entries()){
+        const frozen=nativeDispatchGroup({...actual.binding,tools},fullRoute)
+        assert.equal(proof[`execution${i}`],frozen.executionConfigSha256);assert.equal(proof[`tools${i}`],frozen.toolConfigSha256)
+      }
       const {profileSha256,...observed}=group;assert.match(profileSha256,/^[a-f0-9]{64}$/);assert.deepEqual(observed,nativeDispatchGroup(actual.binding,route));
       assert.equal(comparePreparedImage(null,outputs,{descriptor},{...settings,priceVersion:null},provider,config),null);
       assert.throws(()=>comparePreparedImage(null,outputs,{descriptor},settings,provider,{}),/CONFIG_INVALID/);
