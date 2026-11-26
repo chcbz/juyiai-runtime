@@ -443,6 +443,7 @@ export const EXECUTION_PAYLOAD_FILES = Object.freeze([
   "execution-business-api.mjs",
   "metered-capture-files.mjs",
   "metered-capture-closure.mjs",
+  "metered-image-reference.mjs",
   "metered-usage-delivery.mjs",
   "metered-request-capture.mjs",
   "metered-responses-route.mjs",
