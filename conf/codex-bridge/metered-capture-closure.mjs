@@ -35,6 +35,7 @@ async function auditSubject(parent,{executionId,runId,snapshotDigest},assertStop
   }
   const plan=check(await readPrivate(dir,'plan'),'PLAN',[],1), sourceId=plan.observation.rootSourceId
   yes(plan.observation.snapshotSha256 === snapshotDigest && plan.observation.captureProtocol === 'METERED_CAPTURE_V2')
+  const image=plan.observation.coveragePolicyVersion==='NATIVE_PINNED_IMAGE_V1' && plan.observation.imageRoute
   const finals=[], allReasons=new Set(), seenResponses=new Set();let previous=null
   const final=async(dir,names,key,kind,identity,observation)=>{
     if(names.has(`${key}.json`)){const existing=check(await readPrivate(dir,key),kind,identity,1);yes(skillDigest(existing.observation)===skillDigest(observation));return existing}
@@ -46,7 +47,8 @@ async function auditSubject(parent,{executionId,runId,snapshotDigest},assertStop
     const source=check(await read(`source-${epoch}`),'SOURCE',[sourceId,epoch],1),so=source.observation
     yes(skillId(sourceId)&&so.sourceId===sourceId&&so.epoch===epoch&&so.parentSourceRecordId===null&&so.previousEpochSourceRecordId===previous)
     previous=source.recordId
-    if(!['TEXT_MODEL_ONLY_V1','NATIVE_LOCAL_ARTIFACT_TEXT_V1'].includes(plan.observation.coveragePolicyVersion)||plan.observation.engineVersion!=='codex-cli-0.167.0'||so.adapterVersion!=='RESPONSES_TEXT_TOKENS_V1'||so.sourceKind!=='METERED_HTTP_RESPONSES_V1')reasons.add('UNSUPPORTED_COST_SOURCE')
+    const imageSource=image && skillId(image.model) && skillSha(image.childRouteSha256) && plan.observation.dispatchGroup?.routeSha256===skillDigest(['NATIVE_COMPOSITE_ROUTE_V1',so.channelNamespace,image.model,image.childRouteSha256])
+    if((!imageSource&&!['TEXT_MODEL_ONLY_V1','NATIVE_LOCAL_ARTIFACT_TEXT_V1'].includes(plan.observation.coveragePolicyVersion))||plan.observation.engineVersion!=='codex-cli-0.167.0'||so.adapterVersion!=='RESPONSES_TEXT_TOKENS_V1'||so.sourceKind!=='METERED_HTTP_RESPONSES_V1')reasons.add('UNSUPPORTED_COST_SOURCE')
     latest.set(source.recordId,tuple(source))
     let high=0n
     for(const name of names){let m
@@ -61,7 +63,7 @@ async function auditSubject(parent,{executionId,runId,snapshotDigest},assertStop
     }
     if(names.has('producer-stopped.json')){const stop=await read('producer-stopped');yes(Object.entries(binding).every(([k,v])=>stop[k]===v)&&(epoch==='0'||stop.epoch===epoch)&&dec(stop.reservedHigh)&&BigInt(stop.reservedHigh)>=high&&typeof stop.writeFailed==='boolean');high=BigInt(stop.reservedHigh);if(stop.writeFailed)reasons.add('SOURCE_WRITE_INCOMPLETE')}
     else reasons.add('PRODUCER_WATERMARK_UNCONFIRMED')
-    if(high===0n && plan.observation.coveragePolicyVersion==='NATIVE_LOCAL_ARTIFACT_TEXT_V1')reasons.add('USAGE_INCOMPLETE')
+    if(high===0n && (image||plan.observation.coveragePolicyVersion==='NATIVE_LOCAL_ARTIFACT_TEXT_V1'))reasons.add('USAGE_INCOMPLETE')
     if(high!==BigInt(reservations.size)||high!==BigInt(requests.size))reasons.add('SEQUENCE_GAP')
     for(const [seq,rev] of requests){yes(reservations.has(seq));const identity=[sourceId,epoch,seq],base=check(await read(`request-${seq}-1`),'REQUEST',identity,1),b=base.observation
       yes(b.sourceId===sourceId&&b.epoch===epoch&&b.sequence===seq&&skillId(b.attemptId)&&b.resolution==='PENDING'&&b.sourceAttemptId===null)
@@ -81,12 +83,13 @@ async function auditSubject(parent,{executionId,runId,snapshotDigest},assertStop
     finals.push(tuple(sourceFinal));for(const reason of reasonCodes)allReasons.add(reason)
   }
   // Current local-artifact admission proves only epoch zero (design §4.2.3).
-  if(epochs.length>1 && plan.observation.coveragePolicyVersion==='NATIVE_LOCAL_ARTIFACT_TEXT_V1')allReasons.add('UNSUPPORTED_COST_SOURCE')
-  const reasonCodes=[...allReasons].sort(),closeState=reasonCodes.length?'SEALED_INCOMPLETE':'DRAINED'
+  if(epochs.length>1 && (image||plan.observation.coveragePolicyVersion==='NATIVE_LOCAL_ARTIFACT_TEXT_V1'))allReasons.add('UNSUPPORTED_COST_SOURCE')
   // Re-verify references on replay, but never reinterpret an older or incomplete final as a newer one.
   const sealed=names.has('capture-final-1.json') ? await readPrivate(dir,'capture-final-1') : null
   const child=plan.observation.coveragePolicyVersion==='NATIVE_PINNED_IMAGE_V1' && (!sealed || sealed.observation.imageInvocation)
     ? await meteredImageReference(parent,{executionId,runId,snapshotDigest}) : null
+  if(image && (!child || child.childRouteSha256!==image.childRouteSha256))allReasons.add('USAGE_INCOMPLETE')
+  const reasonCodes=[...allReasons].sort(),closeState=reasonCodes.length?'SEALED_INCOMPLETE':'DRAINED'
   const captureFinal=await final(dir,names,'capture-final-1','CAPTURE_FINAL',[],{...(child?{imageInvocation:child}:{}),planEvidenceSha256:plan.evidenceSha256,sourceCount:String(finals.length),sourcesSha256:skillDigest([...finals].sort(([a],[b])=>a<b?-1:1)),closeState,reasonCodes})
   const marker={...binding,...(finals.length===1?{sourceFinal:finals[0]}:{sourceFinals:finals}),captureFinal:tuple(captureFinal),closeState}
   if(names.has('usage-capture-finalized.json'))yes(skillDigest(await readPrivate(dir,'usage-capture-finalized'))===skillDigest(marker))

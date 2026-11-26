@@ -1,7 +1,7 @@
 import { openBusinessSocket, BUSINESS_API_SOCKET } from './execution-business-api.mjs'
 import { isCurrentAppServerMeasurement } from './app-server-adapter.mjs'
 import { startMeteredRoot, resumeStoppedMeteredRoot } from './metered-request-capture.mjs'
-import { skillDigest, skillId } from './skill-executor.mjs'
+import { skillDigest, skillId, NATIVE_SKILL_SCRIPT_POLICY } from './skill-executor.mjs'
 import { BROWSER_PROBE } from './native-browser-toolchain.mjs'
 import { DOCUMENT_MIMES, DOCUMENT_PROBE, PDF_PROBE } from './native-document-toolchain.mjs'
 import { spawn } from 'node:child_process'
@@ -115,6 +115,10 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
             executionConfigSha256:skillDigest([layout.digest,store.commandDigest,engineVersion,channelNamespace,model,effort]),
             dispatchGroup:nativeDispatchGroup(layout.binding,{binarySha256:schema.binarySha256,engineVersion,channelNamespace,model,effort,
               childRouteSha256:slot.meteredAdmission.childRouteSha256, instructionsSha256:slot.meteredAdmission.instructionsSha256,toolPolicyRef:store.command.toolPolicyRef,coveragePolicyVersion}),
+            ...(coveragePolicyVersion==='NATIVE_PINNED_IMAGE_V1' && store.command.toolPolicyRef===NATIVE_SKILL_SCRIPT_POLICY &&
+              !layout.binding.networkAccess && !layout.binding.networkOrigins.length && !layout.binding.webSearch &&
+              !layout.binding.skillConfiguration.length && layout.binding.skills.length<=1 && typeof nativeExecution.localArtifactCall==='function'
+              ? {imageRoute:{model,childRouteSha256:slot.meteredAdmission.childRouteSha256}} : {}),
             engineVersion,coveragePolicyVersion,rootSourceId:'source_model',channelNamespace,adapterVersion:'RESPONSES_TEXT_TOKENS_V1',checkActive,deferUntilThread:mode==='BEFORE_FIRST_TURN' }
           slot.meteredCapture=mode===null?await startMeteredRoot(store,options):await resumeStoppedMeteredRoot(store,options,mode)
         } catch (error) { if (error.code === 'EEXIST') fail('SKILL_RESULT_UNKNOWN'); throw error }

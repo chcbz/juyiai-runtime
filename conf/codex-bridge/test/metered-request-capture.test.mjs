@@ -639,8 +639,8 @@ test('pinned Images enables only parent text-token observation, never complete c
 test('image final links only the single reserved child in the same run and re-verifies both phase digests',async t=>{
   const args={coveragePolicyVersion:'NATIVE_PINNED_IMAGE_V1'}
   const id='11111111-1111-4111-8111-111111111111',route='e'.repeat(64)
-  async function prepare(runId){
-    const f=await openRoot(t,args);f.store.reserve('native-image-start',{invocationId:id,runId,executionId:'exec1',snapshotDigest:'a'.repeat(64),childRouteSha256:route});f.store.write('native-image-binding',{operation:'generate',packageSha256:'b'.repeat(64)})
+  async function prepare(runId,plan={},withParent=false){
+    const f=await openRoot(t,{...args,...plan});if(withParent){const obs=observeResponse('application/json',200,4096,true);obs.push(Buffer.from(JSON.stringify({id:'resp_parent',status:'completed',usage:{input_tokens:7,output_tokens:1,total_tokens:8,input_tokens_details:{cached_tokens:0},output_tokens_details:{reasoning_tokens:0}}})));await f.capture.dispatch((req,finish)=>finish(obs.finish(true)))}f.store.reserve('native-image-start',{invocationId:id,runId,executionId:'exec1',snapshotDigest:'a'.repeat(64),childRouteSha256:route});f.store.write('native-image-binding',{operation:'generate',packageSha256:'b'.repeat(64)})
     const start={schemaVersion:1,invocationId:id,operation:'generate',protocol:'openai-images-v1',channel:'test',tier:'test',priceVersion:'v',requestedModel:'im',observedAt:4,phase:'STARTED',evidence:null},end={...start,observedAt:5,phase:'TERMINAL',evidence:{providerRequestId:'image-response',usage:{total_tokens:123}}};
     f.store.write(`provider-usage-${id}-started`,start);f.store.write(`provider-usage-${id}-terminal`,end);await f.capture.markStopped(()=>{});return {...f,start,end}
   }
@@ -654,5 +654,9 @@ test('image final links only the single reserved child in the same run and re-ve
   ack('terminal','2',f.end,'f'.repeat(64));await assert.rejects(send(),{code:'METERED_USAGE_RECEIPT_CONFLICT'});assert.ok(!posts.includes('CAPTURE_FINAL'))
   ack('terminal','2',f.end);assert.equal(await send(),true);assert.equal(await send(),true);assert.equal(posts.filter(x=>x==='CAPTURE_FINAL').length,1)
   f.store.write(`provider-usage-${id}-terminal`,{...f.end,observedAt:6});await assert.rejects(recoverStoppedMeteredRoot(f.store,()=>{}),{code:'METERED_CAPTURE_SOURCE_CONFLICT'})
+  const planned=(child)=>({engineVersion:'codex-cli-0.167.0',adapterVersion:'RESPONSES_TEXT_TOKENS_V1',imageRoute:{model:'test',childRouteSha256:child},dispatchGroup:{version:'NATIVE_DISPATCH_GROUP_V1',executionConfigSha256:'a'.repeat(64),toolConfigSha256:'b'.repeat(64),routeSha256:skillDigest(['NATIVE_COMPOSITE_ROUTE_V1','test_gateway','test',child])}})
+  for(const [run,plan,parent,expected] of [['run1',planned(route),true,'DRAINED'],['run1',planned(route),false,'SEALED_INCOMPLETE'],['foreign-run',planned(route),true,'SEALED_INCOMPLETE'],['run1',planned('9'.repeat(64)),true,'SEALED_INCOMPLETE']]){
+    const v=await prepare(run,plan,parent);assert.equal((await recoverStoppedMeteredRoot(v.store,()=>{})).closeState,expected);assert.equal((await recoverStoppedMeteredRoot(v.store,()=>{})).closeState,expected)
+  }
   const g=await prepare('foreign-run');await recoverStoppedMeteredRoot(g.store,()=>{});assert.equal((await g.read('capture-final-1')).observation.imageInvocation,undefined)
 })

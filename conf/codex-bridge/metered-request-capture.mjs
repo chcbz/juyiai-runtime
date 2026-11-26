@@ -22,7 +22,7 @@ function openRoot(store, options, mode) {
     return Promise.reject(Object.assign(Error('METERED_CAPTURE_BINDING_INVALID'),{code:'METERED_CAPTURE_BINDING_INVALID'}))
   return openSubject(store.directory,store.command,options,mode)
 }
-async function openSubject(parent, subject, { executionId, runId, executionConfigSha256, dispatchGroup = null, engineVersion, coveragePolicyVersion,
+async function openSubject(parent, subject, { executionId, runId, executionConfigSha256, dispatchGroup = null, imageRoute = null, engineVersion, coveragePolicyVersion,
   rootSourceId, channelNamespace, adapterVersion, checkActive, deferUntilThread = false, now = Date.now }, mode, onClaim = null) {
   if (subject.executionId !== checkId(executionId) || subject.runId !== checkId(runId)
       || !skillSha(subject.snapshotDigest) || !skillSha(executionConfigSha256) || typeof checkActive !== 'function') bad('METERED_CAPTURE_BINDING_INVALID')
@@ -30,8 +30,10 @@ async function openSubject(parent, subject, { executionId, runId, executionConfi
   const binding = { executionId, runId, captureId: skillDigest(['CAPTURE_V2', executionId, runId]) }
   const root = resolve(parent, `usage-capture-${binding.captureId}`),sourceId=rootSourceId
   checkActive(); await directory(parent)
+  if(imageRoute && (coveragePolicyVersion!=='NATIVE_PINNED_IMAGE_V1'||Object.keys(imageRoute).length!==2||!skillId(imageRoute.model)||!skillSha(imageRoute.childRouteSha256)||
+    dispatchGroup?.routeSha256!==skillDigest(['NATIVE_COMPOSITE_ROUTE_V1',channelNamespace,imageRoute.model,imageRoute.childRouteSha256])))bad('METERED_CAPTURE_BINDING_INVALID')
   const planFacts={captureProtocol:'METERED_CAPTURE_V2',snapshotSha256:subject.snapshotDigest,executionConfigSha256,
-    engineVersion,coveragePolicyVersion,rootSourceId,...(dispatchGroup?{dispatchGroup}:{})}
+    engineVersion,coveragePolicyVersion,rootSourceId,...(dispatchGroup?{dispatchGroup}:{}),...(imageRoute?{imageRoute}:{})}
   const sourceFacts=(epoch,previous)=>({sourceId,epoch,sourceKind:'METERED_HTTP_RESPONSES_V1',adapterVersion,channelNamespace,
     parentSourceRecordId:null,previousEpochSourceRecordId:previous})
   let epoch='0',dir=root,previous=null
