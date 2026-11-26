@@ -646,6 +646,13 @@ test('image final links only the single reserved child in the same run and re-ve
   }
   const f=await prepare('run1');await recoverStoppedMeteredRoot(f.store,()=>{});const o=(await f.read('capture-final-1')).observation
   assert.deepEqual(o.imageInvocation,{invocationId:id,operation:'generate',childRouteSha256:route,startedSha256:skillDigest(f.start),terminalSha256:skillDigest(f.end)});assert.equal(o.closeState,'SEALED_INCOMPLETE')
+  const {deliverMetered}=await import('../metered-usage-delivery.mjs'),posts=[]
+  const send=()=>deliverMetered(f.store,async(path,method,r)=>{posts.push(r.kind);return Object.fromEntries([...['schemaVersion','executionId','runId','captureId','receiptId','recordId','sourceRevision','evidenceSha256'].map(k=>[k,r[k]]),['acceptedAt',5],['acceptance','DURABLE'],['ledger',null]])},{left:8,until:Date.now()+5000},true)
+  assert.equal(await send(),false);assert.deepEqual(posts,['PLAN','SOURCE','SOURCE_FINAL'])
+  const attemptId=skillDigest(['NATIVE_PROVIDER_CALL',`exec1:${id}`]);const ack=(phase,revision,observation,attempt=attemptId)=>f.store.write(`provider-usage-${id}-${phase}-receipt`,{executionId:'exec1',attemptId:attempt,revision,evidenceSha256:skillDigest({executionId:'exec1',observation}),status:phase==='started'?'PENDING_USAGE':'PENDING_PRICE',costYuan:null})
+  ack('started','1',f.start);assert.equal(await send(),false)
+  ack('terminal','2',f.end,'f'.repeat(64));await assert.rejects(send(),{code:'METERED_USAGE_RECEIPT_CONFLICT'});assert.ok(!posts.includes('CAPTURE_FINAL'))
+  ack('terminal','2',f.end);assert.equal(await send(),true);assert.equal(await send(),true);assert.equal(posts.filter(x=>x==='CAPTURE_FINAL').length,1)
   f.store.write(`provider-usage-${id}-terminal`,{...f.end,observedAt:6});await assert.rejects(recoverStoppedMeteredRoot(f.store,()=>{}),{code:'METERED_CAPTURE_SOURCE_CONFLICT'})
   const g=await prepare('foreign-run');await recoverStoppedMeteredRoot(g.store,()=>{});assert.equal((await g.read('capture-final-1')).observation.imageInvocation,undefined)
 })

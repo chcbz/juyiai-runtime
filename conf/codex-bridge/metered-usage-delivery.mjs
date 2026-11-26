@@ -1,3 +1,4 @@
+import { imagePhasesAcknowledged } from './metered-image-reference.mjs'
 import { retainedDiscussionSource } from './metered-request-capture.mjs'
 import { verifySealedSubject } from './metered-capture-closure.mjs'
 /** Deliver immutable source files only. No engine, wallet or model dependency. The stopped
@@ -93,6 +94,7 @@ async function deliverSubject(parent,executionId,runId,path,request,batch,sealed
       e.recordId!==skillDigest(['USAGE_RECORD_V2',captureId,kind,identity])||!sha.test(evidenceSha256)||skillDigest(e)!==evidenceSha256||
       expectedRevision!==(kind==='RESPONSE'?'0':null)||receiptId!==skillDigest(['USAGE_RECEIPT_V2',evidenceSha256,expectedRevision]))bad()
     if(has){validateAck(await readPrivate(acks,ackKey),raw);continue}
+    if(kind==='CAPTURE_FINAL'&&o.imageInvocation&&!await imagePhasesAcknowledged(parent,executionId,o.imageInvocation))return false
     const send=(url,method,body)=>{
       const ms=remainingMs(batch)
       if(ms<=0||batch.left<=0)throw new Error('METERED_DELIVERY_BUDGET_EXHAUSTED')
