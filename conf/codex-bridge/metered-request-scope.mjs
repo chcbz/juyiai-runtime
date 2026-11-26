@@ -25,21 +25,24 @@ export function requestCostScope(budget,localArtifactCall) {
       if(['name','description'].includes(key)&&kind==='string'||key==='strict'&&kind==='atom'||['parameters','format'].includes(key)&&kind==='object')return 'skip'
     } else if(parent==='input'&&kind==='object')return {item:true}
     else if(parent.item){
-      if(['type','call_id','name'].includes(key)&&kind==='string')return {itemField:key,itemOwner:parent}
+      if(key==='tools'&&kind==='array')return 'tools' // additional_tools must pass the same nested declaration checks
+      if(['type','call_id','name','role'].includes(key)&&kind==='string')return {itemField:key,itemOwner:parent}
       if(['content','output'].includes(key)&&kind==='array')return 'content'
-      if(['role','id','status','phase','arguments','output','content'].includes(key)&&kind==='string')return 'skip'
+      if(['id','status','phase','arguments','output','content'].includes(key)&&kind==='string')return 'skip'
     } else if(parent==='content'&&kind==='object')return 'part'
     else if(parent==='part'){
       if(key==='type'&&kind==='string')return 'partType'
       if(key==='text'&&kind==='string')return 'skip'
       if(['image_url','file_id','file_data','audio'].includes(key)){flags.add('REQUEST_NON_TEXT_INPUT');return 'skip'}
     } else if(parent==='reasoningOptions'&&['effort','summary'].includes(key)&&kind==='string')return 'skip'
+    else if(parent==='reasoningOptions'&&key==='context'&&kind==='string')return 'reasoningContext'
     else if(parent==='textOptions'&&key==='verbosity'&&kind==='string')return 'skip'
     else if(parent==='includes'&&kind==='string')return 'include'
     unknown();return 'skip'
   }
-  const enums=new Set(['choice','partType','include'])
+  const enums=new Set(['choice','partType','include','reasoningContext'])
   const inspect={value,read:role=>!!role?.toolOwner||!!role?.itemOwner||enums.has(role),scalar(role,v){
+    if(role==='reasoningContext'&&v!=='all_turns')unknown()
     if(role==='choice'&&!['auto','none','required'].includes(v))unknown()
     if(role?.toolOwner){role.toolOwner[role.toolField]=v;role.toolOwner.namespace=role.toolOwner.type==='namespace'}
     if(role?.itemOwner)role.itemOwner[role.itemField]=v
@@ -51,6 +54,8 @@ export function requestCostScope(budget,localArtifactCall) {
       const allow=(...fields)=>[...keys].every(k=>fields.includes(k))
       if(role.type==null||role.type==='message'){
         if(!allow('type','id','role','status','phase','content')||!keys.has('role')||!keys.has('content'))unknown()
+      } else if(role.type==='additional_tools'){
+        if(role.role!=='developer'||!keys.has('tools')||!allow('type','id','role','tools'))unknown()
       } else if(role.type==='function_call'||role.type==='function_call_output'){
         const call=role.type==='function_call',name=role.call_id&&localArtifactCall?.(role.call_id)
         if(!name||(call?name!==role.name||!keys.has('arguments')||!allow('type','id','call_id','name','arguments','status'):

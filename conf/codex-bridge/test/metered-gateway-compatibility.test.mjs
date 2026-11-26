@@ -53,3 +53,14 @@ test('client discovery declaration is not a hosted tool; execution still needs b
  assert.ok(check([{type:'function',execution:'client'}]).includes('REQUEST_COST_SCOPE_UNKNOWN'))
  assert.ok(check([tool],[{type:'tool_search_call',call_id:'unbound',arguments:'{}'}]).includes('REQUEST_COST_SCOPE_UNKNOWN'))
 })
+
+test('native developer tool catalogue is text only when every nested declaration and reasoning-context selector is understood',()=>{
+  const tool={type:'namespace',name:'test',description:'fixture',tools:[{type:'function',name:'result_propose',description:'fixture',strict:false,parameters:{type:'object'}}]}
+  const item={tools:[tool],id:'fixture',role:'developer',type:'additional_tools'}
+  const scope=(input,reasoning={context:'all_turns',effort:'medium'})=>{const p=requestCostScope(16384);const b=Buffer.from(JSON.stringify({model:'fixture',input,reasoning}));for(let i=0;i<b.length;i+=11)p.push(b.subarray(i,i+11));return p.finish(true)}
+  assert.deepEqual(scope([item]),[])
+  for(const x of [{...item,role:'user'},{...item,type:'message'},{...item,tools:{}},{...item,unexpected:true}])assert.ok(scope([x]).includes('REQUEST_COST_SCOPE_UNKNOWN'))
+  assert.ok(scope([{...item,tools:[{...tool,tools:[{type:'web_search'}]}]}]).includes('REQUEST_PROVIDER_TOOL_OR_UNKNOWN'))
+  assert.ok(scope([item],{context:'unknown'}).includes('REQUEST_COST_SCOPE_UNKNOWN'))
+  assert.ok(scope([item,{role:'user',content:[{type:'input_image',image_url:'fixture'}]}]).includes('REQUEST_NON_TEXT_INPUT'))
+})
