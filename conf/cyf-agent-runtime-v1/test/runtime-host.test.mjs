@@ -2016,3 +2016,45 @@ test('prepared local task measurement is correlation and session bound without c
   state.preparedGroup=null;assert.deepEqual(await heartbeat(),{sequence:'6',profileSha256:null});
   assert.deepEqual(state.accepted,[]);
 });
+
+
+test('authenticated registration carries generic measured costs with session-local revision and withdrawal', async t => {
+  // Real transport/registration adapter; the injected engine supplies synthetic measurements.
+  // The same immutable report is also consumed by the API codec fixture tests.
+  const expected = JSON.parse(await readFile(resolve(engineSource, 'test/fixtures/cost-profile-report.json'), 'utf8'));
+  const measured = expected.profiles.map(({ measurementSha, ...profile }) => profile);
+  const c = await channelFixture(t);
+  const state = c.states()[0]; state.costProfiles = structuredClone(measured);
+  await c.executors[0].activate();
+  const socket = c.sockets[0];
+  const latest = () => socket.sent.filter(frame => frame.messageType === 'agent.register').at(-1);
+  assert.deepEqual(latest().pricingProfiles, expected);
+  const generation = latest().sessionGeneration;
+  const refresh = async () => { state.transport.refreshCapabilities(); await c.tick(); return latest().pricingProfiles; };
+  assert.deepEqual(await refresh(), expected);
+  state.costProfiles[0].revision = '2';
+  const changed = await refresh();
+  assert.equal(changed.sequence, '2'); assert.notEqual(changed.sha256, expected.sha256);
+  assert.equal(changed.profiles[0].revision, '2');
+  state.costProfiles[0].unexpectedField = 'not a measured contract';
+  const withdrawn = await refresh();
+  assert.equal(withdrawn.sequence, '3'); assert.deepEqual(withdrawn.profiles, []);
+  assert.equal(c.executors[0].ready(), true);
+  state.costFailure = true;
+  assert.deepEqual(await refresh(), withdrawn);
+  state.costFailure = false; state.costProfiles = structuredClone(measured);
+  assert.equal((await refresh()).sequence, '4');
+  assert.ok(state.costReads.every(value => value === generation));
+
+  await c.executors[1].activate();
+  const second = c.sockets[1].sent.find(frame => frame.messageType === 'agent.register');
+  assert.equal(second.pricingProfiles.sequence, '1');
+  assert.deepEqual(second.pricingProfiles.profiles, []);
+  const opened = c.nextOpened(); socket.close(); await opened; await c.tick();
+  const replacement = c.sockets.find(value => value !== socket && value !== c.sockets[1] && value.readyState === 1);
+  assert.ok(replacement);
+  const registration = replacement.sent.find(frame => frame.messageType === 'agent.register');
+  assert.ok(BigInt(registration.sessionGeneration) > BigInt(generation));
+  assert.deepEqual(registration.pricingProfiles, expected);
+  assert.equal(state.costReads.at(-1), registration.sessionGeneration);
+});

@@ -267,7 +267,7 @@ const measureNativeConfiguration = ({ skills, skillConfiguration, nativeExecutio
 }
 
 /** Internal comparison only. No execution identity, authority, price or coverage is issued here. */
-export function measureProspectiveNativeGroup({ skills, skillConfiguration, tools, networkAccess, modelCatalogSha256, toolchain, stateRoot, verifiedOnly = false, profileTools, pricingImage }, settings) {
+export function measureProspectiveNativeGroup({ skills, skillConfiguration, tools, networkAccess, modelCatalogSha256, toolchain, stateRoot, verifiedOnly = false, profileTools, costResources }, settings) {
   // An absent catalogue decision, unknown skill selection or unknown network policy is not a proven empty one.
   if (!Array.isArray(skills) || !Array.isArray(skillConfiguration) || typeof networkAccess !== 'boolean'
       || !(modelCatalogSha256 === null || hash(modelCatalogSha256)) || typeof stateRoot !== 'string' || resolve(stateRoot) !== stateRoot) return null
@@ -279,23 +279,20 @@ export function measureProspectiveNativeGroup({ skills, skillConfiguration, tool
   // output contract. A profile epoch is NOT a dispatch group: never persist it in the actual-use PLAN.
   if (!Array.isArray(profileTools) || (skills.length && !hash(settings.childRouteSha256)) || skillConfiguration.length || networkAccess) return null
   const baseline = nativeDispatchGroup({...binding,tools:profileTools},settings)
-  if (pricingImage) {
-    if (settings.coveragePolicyVersion !== 'NATIVE_PINNED_IMAGE_V1' || !hash(settings.childRouteSha256) || !hash(settings.binarySha256)
-        || !hash(settings.instructionsSha256) || !hash(pricingImage.packageSha256) || !['generate','edit'].includes(pricingImage.operation)) return null
-    // Do not promote installation/owner-specific route or dispatch digests to compatibility identities.
-    // Only the fixed output-tool contract, verified portable package and sandboxed toolchain enter this identity.
-    const dispatch={}
-    for(const [index,tools] of pricingImage.captureTools.entries()){
-      const actual=nativeDispatchGroup({...binding,tools},settings)
-      dispatch[`execution${index}`]=actual.executionConfigSha256;dispatch[`tools${index}`]=actual.toolConfigSha256
-    }
-    return {operation:pricingImage.operation,contextPolicyId:'native-image-context-1',
-      contextPolicyVersion:skillDigest(['native-image-context-1',settings.binarySha256,settings.engineVersion,settings.effort,settings.instructionsSha256,binding.modelCatalogSha256 ?? null]),
-      toolPolicyVersion:skillDigest(['native-image-tools-1',settings.toolPolicyRef,pricingImage.packageSha256,profileTools,binding.skills.map(x=>[x.skillKey,x.packageTreeDigest]),
+  if (costResources) {
+    // Resource adapters supply measured references only after their own endpoint/configuration checks.
+    // This is a configuration observation, not an output-specific execution commitment or a tariff.
+    if (!hash(settings.binarySha256) || !hash(settings.instructionsSha256)
+        || !['NATIVE_LOCAL_ARTIFACT_TEXT_V1','NATIVE_PINNED_IMAGE_V1'].includes(settings.coveragePolicyVersion)
+        || !Array.isArray(costResources)) return null
+    return {executionStrategyVersion:settings.toolPolicyRef,contextPolicyId:'native-execution-context-1',
+      contextPolicyVersion:skillDigest(['native-execution-context-1',settings.binarySha256,settings.engineVersion,settings.effort,
+        settings.instructionsSha256,binding.modelCatalogSha256 ?? null]),
+      toolPolicyVersion:skillDigest(['native-execution-tools-1',settings.toolPolicyRef,profileTools,binding.skills.map(x=>[x.skillKey,x.packageTreeDigest]),
         binding.toolchain.shell,binding.toolchain.files.map(x=>[x.sandboxPath,x.sha256]),binding.sandboxUser,binding.neutralMountTargets]),
-      capturePolicyVersion:settings.coveragePolicyVersion,parentModel:settings.model,parentRouteNamespace:settings.channelNamespace,
-      childChannel:pricingImage.channel,childModel:pricingImage.model,childTier:pricingImage.tier,childBasis:'openai-images-modalities-v1',
-      parentBasis:'RESPONSES_TEXT_TOKENS_V1',referenceRouteSha256:baseline.routeSha256,skillKey:pricingImage.skillKey,skillInstallationId:pricingImage.skillInstallationId,packageSha256:pricingImage.packageSha256,...dispatch}
+      capturePolicyVersion:settings.coveragePolicyVersion,
+      routeRefs:[{kind:'MODEL_RESPONSE',component:'INFERENCE',namespace:settings.channelNamespace,modelOrTool:settings.model,
+        normalizationBasis:'RESPONSES_TEXT_TOKENS_V1'},...structuredClone(costResources)]}
   }
   return {...group,profileSha256:skillDigest([settings.childRouteSha256 ? 'PREPARED_IMAGE_PROFILE_V1' : 'PREPARED_LOCAL_PROFILE_V1',baseline.executionConfigSha256])}
 }

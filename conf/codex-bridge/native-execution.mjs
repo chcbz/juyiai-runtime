@@ -7,6 +7,7 @@ import { NATIVE_SKILL_SCRIPT_POLICY } from './native-skill-config.mjs'
 import { NativeArtifactSession, nativeArtifactOutputTools } from './native-artifact-session.mjs'
 import { imageParentEffortFallback, nativeImageToolPolicy, nativeImageRouteDigest, nativeImageToolDefinition, pinnedImageOperation } from './native-image-tool.mjs'
 import { nativeImagesEndpoint } from './native-image-transport.mjs'
+import { measuredCostRouteReference } from './metered-cost-route.mjs'
 import { skillPackageTreeDigest } from './skill-manifest.mjs'
 import { validateNativeOutputSnapshot } from './native-output-format.mjs'
 const fail = code => { throw Object.assign(new Error(code), { code }) }
@@ -44,8 +45,8 @@ export function comparePreparedImage(profileRuntime, outputs, entry, settings, p
   if (!settings.mountPinnedSkill && skillPackageTreeDigest(entry.descriptor.packageRoot) !== entry.descriptor.packageTreeDigest) return null
   const tools = out => [...nativeArtifactOutputTools(out),nativeImageToolDefinition(operation)]
   return profileRuntime.prospectiveNativeGroup({preparedLocalBudget:true,imageParentEffort:imageParentEffortFallback(profileRuntime.profile,provider,config),
-    ...(pricingDescriptor ? {pricingImage:{operation,model:settings.model,channel:settings.channel,tier:settings.tier,packageSha256:entry.descriptor.packageSha256,skillInstallationId:entry.descriptor.skillInstallationId,skillKey:entry.descriptor.skillKey,
-      captureTools:[false,true].flatMap(artifactsRequired=>[false,true].map(multiple=>tools({dataSchema:null,artifactsRequired,multiple})))}} : {}), skills:settings.mountPinnedSkill ? selectedPackages([entry]) : [],
+    ...(pricingDescriptor ? {costResources:[measuredCostRouteReference({kind:'NATIVE_PROVIDER_CALL',component:operation,
+      providerId:provider.id,baseUrl:provider.baseUrl,modelOrTool:settings.model,normalizationBasis:'openai-images-modalities-v1'})]} : {}), skills:settings.mountPinnedSkill ? selectedPackages([entry]) : [],
     skillConfiguration:[],networkAccess:false,localArtifactOnly:false,childRouteSha256,tools:tools(outputs),profileTools:tools({dataSchema:null}),
     toolPolicyRef:NATIVE_SKILL_SCRIPT_POLICY,instructionsSha256})
 }

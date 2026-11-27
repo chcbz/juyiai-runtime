@@ -104,6 +104,11 @@ export async function channelFixture(t, { ackRegistration = true, nativeWorkNoti
           matchesSkillInstallResult: envelope => state.skillInstallManager?.matchesDurableResultEnvelope(envelope) === true,
           matchesSkillInstallReceipt: receipt => state.skillInstallManager?.matchesDurableResultReceipt(receipt) === true,
           durableStateHealthy: () => { state.healthChecks = (state.healthChecks || 0) + 1; return state.healthy; }, readyCommandTypes: () => state.types, chatReady: () => chatReady,
+          pricingProfiles: fence => {
+            (state.costReads ||= []).push(fence.sessionGeneration);
+            if (state.costFailure) throw new Error('synthetic measurement unavailable');
+            return state.costProfiles ?? [];
+          },
           registrationPayload: () => ({ runtimeCapabilities: { profiles: { EXECUTE: { available: false } } } }),
           acceptFrame: async frame => { state.accepted.push(frame); if (normalize && !(frame.type === 'agent_message_saved' && !Object.hasOwn(frame, 'messageType'))) state.normalized.push(isManagementMessage(frame) ? parseManagementMessage(frame) : normalize(frame)); return state.handleFrame?.(frame); }, resume: async () => { state.resumed++; },
           disconnected: () => { state.paused = true; }, suspendAdmission: () => { state.paused = true; },

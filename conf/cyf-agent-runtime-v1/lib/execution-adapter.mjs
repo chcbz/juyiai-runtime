@@ -1,6 +1,7 @@
 // Wire r1 boundary, API fixture87c894dc. One transport/client per full subject.
 // Session credentials live only here; outbound work checkpoints hold no proof.
 import { isManagementMessage } from '../../codex-bridge/skill-management-wire.mjs';
+import { costProfileReporter } from '../../codex-bridge/cost-profile-report.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { toAgentWire, fromAgentWire } from '../../codex-bridge/agent-message-wire.mjs';
 import { RuntimeV1Client, classifyRuntimeError, runtimeErrorFacts, runtimeAckWireContext } from './runtime-client.mjs';
@@ -99,13 +100,11 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
         return {sequence:profileSequence.toString(),profileSha256:profileSha};
       };
       const profileDigest = group => typeof group?.profileSha256 === 'string' && /^[0-9a-f]{64}$/.test(group.profileSha256) ? group.profileSha256 : null;
-      let pricingSequence=0n, pricingSha=null;
+      let reportCosts=costProfileReporter();
       const pricingReport = healthy => {
-        let profiles=[];
-        if (healthy) try { profiles=executor.pricingProfiles?.(client.currentSession) ?? []; } catch { /* no valid profile, withdraw the cached proof */ }
-        const sha=createHash('sha256').update(JSON.stringify(profiles),'utf8').digest('hex');
-        if(pricingSha!==sha){pricingSequence++;pricingSha=sha;}
-        return {version:'NATIVE_PRICING_PROFILES_V1',sequence:String(pricingSequence),sha256:sha,profiles};
+        if(healthy)try{return reportCosts(executor.pricingProfiles?.(client.currentSession) ?? []);}
+        catch { /* Invalid/unavailable measurements withdraw cost evidence, never execution permission. */ }
+        return reportCosts([]);
       };
       let registrationEpoch = 0;
       let managementSession = null; // Confirmed session authority survives catalog-only re-registration.
@@ -158,7 +157,7 @@ export async function createExecutionAdapterFactory({ config, instanceId, apiOri
         replay = Promise.resolve().then(() => executor.resume()).catch(error => logger('runtime-replay-failed', { code: error.code || 'REPLAY_FAILED' }));
         void replay.finally(() => { replay = null; });
       };
-      const disconnect = () => { pricingSequence=0n;pricingSha=null;profileSequence=0n;profileSha=null;recheckProfile=null;registrationEpoch++; channelState = 'disconnected'; lastPresenceAckAt = null; registeredAt = null; serviceReadyAt = null; channelConfirmed = false; managementSession = null; observer?.disconnect(); executor.disconnected(); client.invalidateSession(); };
+      const disconnect = () => { reportCosts=costProfileReporter();profileSequence=0n;profileSha=null;recheckProfile=null;registrationEpoch++; channelState = 'disconnected'; lastPresenceAckAt = null; registeredAt = null; serviceReadyAt = null; channelConfirmed = false; managementSession = null; observer?.disconnect(); executor.disconnected(); client.invalidateSession(); };
       const connectOnce = async signal => {
         channelState = 'connecting';
         const session = await client.session({ signal });

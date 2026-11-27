@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { costProfileReport, costProfileReporter, encodeCostProfileValue } from '../cost-profile-report.mjs'
+import { costProfileReport, costProfileReporter, encodeCostProfileValue, installedSingleSkillCostProfiles } from '../cost-profile-report.mjs'
 
 const H = 'a'.repeat(64)
 const fixture = () => ({ profileId: 'summary', revision: '1', selectionPriority: '0',
@@ -113,4 +113,45 @@ test('source references share capture namespace bytes and never include tariff o
   const p = fixture(); p.routeRefs = [route]; assert.equal(costProfileReport('1', [p]).profiles[0].routeRefs[0].namespace, route.namespace)
   for (const change of [{ kind: '' }, { normalizationBasis: ' ' }, { modelOrTool: 'm'.repeat(129) }, { providerId: '' }])
     assert.throws(() => measuredCostRouteReference({ ...base, ...change }))
+})
+
+const measuredInstallation = (capability = 'text.summary') => {
+  const { profileId, revision, selectionPriority, scopePattern, ...configuration } = fixture()
+  return { descriptor: { skillKey: capability, skillVersion: '1', packageSha256: H, skillInstallationId: 'install-' + capability,
+    quoteSpecBindings: [{ capabilityId: capability, capabilityVersion: '1', specSha: H }] }, configuration }
+}
+
+test('actual single-skill measurements use installed semantic bindings, never skill-name pricing or inferred composition', () => {
+  const publish = installedSingleSkillCostProfiles()
+  const inputs = ['text.summary', 'document.extract', 'visual.asset'].map(measuredInstallation)
+  const profiles = publish(inputs)
+  assert.equal(profiles.length, 3)
+  assert.equal(new Set(profiles.map(p => p.selectionPriority)).size, 3)
+  assert.deepEqual(profiles.map(p => p.scopePattern[0].capabilityId).sort(), inputs.map(p => p.descriptor.skillKey).sort())
+  for (const p of profiles) {
+    assert.equal(p.scopePattern.length, 1)
+    assert.deepEqual(p.scopePattern[0].dependsOn, [])
+    assert.equal(p.revision, '1')
+    assert.equal(p.scopePattern[0].installId, 'install-' + p.scopePattern[0].capabilityId)
+  }
+  assert.deepEqual(publish([...inputs].reverse()), profiles)
+  assert.equal(costProfileReport('1', profiles).profiles.length, 3)
+  assert.deepEqual(installedSingleSkillCostProfiles()([{ ...inputs[0], configuration: null }]), [])
+  assert.deepEqual(installedSingleSkillCostProfiles()([{ ...inputs[0], descriptor: { ...inputs[0].descriptor, quoteSpecBindings: [] } }]), [])
+})
+
+test('measured profile revisions follow actual configuration and installed bytes, not call count or caller mutation', () => {
+  const publish = installedSingleSkillCostProfiles(), input = measuredInstallation()
+  const first = publish([input]); first[0].routeRefs[0].namespace = 'tampered'
+  const unchanged = publish([input]); assert.equal(unchanged[0].revision, '1')
+  assert.notEqual(unchanged[0].routeRefs[0].namespace, 'tampered')
+  const moved = { ...input, descriptor: { ...input.descriptor, packageSha256: 'b'.repeat(64) } }
+  assert.equal(publish([moved])[0].revision, '2'); assert.equal(publish([moved])[0].revision, '2')
+  assert.deepEqual(publish([]), []); assert.equal(publish([input])[0].revision, '4')
+  assert.equal(installedSingleSkillCostProfiles()([input])[0].revision, '1')
+  assert.throws(() => publish([input, input]), /Invalid runtime/)
+  assert.equal(publish([input])[0].revision, '4')
+  assert.throws(() => publish([{ ...input, descriptor: { ...input.descriptor, skillInstallationId: null } }]), /Invalid runtime/)
+  assert.throws(() => publish(Array.from({ length: 33 }, (_, i) => measuredInstallation('capability-' + i))), /Invalid runtime/)
+  assert.equal(publish([input])[0].revision, '4')
 })

@@ -107,3 +107,31 @@ export function costProfileReporter() {
     return result
   }
 }
+
+// One publisher per execution subject/session. Each supplied entry is a single-skill
+// adapter measurement, not an inferred combination of installed skills. Unknown or
+// unmeasured adapters are omitted by the caller and do not acquire execution authority.
+export function installedSingleSkillCostProfiles() {
+  let revision = 0n, previous = null
+  return measurements => {
+    const profiles = []
+    for (const { descriptor, configuration } of measurements) {
+      if (!configuration) continue
+      for (const binding of descriptor.quoteSpecBindings ?? []) {
+        const scopePattern = [{ slot: '0', capabilityId: binding.capabilityId, capabilityVersion: binding.capabilityVersion,
+          specSha: binding.specSha, dependsOn: [], skillKey: descriptor.skillKey, skillVersion: descriptor.skillVersion,
+          packageSha: descriptor.packageSha256, installId: descriptor.skillInstallationId }]
+        profiles.push({ ...configuration, profileId: digest([descriptor.skillKey, binding.capabilityId, binding.capabilityVersion]),
+          revision: '1', selectionPriority: '0', scopePattern })
+      }
+    }
+    profiles.sort(ordered(['profileId']))
+    profiles.forEach((p, index) => { p.selectionPriority = String(index) })
+    // Validate the whole report before changing lifecycle state; do not truncate an oversized catalogue.
+    const identity = costProfileReport('1', profiles).sha256
+    const next = identity === previous ? revision : revision + 1n
+    const report = costProfileReport('1', profiles.map(p => ({ ...p, revision: String(next) })))
+    revision = next; previous = identity
+    return report.profiles.map(({ measurementSha, ...p }) => p)
+  }
+}

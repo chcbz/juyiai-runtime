@@ -888,19 +888,26 @@ test('prepared pinned image measures the same mounted or substituted tool group 
       const q=comparePreparedImage({prospectiveNativeGroup:p=>p},outputs,{descriptor},settings,provider,config,true);
       const portable=(params={},settingsChange={})=>measureProspectiveNativeGroup({...q,stateRoot:f.options.stateRoot,toolchain,modelCatalogSha256:null,verifiedOnly:true,...params},
         {...route,binarySha256:'d'.repeat(64),...settingsChange});
-      const proof=portable();assert.equal(proof.operation,'generate');assert.equal(proof.childModel,settings.model);assert.equal(proof.parentModel,route.model);
+      const proof=portable();assert.equal(proof.routeRefs[1].component,'generate');assert.equal(proof.routeRefs[1].modelOrTool,settings.model);assert.equal(proof.routeRefs[0].modelOrTool,route.model);
       const moved=portable({},{channelNamespace:'different-private-route'});
-      assert.equal(moved.contextPolicyVersion,proof.contextPolicyVersion);assert.equal(moved.toolPolicyVersion,proof.toolPolicyVersion);assert.notEqual(moved.referenceRouteSha256,proof.referenceRouteSha256);
+      assert.equal(moved.contextPolicyVersion,proof.contextPolicyVersion);assert.equal(moved.toolPolicyVersion,proof.toolPolicyVersion);assert.notDeepEqual(moved.routeRefs,proof.routeRefs);
       assert.notEqual(portable({},{effort:'high'}).contextPolicyVersion,proof.contextPolicyVersion);
-      assert.notEqual(portable({pricingImage:{...q.pricingImage,packageSha256:'b'.repeat(64)}}).toolPolicyVersion,proof.toolPolicyVersion);
+      assert.notEqual(portable({profileTools:[...q.profileTools,{name:'changed-tool'}]}).toolPolicyVersion,proof.toolPolicyVersion);
+      assert.deepEqual(Object.keys(proof).sort(),['capturePolicyVersion','contextPolicyId','contextPolicyVersion','executionStrategyVersion','routeRefs','toolPolicyVersion']);
+      assert.equal(proof.routeRefs.some(r=>'channel' in r || 'tier' in r || 'priceVersion' in r),false);
       assert.equal(portable({},{coveragePolicyVersion:'NATIVE_EXECUTION_UNVERIFIED_V1'}),null);
       for(const text of [f.options.stateRoot,provider.baseUrl,descriptor.packageRoot,'developerInstructions'])assert.ok(!JSON.stringify(proof).includes(text));
       const skills=mountPinnedSkill?[{...f.options.skills[0],skillKey:descriptor.skillKey}]:[];
       const actual=prepareNativeExecutionLayout({...f.options,skills,nativeExecution:{...f.options.nativeExecution,tools:[...nativeArtifactOutputTools(outputs),nativeImageToolDefinition('generate')]}});
       const fullRoute={...route,binarySha256:'d'.repeat(64)}
-      for(const [i,tools] of q.pricingImage.captureTools.entries()){
-        const frozen=nativeDispatchGroup({...actual.binding,tools},fullRoute)
-        assert.equal(proof[`execution${i}`],frozen.executionConfigSha256);assert.equal(proof[`tools${i}`],frozen.toolConfigSha256)
+      // Cost metadata no longer supplies four precomputed dispatch claims. The real
+      // execution comparison still binds each exact output/tool contract independently.
+      for(const artifactsRequired of [false,true])for(const multiple of [false,true]){
+        const out={...outputs,artifactsRequired,multiple};
+        const measured=comparePreparedImage({prospectiveNativeGroup:p=>p},out,{descriptor},settings,provider,config);
+        const observed=measureProspectiveNativeGroup({...measured,stateRoot:f.options.stateRoot,toolchain,modelCatalogSha256:null,verifiedOnly:true},fullRoute);
+        const frozen=nativeDispatchGroup({...actual.binding,tools:[...nativeArtifactOutputTools(out),nativeImageToolDefinition('generate')]},fullRoute);
+        assert.equal(observed.executionConfigSha256,frozen.executionConfigSha256);assert.equal(observed.toolConfigSha256,frozen.toolConfigSha256)
       }
       const {profileSha256,...observed}=group;assert.match(profileSha256,/^[a-f0-9]{64}$/);assert.deepEqual(observed,nativeDispatchGroup(actual.binding,route));
       assert.equal(comparePreparedImage(null,outputs,{descriptor},{...settings,priceVersion:null},provider,config),null);
