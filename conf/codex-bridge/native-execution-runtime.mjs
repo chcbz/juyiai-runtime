@@ -15,7 +15,7 @@ import { skillPackageTreeDigest } from './skill-manifest.mjs'
 
 import { canonicalSha256 } from './chat-runtime.mjs'
 
-import { NATIVE_NEUTRAL_MOUNT_TARGETS, NATIVE_PERMISSION_PROFILE, measureProspectiveNativeGroup, nativeDispatchGroup, prepareNativeExecutionLayout, validateNativeExecutionToolchain, verifyNativeExecutionConfig, verifyNativeExecutionSkillCatalog } from './native-execution-profile.mjs'
+import { NATIVE_NEUTRAL_MOUNT_TARGETS, NATIVE_PERMISSION_PROFILE, measureProspectiveNativeGroup, nativeCostConfiguration, nativeDispatchGroup, prepareNativeExecutionLayout, validateNativeExecutionToolchain, verifyNativeExecutionConfig, verifyNativeExecutionSkillCatalog } from './native-execution-profile.mjs'
 
 import { IsolatedEngineProfileRuntime, nonblank, fail, sha256, ensurePrivateDirectory, engineStateBinding, stateMarker, emptyMcpCatalog } from './isolated-engine-profile.mjs'
 
@@ -111,6 +111,12 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
         const { channelNamespace, engineVersion, coveragePolicyVersion } = nativeMeteringRoute(this.profile, schema, slot.meteredAdmission.localArtifactOnly &&
           !layout.binding.networkAccess && !layout.binding.networkOrigins.length && !layout.binding.webSearch &&
           !layout.binding.skills.length && !layout.binding.skillConfiguration.length && typeof nativeExecution.localArtifactCall === 'function',slot.meteredAdmission.childRouteSha256)
+        slot.costConfiguration = nativeCostConfiguration(layout.binding, {
+          binarySha256:schema.binarySha256, engineVersion, channelNamespace, model, effort,
+          childRouteSha256:slot.meteredAdmission.childRouteSha256,
+          instructionsSha256:slot.meteredAdmission.instructionsSha256,
+          toolPolicyRef:store.command.toolPolicyRef, coveragePolicyVersion
+        }, slot.meteredAdmission)
         try {
           const options = { executionId:binding.authorizationId, runId:store.command.runId,
             executionConfigSha256:skillDigest([layout.digest,store.commandDigest,engineVersion,channelNamespace,model,effort]),
@@ -187,7 +193,8 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
       }
       checkActive()
       adapter.nativeExecutionIsolation = Object.freeze({ schemaVersion: 1, layoutDigest: layout.digest, cwd: '/execution',
-        writableRoots: Object.freeze(['/workspace', '/outputs']), skills: discovery, network, modelTurnMeasured: false })
+        writableRoots: Object.freeze(['/workspace', '/outputs']), skills: discovery, network, modelTurnMeasured: false,
+        costConfiguration:slot.costConfiguration ?? null })
       this.suspendedNativeStates?.delete(binding.requestKey)
       // Keep the process-local, integrity-owner-attested object, never a serialized PLAN or heartbeat.
       this.nativeBinaryMeasurement = schema

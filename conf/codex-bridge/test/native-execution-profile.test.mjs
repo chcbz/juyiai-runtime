@@ -10,7 +10,7 @@ import { resolve } from 'node:path'
 import { canonicalSha256 } from '../chat-runtime.mjs'
 import { skillPackageTreeDigest } from '../skill-manifest.mjs'
 import { buildTypedInspectionCodexConfig } from '../typed-inspection-profile.mjs'
-import { measureProspectiveNativeGroup, nativeDispatchGroup, buildNativeExecutionCodexConfig, loadNativeModelCatalog, nativeFilesystemPermissions, measureMinimalNativeExecutionToolchain, nativeExecutionMountArgs, prepareNativeExecutionLayout, validateNativeExecutionToolchain, verifyNativeExecutionConfig, verifyNativeExecutionSkillCatalog } from '../native-execution-profile.mjs'
+import { measureProspectiveNativeGroup, nativeCostConfiguration, nativeDispatchGroup, buildNativeExecutionCodexConfig, loadNativeModelCatalog, nativeFilesystemPermissions, measureMinimalNativeExecutionToolchain, nativeExecutionMountArgs, prepareNativeExecutionLayout, validateNativeExecutionToolchain, verifyNativeExecutionConfig, verifyNativeExecutionSkillCatalog } from '../native-execution-profile.mjs'
 
 const sha256 = path => createHash('sha256').update(readFileSync(path)).digest('hex')
 const mkdir = path => { mkdirSync(path, { mode: 0o700 }); chmodSync(path, 0o700); return path }
@@ -926,4 +926,39 @@ test('terminal capture seals under the joined writer fence while retaining Home;
       await runtime.suspendAdapter(f.binding.requestKey,{terminalCapture});assert.deepEqual(events,[terminalCapture?'seal':'stop']);assert.ok(existsSync(home));assert.ok(!runtime.activeAdapters.has(f.binding.requestKey))
     }finally{await runtime.dispose();f.cleanup()}
   }
+})
+
+
+test('cost semantics are independently reproducible from actual layout and exclude execution paths', () => {
+  const f=fixture()
+  try {
+    const settings={model:'model',effort:'medium',engineVersion:'codex-cli-0.167.0',
+      instructionsSha256:'a'.repeat(64),binarySha256:'b'.repeat(64),childRouteSha256:'c'.repeat(64),
+      channelNamespace:'provider',toolPolicyRef:'native-policy',coveragePolicyVersion:'NATIVE_PINNED_IMAGE_V1'}
+    const {skills,toolchain,stateRoot,nativeExecution}=f.options
+    const verifiedToolchain=validateNativeExecutionToolchain(toolchain)
+    const resources=[{kind:'NATIVE_PROVIDER_CALL',component:'generate',namespace:'child',modelOrTool:'asset',normalizationBasis:'openai-images-modalities-v1'}]
+    const options={profileTools:nativeExecution.tools,costResources:resources}
+    const prospective=measureProspectiveNativeGroup({skills,toolchain:verifiedToolchain,stateRoot,skillConfiguration:[],tools:nativeExecution.tools,
+      networkAccess:false,modelCatalogSha256:null,verifiedOnly:true,...options},settings)
+    assert.ok(prospective)
+    const layout=prepareNativeExecutionLayout(f.options)
+    const actual=nativeCostConfiguration(layout.binding,settings,options)
+    assert.deepEqual(actual,prospective)
+    assert.deepEqual(nativeCostConfiguration({...layout.binding,executionId:'another',input:{path:'/different'}},settings,options),actual)
+    for(const key of ['binarySha256','instructionsSha256','effort']) {
+      const changed=key==='effort'?'high':'d'.repeat(64)
+      assert.notEqual(nativeCostConfiguration(layout.binding,{...settings,[key]:changed},options).contextPolicyVersion,actual.contextPolicyVersion)
+    }
+    assert.notEqual(nativeCostConfiguration({...layout.binding,skills:[{...layout.binding.skills[0],packageTreeDigest:'e'.repeat(64)}]},settings,options).toolPolicyVersion,actual.toolPolicyVersion)
+    assert.notDeepEqual(nativeCostConfiguration(layout.binding,{...settings,model:'other'},options).routeRefs,actual.routeRefs)
+    resources[0].modelOrTool='mutated'
+    assert.equal(actual.routeRefs[1].modelOrTool,'asset')
+    assert.equal(JSON.stringify(actual).includes(f.root),false)
+    for(const drift of [{networkAccess:true},{networkOrigins:['https://extra.invalid']},{webSearch:'live'},
+      {businessApi:true},{skillConfiguration:[{digest:'private'}]}])
+      assert.equal(nativeCostConfiguration({...layout.binding,...drift},settings,options),null)
+    assert.equal(nativeCostConfiguration(layout.binding,{...settings,coveragePolicyVersion:'unknown'},options),null)
+    assert.equal(nativeCostConfiguration(layout.binding,settings,{profileTools:options.profileTools}),null)
+  } finally {f.cleanup()}
 })

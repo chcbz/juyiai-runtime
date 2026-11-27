@@ -36,6 +36,9 @@ export function compareProspectiveTaskConfiguration(profileRuntime, { scopeKind,
 }
 // Read the same selected package, mounted tools, gateway readback and model route as launch.
 // This function owns no store, network transport, adapter factory or execution authority.
+const imageCostResources = (operation, settings, provider) => [measuredCostRouteReference({
+  kind:'NATIVE_PROVIDER_CALL', component:operation, providerId:provider.id, baseUrl:provider.baseUrl,
+  modelOrTool:settings.model, normalizationBasis:'openai-images-modalities-v1'})]
 export function comparePreparedImage(profileRuntime, outputs, entry, settings, provider, config, pricingDescriptor = false) {
   if (!entry || !outputs?.mimeTypes?.includes('image/png')) return null
   const operation = pinnedImageOperation(entry.descriptor, settings)
@@ -45,8 +48,7 @@ export function comparePreparedImage(profileRuntime, outputs, entry, settings, p
   if (!settings.mountPinnedSkill && skillPackageTreeDigest(entry.descriptor.packageRoot) !== entry.descriptor.packageTreeDigest) return null
   const tools = out => [...nativeArtifactOutputTools(out),nativeImageToolDefinition(operation)]
   return profileRuntime.prospectiveNativeGroup({preparedLocalBudget:true,imageParentEffort:imageParentEffortFallback(profileRuntime.profile,provider,config),
-    ...(pricingDescriptor ? {costResources:[measuredCostRouteReference({kind:'NATIVE_PROVIDER_CALL',component:operation,
-      providerId:provider.id,baseUrl:provider.baseUrl,modelOrTool:settings.model,normalizationBasis:'openai-images-modalities-v1'})]} : {}), skills:settings.mountPinnedSkill ? selectedPackages([entry]) : [],
+    ...(pricingDescriptor ? {costResources:imageCostResources(operation,settings,provider)} : {}), skills:settings.mountPinnedSkill ? selectedPackages([entry]) : [],
     skillConfiguration:[],networkAccess:false,localArtifactOnly:false,childRouteSha256,tools:tools(outputs),profileTools:tools({dataSchema:null}),
     toolPolicyRef:NATIVE_SKILL_SCRIPT_POLICY,instructionsSha256})
 }
@@ -108,7 +110,7 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
     }
     const adapter = await profileRuntime.openNativeExecutionAdapter(resolve(store.directory, 'inputs'), requestKey, binding, {
       scratchDirectory: resolve(store.directory, 'scratch'), draftsDirectory: resolve(store.directory, 'drafts'),
-      ...(command.usageMode === 'RESPONSE_V2' ? { meteredAdmission: { store, instructionsSha256, ...(image ? {childRouteSha256:nativeImageRouteDigest(nativeImage.operation,nativeImage.settings,nativeImage.chatProvider)} : {}), localArtifactOnly:!image && onlyLocalArtifactTools(command.scope?.kind, command.privateTools, entries, skillConfiguration, command.toolPolicyRef), model: model ?? null, effort: effort ?? null } } : {}),
+      ...(command.usageMode === 'RESPONSE_V2' ? { meteredAdmission: { store, instructionsSha256, profileTools:[...nativeArtifactOutputTools({dataSchema:null}),...(image ? [nativeImageToolDefinition(nativeImage.operation)] : [])], costResources:image ? imageCostResources(nativeImage.operation,nativeImage.settings,nativeImage.chatProvider) : [], ...(image ? {childRouteSha256:nativeImageRouteDigest(nativeImage.operation,nativeImage.settings,nativeImage.chatProvider)} : {}), localArtifactOnly:!image && onlyLocalArtifactTools(command.scope?.kind, command.privateTools, entries, skillConfiguration, command.toolPolicyRef), model: model ?? null, effort: effort ?? null } } : {}),
       skills: selectedPackages(entries),
       skillConfiguration, nativeExecution, requireExistingState: Boolean(existing)
     })
