@@ -53,9 +53,9 @@ export function encodeCostProfileValue(value) {
   return encode(value, 0)
 }
 const digest = value => createHash('sha256').update(encodeCostProfileValue(value)).digest('hex')
-const PROFILE_KEYS = ['profileId', 'revision', 'selectionPriority', 'scopePattern', 'executionStrategyVersion', 'contextPolicyId', 'contextPolicyVersion', 'toolPolicyVersion', 'capturePolicyVersion', 'routes']
+const PROFILE_KEYS = ['profileId', 'revision', 'selectionPriority', 'scopePattern', 'executionStrategyVersion', 'contextPolicyId', 'contextPolicyVersion', 'toolPolicyVersion', 'capturePolicyVersion', 'routeRefs']
 const SLOT_KEYS = ['slot', 'capabilityId', 'capabilityVersion', 'specSha', 'dependsOn', 'skillKey', 'skillVersion', 'packageSha', 'installId']
-const ROUTE_KEYS = ['kind', 'component', 'channel', 'modelOrTool', 'tier', 'normalizationBasis']
+const ROUTE_KEYS = ['kind', 'component', 'namespace', 'modelOrTool', 'normalizationBasis']
 const ordered = names => (a, b) => { for (const k of names) { const c = utf8Compare(a[k], b[k]); if (c) return c } return 0 }
 const unique = values => { if (new Set(values).size !== values.length) invalid() }
 
@@ -72,16 +72,16 @@ function profile(input) {
       specSha: sha(s.specSha), dependsOn: dependencies.sort((a, b) => Number(a) - Number(b)),
       skillKey: id(s.skillKey, 128), skillVersion: id(s.skillVersion, 64), packageSha: sha(s.packageSha), installId: id(s.installId, 128) }
   })
-  const routes = list(input.routes, 128, true).map(r => {
+  const routeRefs = list(input.routeRefs, 128, true).map(r => {
     keys(r, ROUTE_KEYS); return Object.fromEntries(ROUTE_KEYS.map(k => [k, id(r[k], 128)]))
   }).sort(ordered(ROUTE_KEYS))
-  unique(routes.map(r => JSON.stringify(r)))
+  unique(routeRefs.map(r => JSON.stringify(r)))
   const result = { profileId: id(input.profileId, 128), revision: decimal(input.revision, LONG_MAX, true),
     selectionPriority: decimal(input.selectionPriority, INT_MAX), scopePattern: slots,
     executionStrategyVersion: id(input.executionStrategyVersion, 64), contextPolicyId: id(input.contextPolicyId, 128),
     contextPolicyVersion: sha(input.contextPolicyVersion), toolPolicyVersion: sha(input.toolPolicyVersion),
-    capturePolicyVersion: id(input.capturePolicyVersion, 64), routes }
-  return { ...result, configSha: digest(result) }
+    capturePolicyVersion: id(input.capturePolicyVersion, 64), routeRefs }
+  return { ...result, measurementSha: digest(result) }
 }
 
 export function costProfileReport(sequence, measuredProfiles) {
