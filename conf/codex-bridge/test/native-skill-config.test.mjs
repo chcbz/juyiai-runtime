@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, rmSync, chmodSync, symlinkSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { tmpdir } from 'node:os'
-import { loadNativeSkillConfiguration, nativeSkillOrigins, nativeSkillConfigurationPath, readNativeSkillSubjectConfig } from '../native-skill-config.mjs'
+import { loadNativeSkillConfiguration, resolveNativeSkillConfiguration, resolvePreparedNativeSkillConfiguration, nativeSkillOrigins, nativeSkillConfigurationPath, readNativeSkillSubjectConfig } from '../native-skill-config.mjs'
 function fixture(t) {
   const root = mkdtempSync(resolve(tmpdir(), 'native-config-')); t.after(() => rmSync(root, { recursive: true, force: true }))
   const scope = { tenantId: 'tenant', ownerJiacn: 'owner', clientId: 'client', agentId: 'agent' }
@@ -100,4 +100,52 @@ test('managed subject can configure a native image model without image skill cre
   assert.deepEqual(loadNativeSkillConfiguration({ ...options, command: f.command, entries: f.entries }), [])
   assert.equal(readNativeSkillSubjectConfig({ ...options, scope: { ...f.scope, agentId: 'other' } }), null)
   assert.throws(() => readNativeSkillSubjectConfig({ file: path, scope: { ...f.scope, agentId: 'other' } }), /SCOPE_MISMATCH/)
+})
+
+
+test('registration preparation and actual command resolution share identical installed configuration without fake commands', t => {
+  const f = fixture(t)
+  const read = readNativeSkillSubjectConfig({ file: f.file, scope: f.scope })
+  const prepared = resolvePreparedNativeSkillConfiguration(f.entries, read)
+  assert.deepEqual(prepared, loadNativeSkillConfiguration(f))
+  assert.deepEqual(prepared, resolveNativeSkillConfiguration(f.command, f.entries, read))
+  assert.equal(JSON.stringify(prepared).includes('synthetic-foreign'), false)
+  // Caller mutation cannot rewrite the operator source or a later execution.
+  prepared[0].configuration.apiKey = 'changed-by-caller'
+  assert.equal(read.installations.installed1.configuration.apiKey, 'synthetic-one')
+  assert.equal(resolveNativeSkillConfiguration(f.command, f.entries, read)[0].configuration.apiKey, 'synthetic-one')
+})
+
+test('prepared configuration grants no execution permission and cannot bypass command binding', t => {
+  const f = fixture(t)
+  assert.equal(resolvePreparedNativeSkillConfiguration(f.entries, f.config).length, 1)
+  for (const mutate of [c => { c.skills = [] }, c => { c.skills[0].skill.key = 'foreign' },
+    c => { c.skills[0].skill.packageSha256 = 'b'.repeat(64) }, c => { c.skills[0].executionBinding.skillInstallationId = 'foreign' }]) {
+    const command = structuredClone(f.command); mutate(command)
+    assert.throws(() => resolveNativeSkillConfiguration(command, f.entries, f.config), /BINDING_INVALID/)
+  }
+})
+
+test('preparation handles only selected installations, does not interpret names and does not infer combination support', t => {
+  const f = fixture(t)
+  f.entries.push({ descriptor: { skillInstallationId: 'installed2', skillKey: 'arbitrary-second-skill', packageSha256: 'b'.repeat(64) } })
+  const prepared = resolvePreparedNativeSkillConfiguration(f.entries, f.config)
+  assert.deepEqual(prepared.map(x => x.skillInstallationId), ['installed1', 'installed2'])
+  // These are only private mounted values. No capability, route, scope or price is produced.
+  assert.deepEqual(Object.keys(prepared[0]).sort(), ['configuration', 'digest', 'networkOrigins', 'skillInstallationId', 'skillKey'])
+  assert.deepEqual(resolvePreparedNativeSkillConfiguration([], f.config), [])
+  assert.deepEqual(resolvePreparedNativeSkillConfiguration(f.entries, null), [])
+  delete f.config.installations.installed1
+  assert.deepEqual(resolvePreparedNativeSkillConfiguration([f.entries[0]], f.config), [])
+})
+
+test('preparation and execution preserve the same origins, hosted-search and malformed-config semantics', t => {
+  const f = fixture(t)
+  f.config.installations.installed1.webSearch = 'live'
+  assert.deepEqual(resolvePreparedNativeSkillConfiguration(f.entries, f.config), resolveNativeSkillConfiguration(f.command, f.entries, f.config))
+  for (const mutate of [x => { x.webSearch = 'cached' }, x => { x.networkOrigins = ['http://unsafe.invalid'] }, x => { x.configuration = null }]) {
+    const config = structuredClone(f.config); mutate(config.installations.installed1)
+    assert.throws(() => resolvePreparedNativeSkillConfiguration(f.entries, config), /NATIVE_SKILL_/)
+    assert.throws(() => resolveNativeSkillConfiguration(f.command, f.entries, config), /NATIVE_SKILL_/)
+  }
 })

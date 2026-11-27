@@ -66,11 +66,13 @@ export function loadNativeSkillConfiguration(options) {
   if (command.toolPolicyRef !== NATIVE_SKILL_SCRIPT_POLICY || !entries.length) return Object.freeze([])
   return resolveNativeSkillConfiguration(command, entries, readNativeSkillSubjectConfig(options))
 }
-export function resolveNativeSkillConfiguration(command, entries, config) {
-  if (!config || command.toolPolicyRef !== NATIVE_SKILL_SCRIPT_POLICY || !entries.length) return Object.freeze([])
+// Shared read-only projection of exactly the selected installed descriptors. The
+// caller supplies entries from the current SkillRegistry fence; no command or
+// execution identity is fabricated for registration-time cost measurement.
+// This returns private configuration, not a report payload or execution grant.
+export function resolvePreparedNativeSkillConfiguration(entries, config) {
+  if (!config || !entries.length) return Object.freeze([])
   const selected = entries.flatMap(({ descriptor }) => {
-    const commandSkill = command.skills.find(item => item.executionBinding.skillInstallationId === descriptor.skillInstallationId)
-    if (!commandSkill || commandSkill.skill.key !== descriptor.skillKey || commandSkill.skill.packageSha256 !== descriptor.packageSha256) fail('NATIVE_SKILL_CONFIG_BINDING_INVALID')
     const entry = config.installations[descriptor.skillInstallationId]
     if (entry === undefined) return []
     if (!object(entry) || !object(entry.configuration)) fail('NATIVE_SKILL_CONFIG_INVALID')
@@ -81,4 +83,14 @@ export function resolveNativeSkillConfiguration(command, entries, config) {
       digest: skillDigest({ configuration, networkOrigins, ...searchPermission }) }]
   })
   return Object.freeze(selected.map(Object.freeze))
+}
+export function resolveNativeSkillConfiguration(command, entries, config) {
+  if (!config || command.toolPolicyRef !== NATIVE_SKILL_SCRIPT_POLICY || !entries.length) return Object.freeze([])
+  // Execution remains separately authorized. A successful preparation read must
+  // never substitute for this exact immutable command/package check.
+  for (const { descriptor } of entries) {
+    const commandSkill = command.skills.find(item => item.executionBinding.skillInstallationId === descriptor.skillInstallationId)
+    if (!commandSkill || commandSkill.skill.key !== descriptor.skillKey || commandSkill.skill.packageSha256 !== descriptor.packageSha256) fail('NATIVE_SKILL_CONFIG_BINDING_INVALID')
+  }
+  return resolvePreparedNativeSkillConfiguration(entries, config)
 }
