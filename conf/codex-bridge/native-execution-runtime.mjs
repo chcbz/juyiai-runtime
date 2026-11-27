@@ -1,6 +1,7 @@
 import { openBusinessSocket, BUSINESS_API_SOCKET } from './execution-business-api.mjs'
 import { isCurrentAppServerMeasurement } from './app-server-adapter.mjs'
 import { startMeteredRoot, resumeStoppedMeteredRoot } from './metered-request-capture.mjs'
+import { meteredProviderNamespace } from './metered-cost-route.mjs'
 import { skillDigest, skillId, NATIVE_SKILL_SCRIPT_POLICY } from './skill-executor.mjs'
 import { BROWSER_PROBE } from './native-browser-toolchain.mjs'
 import { DOCUMENT_MIMES, DOCUMENT_PROBE, PDF_PROBE } from './native-document-toolchain.mjs'
@@ -35,7 +36,7 @@ export const nativeExecutionProfile = profile => {
 export { nativeDispatchGroup } from './native-execution-profile.mjs'
 
 const nativeMeteringRoute = (profile, schema, localArtifactOnly, childRouteSha256) => {
-  const channelNamespace = skillDigest(['METERED_PROVIDER_NAMESPACE_V1', profile.typedInspectionProviderId, new URL(profile.typedInspectionProviderBaseUrl).href.replace(/\/$/, '')])
+  const channelNamespace = meteredProviderNamespace(profile.typedInspectionProviderId, profile.typedInspectionProviderBaseUrl)
   const engineVersion = /^\d+\.\d+\.\d+$/.test(schema.cliVersion) ? `codex-cli-${schema.cliVersion}` : 'unknown'
   // Local tool dispatch is known here; actual uploaded shapes and response usage are checked per request.
   const coveragePolicyVersion = localArtifactOnly === true && engineVersion === 'codex-cli-0.167.0'

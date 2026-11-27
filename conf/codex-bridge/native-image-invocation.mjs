@@ -1,6 +1,7 @@
 /** Host execution primitive. The caller must bind the exact API authorization and
  * active turn before exposing this operation. This is not a capability registry. */
 import { randomUUID } from 'node:crypto'
+import { measuredCostRouteReference } from './metered-cost-route.mjs'
 import { prepareNativeImageCall, NATIVE_IMAGE_MAX_INPUT_BYTES } from './native-image-transport.mjs'
 
 const fail = code => { throw Object.assign(new Error(code), { code }) }
@@ -52,7 +53,12 @@ export function prepareNativeImageInvocation({ store, checkActive, inputRefs = [
         const id = randomUUID()
         const reservation = { invocationId:id }
         if (store.command.usageMode === 'RESPONSE_V2' && childRouteSha256) Object.assign(reservation, {
-          executionId: store.command.executionId, runId: store.command.runId, snapshotDigest: store.command.snapshotDigest, childRouteSha256 })
+          executionId: store.command.executionId, runId: store.command.runId, snapshotDigest: store.command.snapshotDigest, childRouteSha256,
+          // Persist the actual adapter source in the existing pre-effect reservation.
+          // Reference repricing must resolve this on the backend, never trust rate.channel/tier.
+          costRouteReference: measuredCostRouteReference({ kind: 'NATIVE_PROVIDER_CALL', component: operation,
+            providerId: chatProvider.id, baseUrl: chatProvider.baseUrl, modelOrTool: model,
+            normalizationBasis: 'openai-images-modalities-v1' }) })
         if (!store.reserve('native-image-start', reservation)) return false
         invocationId = id
         try { record('STARTED', null) } catch (error) { invocationId = null; throw error }

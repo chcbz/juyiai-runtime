@@ -96,3 +96,21 @@ test('same measured wire fixture as API rejects Runtime supplied tariff authorit
     assert.throws(() => costProfileReport('1', [p]), /Invalid runtime/)
   }
 })
+
+
+test('source references share capture namespace bytes and never include tariff or endpoint secrets', async () => {
+  const { meteredProviderNamespace, measuredCostRouteReference } = await import('../metered-cost-route.mjs')
+  const { skillDigest } = await import('../skill-executor.mjs')
+  const base = { kind: 'MODEL_RESPONSE', component: 'INFERENCE', providerId: 'provider',
+    baseUrl: 'https://gateway.example/v1/', modelOrTool: 'model', normalizationBasis: 'RESPONSES_TEXT_TOKENS_V1' }
+  const route = measuredCostRouteReference(base)
+  assert.equal(route.namespace, skillDigest(['METERED_PROVIDER_NAMESPACE_V1', 'provider', 'https://gateway.example/v1']))
+  assert.equal(route.namespace, meteredProviderNamespace('provider', 'https://gateway.example/v1'))
+  assert.notEqual(route.namespace, measuredCostRouteReference({ ...base, baseUrl: 'https://other.example/v1' }).namespace)
+  assert.notEqual(route.namespace, measuredCostRouteReference({ ...base, providerId: 'another' }).namespace)
+  assert.deepEqual(Object.keys(route).sort(), ['component', 'kind', 'modelOrTool', 'namespace', 'normalizationBasis'])
+  assert.ok(Object.isFrozen(route))
+  const p = fixture(); p.routeRefs = [route]; assert.equal(costProfileReport('1', [p]).profiles[0].routeRefs[0].namespace, route.namespace)
+  for (const change of [{ kind: '' }, { normalizationBasis: ' ' }, { modelOrTool: 'm'.repeat(129) }, { providerId: '' }])
+    assert.throws(() => measuredCostRouteReference({ ...base, ...change }))
+})

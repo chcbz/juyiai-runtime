@@ -4,7 +4,7 @@ import { readFileSync, mkdtempSync, writeFileSync, rmSync, chmodSync } from 'nod
 import { resolve } from 'node:path'
 import { SkillExecutionStore } from '../skill-execution-store.mjs'
 import { pendingProviderUsage } from '../provider-usage-receipts.mjs'
-import { skillHash } from '../skill-executor.mjs'
+import { skillHash, skillDigest } from '../skill-executor.mjs'
 import { prepareNativeImageInvocation } from '../native-image-invocation.mjs'
 
 const png = readFileSync(new URL('./fixtures/native-edit-input.png', import.meta.url))
@@ -96,4 +96,26 @@ test('a crash gap at the reservation still blocks dispatch; RESPONSE_V2 can jour
   const bytes = await prepareNativeImageInvocation({ ...metered.request, fetchFn: async url => response(url) })({ prompt: 'draw' })
   assert.deepEqual(bytes, png)
   assert.equal(pendingProviderUsage(metered.store, { hostOnly: true })[0].payload.observation.phase, 'STARTED')
+})
+
+
+test('metered reservation records the actual source reference without promoting configured tariff to authority', async t => {
+  const { request, store, openStore } = fixture(t, { usageMode: 'RESPONSE_V2', runId: 'run-1' })
+  let calls = 0
+  const expected = { kind: 'NATIVE_PROVIDER_CALL', component: 'generate',
+    namespace: skillDigest(['METERED_PROVIDER_NAMESPACE_V1', request.chatProvider.id, request.chatProvider.baseUrl]),
+    modelOrTool: request.model, normalizationBasis: 'openai-images-modalities-v1' }
+  const invoke = prepareNativeImageInvocation({ ...request, childRouteSha256: 'b'.repeat(64),
+    pricing: { channel: 'operator-channel', tier: 'operator-tier', priceVersion: 'operator-version' },
+    fetchFn: async url => {
+      calls++
+      assert.deepEqual(openStore().read('native-image-start').costRouteReference, expected)
+      return response(url)
+    } })
+  assert.deepEqual(await invoke({ prompt: 'fixture' }), png)
+  assert.equal(calls, 1)
+  assert.deepEqual(store.read('native-image-start').costRouteReference, expected)
+  // Existing external receipt shape/hash is unchanged. This journal field is not
+  // yet a generic capture protocol or permission to claim complete quantity coverage.
+  assert.equal(Object.hasOwn(pendingProviderUsage(store)[0].payload.observation, 'costRouteReference'), false)
 })

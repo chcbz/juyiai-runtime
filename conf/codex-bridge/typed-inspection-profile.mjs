@@ -1,6 +1,7 @@
 import { chatConversationKey } from './materials-chat.mjs'
 import { contextDeliveryPlan } from './chat-context-delivery.mjs'
 import { startDiscussionCapture } from './metered-request-capture.mjs'
+import { meteredProviderNamespace } from './metered-cost-route.mjs'
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { chmodSync, existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
@@ -63,8 +64,7 @@ export class TypedInspectionProfileRuntime extends IsolatedEngineProfileRuntime 
     }
     slot.start = (async () => {
       const schema = await this.measureBinary(profile); checkActive()
-      const channelNamespace = canonicalSha256(['METERED_PROVIDER_NAMESPACE_V1', profile.typedInspectionProviderId,
-        new URL(profile.typedInspectionProviderBaseUrl).href.replace(/\/$/, '')]).slice(7)
+      const channelNamespace = meteredProviderNamespace(profile.typedInspectionProviderId, profile.typedInspectionProviderBaseUrl)
       slot.capture = await startDiscussionCapture(inbox, key, { executionConfigSha256:canonicalSha256([conversation, schema.binarySha256, channelNamespace]).slice(7),
         engineVersion:`codex-cli-${schema.cliVersion}`, rootSourceId:'source_model', channelNamespace, adapterVersion:'RESPONSES_TEXT_TOKENS_V1', checkActive }); checkActive()
       slot.egress = this._meteredEgress({ providerBaseUrl:profile.typedInspectionProviderBaseUrl,
