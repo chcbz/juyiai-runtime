@@ -1034,3 +1034,25 @@ test('readmission retry after durable commit does not erase new commands or late
   await assert.rejects(manager.admitRetiredRelationship(request))
   assert.throws(() => manager.bindSession(nextBinding(request)), { code: 'SKILL_RELATIONSHIP_RETIRED' })
 })
+
+
+test('approved capability bindings survive native package install and restart without granting execution', async t => {
+  const f = setup(t), pkg = packageFixture()
+  const semanticBinding = { capabilityId: 'document.export', capabilityVersion: '1', specSha: 'a'.repeat(64) }
+  pkg.target.quoteSpecBindings = [semanticBinding]
+  f.add(pkg)
+  const prepare = command(pkg.target)
+  assert.equal((await f.manager.handle(prepare)).resultEnvelope.data.evidence.outcome, 'PREPARED')
+  assert.equal(f.manager.listInstalledSkills().length, 0)
+  const activation = activate(prepare)
+  assert.equal((await f.manager.handle(activation)).resultEnvelope.data.evidence.outcome, 'APPLIED')
+  assert.deepEqual(f.manager.listInstalledSkills()[0].quoteSpecBindings, [semanticBinding])
+  const descriptor = f.manager.listInstalledSkills()[0]
+  descriptor.quoteSpecBindings[0].specSha = 'b'.repeat(64)
+  assert.deepEqual(f.manager.listInstalledSkills()[0].quoteSpecBindings, [semanticBinding], 'caller cannot mutate durable authorized metadata')
+  const restarted = new SkillInstallManager(f.settings); restarted.initialize(); restarted.bindSession(binding)
+  assert.deepEqual(restarted.listInstalledSkills()[0].quoteSpecBindings, [semanticBinding])
+  const corrupted = structuredClone(activation)
+  corrupted.data.target.quoteSpecBindings[0].capabilityId = 'unapproved.capability'
+  assert.throws(() => parseManagementMessage(corrupted), /SKILL_RESULT_CONFLICT/)
+})

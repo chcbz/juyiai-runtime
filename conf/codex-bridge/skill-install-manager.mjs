@@ -1042,6 +1042,7 @@ export class SkillInstallManager {
       packageRoot: this._packagePath(target.skillInstallationId), packageSha256: target.packageSha256,
       manifestSha256: target.manifestSha256, approvedPermissionsSha256: c.approvedPermissionsSha256,
       packageTreeDigest: installation.packageTreeDigest, manifest: installation.manifest,
+      ...(target.quoteSpecBindings ? { quoteSpecBindings: structuredClone(target.quoteSpecBindings) } : {}),
       enabled: current?.enabled ?? false, policyRevision: current?.revision || c.skillRevision }
   }
   _verifiedInstallation(state, id) {

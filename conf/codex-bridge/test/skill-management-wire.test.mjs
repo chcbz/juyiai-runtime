@@ -9,11 +9,16 @@ const root = new URL('./fixtures/skill-management/', import.meta.url)
 const lock = JSON.parse(readFileSync(new URL('contract-lock.json', root)))
 test('SM-C1 fixtures are original bytes at locked SHA; all shared schema examples and canonical vectors consumed', () => {
   for (const file of ['schema', 'examples', 'behavior']) {
-    const path = file === 'schema' ? new URL('../schemas/management-contract-v1.schema.json', import.meta.url)
-      : new URL(`management-contract-v1.${file}.json`, root)
+    const path = new URL(`management-contract-v1.${file}.json`, root)
     const sha = createHash('sha256').update(readFileSync(path)).digest('hex')
     assert.equal(sha, lock.files[`specs/juyiting-skill-execution/fixtures/management-contract-v1.${file}.json`])
   }
+  const active = JSON.parse(readFileSync(new URL('../schemas/management-contract-v1.schema.json', import.meta.url)))
+  assert.ok(active.definitions.CapabilityQuoteSpecBinding)
+  assert.ok(active.definitions.PackageRef.properties.quoteSpecBindings)
+  delete active.definitions.CapabilityQuoteSpecBinding
+  delete active.definitions.PackageRef.properties.quoteSpecBindings
+  assert.deepEqual(active, JSON.parse(readFileSync(new URL('management-contract-v1.schema.json', root))))
   for (const c of examples.cases) {
     if (c.valid) validateManagement(c.definition, c.value)
     else assert.throws(() => validateManagement(c.definition, c.value), undefined, c.name)
