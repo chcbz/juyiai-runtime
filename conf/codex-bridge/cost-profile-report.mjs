@@ -59,13 +59,17 @@ const ROUTE_KEYS = ['kind', 'component', 'namespace', 'modelOrTool', 'normalizat
 const ordered = names => (a, b) => { for (const k of names) { const c = utf8Compare(a[k], b[k]); if (c) return c } return 0 }
 const unique = values => { if (new Set(values).size !== values.length) invalid() }
 
+// Shared strict resource reference; provenance remains the caller's responsibility.
+export function costRouteObservation(input) {
+  keys(input, ROUTE_KEYS)
+  return Object.fromEntries(ROUTE_KEYS.map(k => [k, id(input[k], 128)]))
+}
+
 const CONFIGURATION_KEYS=['executionStrategyVersion','contextPolicyId','contextPolicyVersion','toolPolicyVersion','capturePolicyVersion','routeRefs']
 // Shared semantic value; callers independently establish registration/actual-launch provenance.
 export function costConfigurationObservation(input) {
   keys(input,CONFIGURATION_KEYS)
-  const routeRefs = list(input.routeRefs, 128, true).map(r => {
-    keys(r, ROUTE_KEYS); return Object.fromEntries(ROUTE_KEYS.map(k => [k, id(r[k], 128)]))
-  }).sort(ordered(ROUTE_KEYS))
+  const routeRefs = list(input.routeRefs, 128, true).map(costRouteObservation).sort(ordered(ROUTE_KEYS))
   unique(routeRefs.map(r => JSON.stringify(r)))
   return {executionStrategyVersion:id(input.executionStrategyVersion,64),contextPolicyId:id(input.contextPolicyId,128),
     contextPolicyVersion:sha(input.contextPolicyVersion),toolPolicyVersion:sha(input.toolPolicyVersion),

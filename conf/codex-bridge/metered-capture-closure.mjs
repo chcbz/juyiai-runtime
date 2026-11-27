@@ -87,7 +87,8 @@ async function auditSubject(parent,{executionId,runId,snapshotDigest},assertStop
   // Re-verify references on replay, but never reinterpret an older or incomplete final as a newer one.
   const sealed=names.has('capture-final-1.json') ? await readPrivate(dir,'capture-final-1') : null
   const child=plan.observation.coveragePolicyVersion==='NATIVE_PINNED_IMAGE_V1' && (!sealed || sealed.observation.imageInvocation)
-    ? await meteredImageReference(parent,{executionId,runId,snapshotDigest}) : null
+    ? await meteredImageReference(parent,{executionId,runId,snapshotDigest},
+        {includeCostRoute:!sealed || Object.hasOwn(sealed.observation.imageInvocation,'costRouteReference')}) : null
   if(image && (!child || child.childRouteSha256!==image.childRouteSha256))allReasons.add('USAGE_INCOMPLETE')
   const reasonCodes=[...allReasons].sort(),closeState=reasonCodes.length?'SEALED_INCOMPLETE':'DRAINED'
   const captureFinal=await final(dir,names,'capture-final-1','CAPTURE_FINAL',[],{...(child?{imageInvocation:child}:{}),planEvidenceSha256:plan.evidenceSha256,sourceCount:String(finals.length),sourcesSha256:skillDigest([...finals].sort(([a],[b])=>a<b?-1:1)),closeState,reasonCodes})

@@ -691,3 +691,35 @@ test('actual configuration PLAN bytes match API fixture and reject changed seman
     await assert.rejects(fresh.read('plan'),{code:'ENOENT'})
   }
 })
+
+
+test('child reference carries independent reserved route and preserves sealed historical final bytes',async t=>{
+  const fixture=JSON.parse(await readFile(new URL('./fixtures/native-child-cost-reference.json',import.meta.url)))
+  const {meteredImageReference}=await import('../metered-image-reference.mjs')
+  const keys={executionId:'exec1',runId:'run1',snapshotDigest:'a'.repeat(64)}, id=fixture.reservation.invocationId
+  const setup=async(withRoute=true)=>{
+    const f=await openRoot(t,{coveragePolicyVersion:'NATIVE_PINNED_IMAGE_V1'})
+    const reservation=structuredClone(fixture.reservation);if(!withRoute)delete reservation.costRouteReference
+    f.store.reserve('native-image-start',reservation);f.store.write('native-image-binding',fixture.binding)
+    f.store.write(`provider-usage-${id}-started`,fixture.started);f.store.write(`provider-usage-${id}-terminal`,fixture.terminal)
+    await f.capture.markStopped(()=>{});return f
+  }
+  const f=await setup()
+  const reference=await meteredImageReference(f.store.directory,keys)
+  assert.deepEqual(reference,fixture.final.observation.imageInvocation)
+  await recoverStoppedMeteredRoot(f.store,()=>{})
+  assert.deepEqual((await f.read('capture-final-1')).observation.imageInvocation,reference)
+  const original=await f.read('capture-final-1');await recoverStoppedMeteredRoot(f.store,()=>{});assert.deepEqual(await f.read('capture-final-1'),original)
+  for(const [field,value] of [['kind','UNKNOWN'],['component','edit'],['modelOrTool','other'],['normalizationBasis','UNKNOWN'],['providerUrl','secret']]){
+    f.store.write('native-image-start',{...fixture.reservation,costRouteReference:{...fixture.reservation.costRouteReference,[field]:value}})
+    assert.equal(await meteredImageReference(f.store.directory,keys),null)
+    await assert.rejects(recoverStoppedMeteredRoot(f.store,()=>{}),{code:'METERED_CAPTURE_SOURCE_CONFLICT'})
+  }
+  f.store.write('native-image-start',{...fixture.reservation,costRouteReference:{...fixture.reservation.costRouteReference,namespace:'f'.repeat(64)}})
+  await assert.rejects(recoverStoppedMeteredRoot(f.store,()=>{}),{code:'METERED_CAPTURE_SOURCE_CONFLICT'})
+  const old=await setup(false);await recoverStoppedMeteredRoot(old.store,()=>{});const sealed=await old.read('capture-final-1')
+  assert.equal(Object.hasOwn(sealed.observation.imageInvocation,'costRouteReference'),false)
+  // An already sealed older final is never upgraded or rehashed by a new optional source field.
+  old.store.write('native-image-start',fixture.reservation)
+  await recoverStoppedMeteredRoot(old.store,()=>{});assert.deepEqual(await old.read('capture-final-1'),sealed)
+})
