@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { mkdtempSync, rmSync, existsSync, realpathSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync, realpathSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -41,4 +41,18 @@ test('domain commit spools one bounded binary attachment and never forwards tran
   assert.equal(await send('commit',meta.length,meta.length+bytes.length,[meta,bytes]),200);
   assert.equal(await send('lookup',2,3,['{}a']),415);assert.equal(await send('commit',2,16777219,[]),413);
   const forged=Buffer.from('{"fence":{}}');assert.equal(await send('commit',forged.length,forged.length+1,[forged,'a']),400);assert.equal(calls,1)
+})
+
+test('model-maintenance route CLI uses the existing authorized socket and preserves exact receipt input', async t => {
+  const parent=mkdtempSync(join(tmpdir(),'route-admin-'));t.after(()=>rmSync(parent,{recursive:true,force:true}))
+  const calls=[];const socket=await openBusinessSocket(parent,async(resource,data,signal,verb)=>{calls.push({resource,data,verb});return {recorded:true}},{write:true});t.after(()=>socket.dispose())
+  const script=fileURLToPath(new URL('../../skills/model-maintenance/scripts/lookup.py',import.meta.url))
+  const client=async(action,data,sock=socket.socket)=>run('bwrap',['--unshare-all','--uid','65534','--gid','65534','--cap-drop','ALL','--ro-bind','/usr','/usr',...['lib','lib64','bin'].filter(p=>existsSync('/'+p)).flatMap(p=>['--ro-bind','/'+p,'/'+p]),'--proc','/proc','--dev','/dev','--ro-bind',script,'/lookup.py','--ro-bind',sock,BUSINESS_API_SOCKET,'--',realpathSync('/usr/bin/python3'),'-I','/lookup.py',action,typeof data==='string'?data:JSON.stringify(data)],{env:{PATH:'/usr/bin:/bin',LANG:'C.UTF-8'},timeout:8000})
+  const command=JSON.parse(readFileSync(new URL('./fixtures/cost-route-maintenance.json',import.meta.url),'utf8'))
+  const {reference}=command
+  for(const [action,data] of [['route-lookup',{reference}],['route-commit',command],['route-receipt',command]])assert.equal(JSON.parse((await client(action,data)).stdout).recorded,true)
+  assert.deepEqual(calls,[{resource:'cost-route-bindings',data:{reference},verb:'lookup'},{resource:'cost-route-bindings',data:command,verb:'commit'},{resource:'cost-route-bindings',data:command,verb:'receipt'}])
+  await assert.rejects(client('route-commit',{...command,fence:{}}));await assert.rejects(client('route-commit','{"reference":{},"reference":{}}'));assert.equal(calls.length,3)
+  const readOnly=await openBusinessSocket(parent,async()=>{throw Error('must not dispatch mutation')});t.after(()=>readOnly.dispose())
+  await assert.rejects(client('route-commit',command,readOnly.socket),/404/);assert.equal(calls.length,3)
 })

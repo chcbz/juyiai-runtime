@@ -43,7 +43,30 @@ if __name__ == '__main__':
         cmd.set_defaults(resource=resource, verb=verb, fields=fields)
         for field in fields:
             cmd.add_argument(field)
+    for name, verb in [('route-lookup', 'lookup'), ('route-commit', 'commit'), ('route-receipt', 'receipt')]:
+        cmd = commands.add_parser(name)
+        cmd.set_defaults(resource='cost-route-bindings', verb=verb, fields=None)
+        cmd.add_argument('request_json', help='确切路由引用及映射请求JSON，不读取配置或推断渠道')
     args = parser.parse_args()
     if not args.action:
         parser.error('需要子命令')
-    exchange(args.resource, args.verb, {field:getattr(args,field) for field in args.fields})
+    if args.fields is None:
+        try:
+            if len(args.request_json.encode('utf-8')) > 65536:
+                raise ValueError('request too large')
+            def unique_object(pairs):
+                result = {}
+                for key, value in pairs:
+                    if key in result:
+                        raise ValueError('duplicate field')
+                    result[key] = value
+                return result
+            data = json.loads(args.request_json, object_pairs_hook=unique_object)
+            allowed = {'reference'} if args.verb == 'lookup' else {'reference', 'expectedRevision', 'action', 'route'}
+            if not isinstance(data, dict) or set(data) - allowed or 'reference' not in data:
+                raise ValueError('invalid route request')
+        except (ValueError, UnicodeError):
+            parser.error('路由请求必须是有界JSON对象，不能传入身份、凭据或执行控制字段')
+    else:
+        data = {field:getattr(args,field) for field in args.fields}
+    exchange(args.resource, args.verb, data)

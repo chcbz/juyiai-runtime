@@ -9,7 +9,7 @@ import { zip, hash, binding, profile, headers, command, activate } from './fixtu
 
 for (const skillKey of ['document-workbench', 'browser-workbench', 'image-understanding', 'web-research', 'skill-management', 'model-maintenance', 'text-file', 'analysis']) {
   test(`${skillKey}: same ordinary package installs independently for two agents and resolves only its authorized binding`, async t => {
-    const version = skillKey === 'document-workbench' ? '1.0.2' : skillKey === 'skill-management' ? '1.2.0' : ['text-file', 'analysis','model-maintenance'].includes(skillKey) ? '1.1.0' : '1.0.0'
+    const version = skillKey === 'document-workbench' ? '1.0.2' : ['skill-management', 'model-maintenance'].includes(skillKey) ? '1.2.0' : ['text-file', 'analysis'].includes(skillKey) ? '1.1.0' : '1.0.0'
     const source = new URL(`../../skills/${skillKey}/`, import.meta.url), entries = []
     const collect = (prefix = '') => {
       for (const entry of readdirSync(new URL(prefix || './', source), { withFileTypes: true })) {
