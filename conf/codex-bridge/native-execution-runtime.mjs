@@ -119,6 +119,7 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
         }, slot.meteredAdmission)
         try {
           const options = { executionId:binding.authorizationId, runId:store.command.runId,
+            costConfiguration:slot.costConfiguration,
             executionConfigSha256:skillDigest([layout.digest,store.commandDigest,engineVersion,channelNamespace,model,effort]),
             dispatchGroup:nativeDispatchGroup(layout.binding,{binarySha256:schema.binarySha256,engineVersion,channelNamespace,model,effort,
               childRouteSha256:slot.meteredAdmission.childRouteSha256, instructionsSha256:slot.meteredAdmission.instructionsSha256,toolPolicyRef:store.command.toolPolicyRef,coveragePolicyVersion}),

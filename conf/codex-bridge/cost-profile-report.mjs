@@ -59,6 +59,19 @@ const ROUTE_KEYS = ['kind', 'component', 'namespace', 'modelOrTool', 'normalizat
 const ordered = names => (a, b) => { for (const k of names) { const c = utf8Compare(a[k], b[k]); if (c) return c } return 0 }
 const unique = values => { if (new Set(values).size !== values.length) invalid() }
 
+const CONFIGURATION_KEYS=['executionStrategyVersion','contextPolicyId','contextPolicyVersion','toolPolicyVersion','capturePolicyVersion','routeRefs']
+// Shared semantic value; callers independently establish registration/actual-launch provenance.
+export function costConfigurationObservation(input) {
+  keys(input,CONFIGURATION_KEYS)
+  const routeRefs = list(input.routeRefs, 128, true).map(r => {
+    keys(r, ROUTE_KEYS); return Object.fromEntries(ROUTE_KEYS.map(k => [k, id(r[k], 128)]))
+  }).sort(ordered(ROUTE_KEYS))
+  unique(routeRefs.map(r => JSON.stringify(r)))
+  return {executionStrategyVersion:id(input.executionStrategyVersion,64),contextPolicyId:id(input.contextPolicyId,128),
+    contextPolicyVersion:sha(input.contextPolicyVersion),toolPolicyVersion:sha(input.toolPolicyVersion),
+    capturePolicyVersion:id(input.capturePolicyVersion,64),routeRefs}
+}
+
 function profile(input) {
   keys(input, PROFILE_KEYS)
   const slots = list(input.scopePattern, 128, true).map((s, index) => {
@@ -72,15 +85,9 @@ function profile(input) {
       specSha: sha(s.specSha), dependsOn: dependencies.sort((a, b) => Number(a) - Number(b)),
       skillKey: id(s.skillKey, 128), skillVersion: id(s.skillVersion, 64), packageSha: sha(s.packageSha), installId: id(s.installId, 128) }
   })
-  const routeRefs = list(input.routeRefs, 128, true).map(r => {
-    keys(r, ROUTE_KEYS); return Object.fromEntries(ROUTE_KEYS.map(k => [k, id(r[k], 128)]))
-  }).sort(ordered(ROUTE_KEYS))
-  unique(routeRefs.map(r => JSON.stringify(r)))
+  const configuration=costConfigurationObservation(Object.fromEntries(CONFIGURATION_KEYS.map(k=>[k,input[k]])))
   const result = { profileId: id(input.profileId, 128), revision: decimal(input.revision, LONG_MAX, true),
-    selectionPriority: decimal(input.selectionPriority, INT_MAX), scopePattern: slots,
-    executionStrategyVersion: id(input.executionStrategyVersion, 64), contextPolicyId: id(input.contextPolicyId, 128),
-    contextPolicyVersion: sha(input.contextPolicyVersion), toolPolicyVersion: sha(input.toolPolicyVersion),
-    capturePolicyVersion: id(input.capturePolicyVersion, 64), routeRefs }
+    selectionPriority: decimal(input.selectionPriority, INT_MAX), scopePattern: slots, ...configuration }
   return { ...result, measurementSha: digest(result) }
 }
 

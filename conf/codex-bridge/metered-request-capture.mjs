@@ -1,3 +1,4 @@
+import { costConfigurationObservation } from './cost-profile-report.mjs'
 /** Source-side only. The owner must hold the original execution writer fence.
  * No provider URL, credential, prompt, response body or replay callback is stored. */
 import { mkdir, lstat, open } from 'node:fs/promises'
@@ -22,7 +23,7 @@ function openRoot(store, options, mode) {
     return Promise.reject(Object.assign(Error('METERED_CAPTURE_BINDING_INVALID'),{code:'METERED_CAPTURE_BINDING_INVALID'}))
   return openSubject(store.directory,store.command,options,mode)
 }
-async function openSubject(parent, subject, { executionId, runId, executionConfigSha256, dispatchGroup = null, imageRoute = null, engineVersion, coveragePolicyVersion,
+async function openSubject(parent, subject, { executionId, runId, executionConfigSha256, dispatchGroup = null, imageRoute = null, costConfiguration = null, engineVersion, coveragePolicyVersion,
   rootSourceId, channelNamespace, adapterVersion, checkActive, deferUntilThread = false, now = Date.now }, mode, onClaim = null) {
   if (subject.executionId !== checkId(executionId) || subject.runId !== checkId(runId)
       || !skillSha(subject.snapshotDigest) || !skillSha(executionConfigSha256) || typeof checkActive !== 'function') bad('METERED_CAPTURE_BINDING_INVALID')
@@ -32,8 +33,15 @@ async function openSubject(parent, subject, { executionId, runId, executionConfi
   checkActive(); await directory(parent)
   if(imageRoute && (coveragePolicyVersion!=='NATIVE_PINNED_IMAGE_V1'||Object.keys(imageRoute).length!==2||!skillId(imageRoute.model)||!skillSha(imageRoute.childRouteSha256)||
     dispatchGroup?.routeSha256!==skillDigest(['NATIVE_COMPOSITE_ROUTE_V1',channelNamespace,imageRoute.model,imageRoute.childRouteSha256])))bad('METERED_CAPTURE_BINDING_INVALID')
+  let observedConfiguration=null
+  if(costConfiguration!==null){
+    observedConfiguration=costConfigurationObservation(costConfiguration)
+    if(!dispatchGroup || observedConfiguration.capturePolicyVersion!==coveragePolicyVersion)bad('METERED_CAPTURE_BINDING_INVALID')
+    const parents=observedConfiguration.routeRefs.filter(r=>r.kind==='MODEL_RESPONSE')
+    if(parents.length!==1 || parents[0].component!=='INFERENCE' || parents[0].namespace!==channelNamespace || parents[0].normalizationBasis!==adapterVersion)bad('METERED_CAPTURE_BINDING_INVALID')
+  }
   const planFacts={captureProtocol:'METERED_CAPTURE_V2',snapshotSha256:subject.snapshotDigest,executionConfigSha256,
-    engineVersion,coveragePolicyVersion,rootSourceId,...(dispatchGroup?{dispatchGroup}:{}),...(imageRoute?{imageRoute}:{})}
+    engineVersion,coveragePolicyVersion,rootSourceId,...(observedConfiguration?{costConfiguration:observedConfiguration}:{}),...(dispatchGroup?{dispatchGroup}:{}),...(imageRoute?{imageRoute}:{})}
   const sourceFacts=(epoch,previous)=>({sourceId,epoch,sourceKind:'METERED_HTTP_RESPONSES_V1',adapterVersion,channelNamespace,
     parentSourceRecordId:null,previousEpochSourceRecordId:previous})
   let epoch='0',dir=root,previous=null

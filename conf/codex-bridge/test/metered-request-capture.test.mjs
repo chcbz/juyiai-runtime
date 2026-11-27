@@ -190,6 +190,12 @@ for (const admitted of [false,true,'artifact','answer','file','empty']) test(adm
         await assert.rejects(readRoot('epoch-1/source-1'),{code:'ENOENT'});return
       }
       const result=await runNativeExecution({command,inputs:[],entries:[],store:actual,checkActive(){},profileRuntime:runtime,model:'gpt-5.4',effort:'medium'})
+      const actualConfiguration=(await actualRead('plan')).observation.costConfiguration
+      assert.ok(actualConfiguration,'actual launch must write independently observed semantics into PLAN')
+      assert.equal(actualConfiguration.capturePolicyVersion,'NATIVE_LOCAL_ARTIFACT_TEXT_V1')
+      assert.equal(actualConfiguration.routeRefs[0].namespace,channel)
+      assert.equal(actualConfiguration.routeRefs[0].modelOrTool,'gpt-5.4')
+      assert.equal(JSON.stringify(actualConfiguration).includes(actual.directory),false)
       if(admitted==='file'){
         assert.equal(result.result.data,null);assert.equal(result.result.artifacts.length,1)
         const [file]=result.result.artifacts;assert.equal(file.contentMimeType,'text/plain');assert.equal(file.displayName,'result.txt');assert.equal(actual.readBlob(file.outputId,file).toString(),'file-fixture')
@@ -659,4 +665,29 @@ test('image final links only the single reserved child in the same run and re-ve
     const v=await prepare(run,plan,parent);assert.equal((await recoverStoppedMeteredRoot(v.store,()=>{})).closeState,expected);assert.equal((await recoverStoppedMeteredRoot(v.store,()=>{})).closeState,expected)
   }
   const g=await prepare('foreign-run');await recoverStoppedMeteredRoot(g.store,()=>{});assert.equal((await g.read('capture-final-1')).observation.imageInvocation,undefined)
+})
+
+
+test('actual configuration PLAN bytes match API fixture and reject changed semantic resume',async t=>{
+  const {resumeStoppedMeteredRoot}=await import('../metered-request-capture.mjs')
+  const fixture=JSON.parse(await readFile(new URL('./fixtures/native-cost-plan.json',import.meta.url)))
+  const expected=fixture.plan, o=expected.observation, config=o.costConfiguration
+  const args={executionConfigSha256:o.executionConfigSha256,dispatchGroup:o.dispatchGroup,costConfiguration:config,
+    engineVersion:o.engineVersion,coveragePolicyVersion:o.coveragePolicyVersion,now:()=>expected.observedAt,
+    channelNamespace:config.routeRefs[0].namespace,adapterVersion:config.routeRefs[0].normalizationBasis}
+  const f=await openRoot(t,args)
+  assert.deepEqual(await f.read('plan'),expected)
+  await f.capture.markStopped(async()=>{})
+  const changed=structuredClone(config);changed.contextPolicyVersion='e'.repeat(64)
+  await assert.rejects(resumeStoppedMeteredRoot(f.store,{...f.args,costConfiguration:changed},'RECONCILE_ONLY'),{code:'SKILL_RESULT_UNKNOWN'})
+  assert.deepEqual(await f.read('plan'),expected)
+  const resumed=await resumeStoppedMeteredRoot(f.store,f.args,'RECONCILE_ONLY')
+  await assert.rejects(resumed.dispatch(()=>assert.fail('no replay')),{code:'METERED_CAPTURE_ADMISSION_CLOSED'})
+  for(const invalid of [{...config,price:'1'}, {...config,routeRefs:[...config.routeRefs,...config.routeRefs]},
+      {...config,contextPolicyVersion:'bad'}, {...config,capturePolicyVersion:'different'},
+      {...config,routeRefs:config.routeRefs.map(r=>({...r,namespace:'other'}))}]) {
+    const fresh=await openRoot(t,{},true)
+    await assert.rejects(startMeteredRoot(fresh.store,{...fresh.args,...args,costConfiguration:invalid}))
+    await assert.rejects(fresh.read('plan'),{code:'ENOENT'})
+  }
 })
