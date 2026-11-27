@@ -279,6 +279,13 @@ test('unified library catalog closes actual engine imports without retired provi
   const target = resolve(f.root, 'codex-bridge');
   const result = await collateExecutionPayload(engineSource, target);
   assert.equal(result.payloadCount, EXECUTION_PAYLOAD_FILES.length); assert.equal(result.dependenciesValidated, false);
+  // Exercise the shipped module, not an import from the source checkout.
+  const { measuredCostRouteReference, meteredProviderNamespace } = await import(resolve(target, 'metered-cost-route.mjs'));
+  const route = measuredCostRouteReference({ kind: 'NATIVE_PROVIDER_CALL', component: 'fixture',
+    providerId: 'fixture-provider', baseUrl: 'https://fixture.invalid/v1/', modelOrTool: 'fixture-model', normalizationBasis: 'fixture-v1' });
+  assert.equal(route.namespace, meteredProviderNamespace('fixture-provider', 'https://fixture.invalid/v1'));
+  assert.deepEqual(Object.keys(route).sort(), ['component', 'kind', 'modelOrTool', 'namespace', 'normalizationBasis']);
+  assert.equal(Object.isFrozen(route), true);
   await assert.rejects(collateExecutionPayload(engineSource, target), cause => cause.code === 'EEXIST');
   assert.deepEqual(await readFile(resolve(target, 'schemas/skill-manifest-v1.schema.json')),
     await readFile(resolve(engineSource, 'schemas/skill-manifest-v1.schema.json')));
