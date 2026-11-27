@@ -239,6 +239,13 @@ for (const materialsFailure of [false, true]) test(`native owner survives absent
   const { costProfileReport } = await import(resolve(library, 'cost-profile-report.mjs'))
   assert.deepEqual(costProfileReport('1', []).profiles, [])
   await symlink(resolve(engineSource, 'node_modules'), resolve(library, 'node_modules'))
+  // Exercise the shipped module, not an import from the source checkout.
+  const { measuredCostRouteReference, meteredProviderNamespace } = await import(resolve(library, 'metered-cost-route.mjs'));
+  const route = measuredCostRouteReference({ kind: 'NATIVE_PROVIDER_CALL', component: 'fixture',
+    providerId: 'fixture-provider', baseUrl: 'https://fixture.invalid/v1/', modelOrTool: 'fixture-model', normalizationBasis: 'fixture-v1' });
+  assert.equal(route.namespace, meteredProviderNamespace('fixture-provider', 'https://fixture.invalid/v1'));
+  assert.deepEqual(Object.keys(route).sort(), ['component', 'kind', 'modelOrTool', 'namespace', 'normalizationBasis']);
+  assert.equal(Object.isFrozen(route), true);
   await mkdir(resolve(library, '.toolchain/bin'), { recursive: true })
   await symlink('/usr/bin/python3', resolve(library, '.toolchain/bin/python'))
   const { createRuntimeExecutionHost } = await import(resolve(library, 'agent-client.mjs'))
@@ -266,6 +273,7 @@ test('unified library catalog closes actual engine imports without retired provi
     assert.ok(EXECUTION_PAYLOAD_FILES.includes(path), path);
   }
   for (const name of ['isolated-engine-profile.mjs', 'native-execution-runtime.mjs']) assert.equal(EXECUTION_PAYLOAD_FILES.includes(name), true);
+  assert.equal(EXECUTION_PAYLOAD_FILES.includes('metered-cost-route.mjs'), true);
   assert.equal(EXECUTION_PAYLOAD_FILES.includes('app-server-usage.mjs'), true);
   assert.equal(EXECUTION_PAYLOAD_FILES.includes('native-usage-receipts.mjs'), true);
   assert.equal(EXECUTION_PAYLOAD_FILES.includes('chat-usage-delivery.mjs'), true);
@@ -279,13 +287,6 @@ test('unified library catalog closes actual engine imports without retired provi
   const target = resolve(f.root, 'codex-bridge');
   const result = await collateExecutionPayload(engineSource, target);
   assert.equal(result.payloadCount, EXECUTION_PAYLOAD_FILES.length); assert.equal(result.dependenciesValidated, false);
-  // Exercise the shipped module, not an import from the source checkout.
-  const { measuredCostRouteReference, meteredProviderNamespace } = await import(resolve(target, 'metered-cost-route.mjs'));
-  const route = measuredCostRouteReference({ kind: 'NATIVE_PROVIDER_CALL', component: 'fixture',
-    providerId: 'fixture-provider', baseUrl: 'https://fixture.invalid/v1/', modelOrTool: 'fixture-model', normalizationBasis: 'fixture-v1' });
-  assert.equal(route.namespace, meteredProviderNamespace('fixture-provider', 'https://fixture.invalid/v1'));
-  assert.deepEqual(Object.keys(route).sort(), ['component', 'kind', 'modelOrTool', 'namespace', 'normalizationBasis']);
-  assert.equal(Object.isFrozen(route), true);
   await assert.rejects(collateExecutionPayload(engineSource, target), cause => cause.code === 'EEXIST');
   assert.deepEqual(await readFile(resolve(target, 'schemas/skill-manifest-v1.schema.json')),
     await readFile(resolve(engineSource, 'schemas/skill-manifest-v1.schema.json')));
