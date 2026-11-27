@@ -236,6 +236,8 @@ for (const materialsFailure of [false, true]) test(`native owner survives absent
   // or weaken the release-local toolchain prerequisite.
   const library = resolve(f.root, 'test-engine')
   await collateExecutionPayload(engineSource, library)
+  const { costProfileReport } = await import(resolve(library, 'cost-profile-report.mjs'))
+  assert.deepEqual(costProfileReport('1', []).profiles, [])
   await symlink(resolve(engineSource, 'node_modules'), resolve(library, 'node_modules'))
   await mkdir(resolve(library, '.toolchain/bin'), { recursive: true })
   await symlink('/usr/bin/python3', resolve(library, '.toolchain/bin/python'))
