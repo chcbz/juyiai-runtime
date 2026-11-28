@@ -4682,7 +4682,7 @@ const discussionLeaseKey = Symbol('claimed-discussion')
 // The tool catalog and inbox are authenticated separately; no caller-provided adapter or legacy fallback.
 export async function runClaimedDiscussion(profile, message, { controls, runtime, catalog, bindingStore, current, sendProtocolFn }) {
   if (!Object.hasOwn(message.contextSnapshot?.facts || {}, 'taskUsageCapture') || !current() || !runtime ||
-      !controls.openDiscussion || !resolveActionChatRequest(profile,message) || contextDeliveryPlan(message)?.mode !== 'BOOTSTRAP' ||
+      !controls.openDiscussion || !resolveActionChatRequest(profile,message) || !contextDeliveryPlan(message) ||
       message.contextSnapshot.facts.materialsInput) throw new AgentProtocolError('CHAT_METERED_ROUTE_UNAVAILABLE', 'Bound text discussion required')
   await prepareConversationTools({ ...catalog, current, message, requireEmpty:true })
   if (!current()) throw new AgentProtocolError('CHAT_METERED_ROUTE_UNAVAILABLE', 'Device session changed')

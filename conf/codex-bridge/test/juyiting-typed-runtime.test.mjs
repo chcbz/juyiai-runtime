@@ -679,9 +679,9 @@ test('ordinary warm CHAT recovery reads the original native turn without model r
   assert.equal(runs, 1)
 })
 
-test('claimed bootstrap uses isolated turn; ordinary delta resumes the original thread, unknown recovery cannot replay', async () => {
+test('claimed text turns use separate captures and resume the original thread; unknown recovery cannot replay', async () => {
   const first=mutateTypedMessage((m,f)=>{f.taskUsageCapture={protocol:'METERED_CAPTURE_V2',captureId:canonicalSha256(['CAPTURE_V2',m.turnId,m.dispatchId]).slice(7)};f.contextDelivery={schemaVersion:1,mode:'BOOTSTRAP',afterMessageId:'0',throughMessageId:'1',baseTurnId:null,engineThreadId:null}})
-  const second=mutateTypedMessage((m,f)=>{m.turnId+='-b';m.dispatchId+='-b';m.messageId+='-b';m.dedupeKey+='-b';f.contextDelivery={schemaVersion:1,mode:'DELTA',afterMessageId:'1',throughMessageId:'2',baseTurnId:first.turnId,engineThreadId:'original'}})
+  const second=mutateTypedMessage((m,f)=>{m.turnId+='-b';m.dispatchId+='-b';m.messageId+='-b';m.dedupeKey+='-b';f.taskUsageCapture={protocol:'METERED_CAPTURE_V2',captureId:canonicalSha256(['CAPTURE_V2',m.turnId,m.dispatchId]).slice(7)};f.contextDelivery={schemaVersion:1,mode:'DELTA',afterMessageId:'1',throughMessageId:'2',baseTurnId:first.turnId,engineThreadId:'original'}})
   const store=bindingStore(), prior=[], record={}, frames=[];let closed=0, opens=0
   const adapter={closed:false,readback:measuredReadback(),typedInspectionEngineState:{conversationKey:'conversation',chatWorkdir:'/conversation/chat',configDigest:'physical-port',memoryConfigDigest:'logical-provider'},
     startOrResumeThread:async p=>{prior.push(p);return p || {threadId:'original'}},runTurn:async options=>{
@@ -692,8 +692,9 @@ test('claimed bootstrap uses isolated turn; ordinary delta resumes the original 
   const opts={controls,runtime:{},bindingStore:store,current:()=>true,sendProtocolFn:(...args)=>{frames.push(args);return true}}
   for(const c of [catalog(null,404),catalog({schemaVersion:'1',tools:[],skills:[{}]})]) await assert.rejects(runClaimedDiscussion(profile,first,{...opts,catalog:c}),/CATALOG_REQUIRED|ROUTE_UNAVAILABLE/)
   assert.equal(opens,0);await runClaimedDiscussion(profile,first,{...opts,catalog:catalog({schemaVersion:'1',tools:[],skills:[]})});assert.equal(closed,1);assert.ok(record.finalPrepared)
-  const ordinary={...adapter,typedInspectionEngineState:{...adapter.typedInspectionEngineState,memoryConfigDigest:undefined,configDigest:'logical-provider'}}
-  await runFastChat(profile,second,{adapter:ordinary,conversationRuntime:{canShareChatProvider:()=>true,openWarmChatAdapter:async()=>ordinary,finishWarmChatAdapter:async()=>{}},bindingStore:store,controls:{...controls,markPrepared:()=>{}},sendProtocolFn:()=>true})
+  controls.openDiscussion=async()=>{opens++;return {adapter,conversationKey:'conversation',message:second,close:async()=>{closed++}}}
+  await runClaimedDiscussion(profile,second,{...opts,catalog:catalog({schemaVersion:'1',tools:[],skills:[]})})
+  assert.equal(opens,2);assert.equal(closed,2)
   assert.equal(store.values.size,1);assert.deepEqual(prior.map(x=>x?.threadId),[undefined,'original'])
   assert.equal((await recoverActionChat(profile,first,{preparation:record.preparation},{controls,profileRuntime:{openWarmChatAdapter:()=>assert.fail('unmetered recovery')}})).reconciliationStatus,'ACCEPTANCE_UNKNOWN')
 })
@@ -713,15 +714,15 @@ test('managed text discussion drives real isolated CLI through the source ledger
   const wire=mutateTypedMessage((m,f)=>{m.agentId=m.targetAgentId=f.targetAgentId=f.task.assignedAgentId=agentId;f.task.assignedAgentIds=f.participantAgentIds=[agentId];f.typedDeliberation={schemaVersion:5,availableActions:[],availableSources:[],inspectedSourceRefIds:[]};f.taskUsageCapture={protocol:'METERED_CAPTURE_V2',captureId:canonicalSha256(['CAPTURE_V2',m.turnId,m.dispatchId]).slice(7)};f.contextDelivery={schemaVersion:1,mode:'BOOTSTRAP',afterMessageId:'0',throughMessageId:'1',baseTurnId:null,engineThreadId:null}})
   // The wire has JSON semantics. The processor fingerprints the original decoded frame, not fixture-only undefined properties.
   const m=normalizeInboundMessage(JSON.stringify(wire))
-  let calls=0,parent;const dir=()=>resolve(parent,'usage-capture-'+m.factsManifest.taskUsageCapture.captureId), observations=[]
+  let calls=0,parent,active=m;const dir=()=>resolve(parent,'usage-capture-'+active.factsManifest.taskUsageCapture.captureId), observations=[]
   server=createServer({key:readFileSync(file('key')),cert:readFileSync(file('ca'))},async(req,res)=>{
     try{
       const parts=[];let n=0;for await(const p of req){n+=p.length;if(n>1048576)throw Error('fixture request exceeds bound');parts.push(p)}
       const body=JSON.parse(Buffer.concat(parts));calls++
       observations.push({path:req.url,method:req.method,keyMatched:req.headers.authorization==='Bearer discussion-loopback-only',model:body.model,
-        hasCaptureField:JSON.stringify(body.input).includes('taskUsageCapture'),hasPrewrite:read(resolve(dir(),`request-${calls}-1.json`)).observation.resolution==='PENDING'})
-      if(calls!==1){res.writeHead(400);return res.end()}
-      const id='resp-discussion-1',item={id:'msg-1',type:'message',role:'assistant',content:[{type:'output_text',text:JSON.stringify({kind:'ANSWER',...fixture.outcomes[0]})}]}
+        hasCaptureField:JSON.stringify(body.input).includes('taskUsageCapture'),hasPrewrite:read(resolve(dir(),'request-1-1.json')).observation.resolution==='PENDING'})
+      if(calls>2){res.writeHead(400);return res.end()}
+      const id=`resp-discussion-${calls}`,item={id:`msg-${calls}`,type:'message',role:'assistant',content:[{type:'output_text',text:JSON.stringify({kind:'ANSWER',...fixture.outcomes[0]})}]}
       res.writeHead(200,{'Content-Type':'text/event-stream'});for(const event of [{type:'response.created',response:{id}},{type:'response.output_item.done',output_index:0,item},
         {type:'response.completed',response:{id,status:'completed',usage:{input_tokens:12,output_tokens:3,total_tokens:15,input_tokens_details:{cached_tokens:0},output_tokens_details:{reasoning_tokens:0}}}}])res.write(`data: ${JSON.stringify(event)}\n\n`);res.end()
     }catch{res.writeHead(400);res.end()}
@@ -732,8 +733,8 @@ test('managed text discussion drives real isolated CLI through the source ledger
   const p=resolveManagedRuntimeProfile({agentId,profileId:scope.profileId,managedGeneration:generation,managedTenantId:m.tenantId,managedClientId:m.clientId,managedOwnerJiacn:m.ownerJiacn,
     codexBin:process.env.CYF_CODEX_BIN,codexHome:home,typedInspectionCaBundlePath:file('ca'),chatReasoningEffort:'medium',inputCarriers:true},{workspaceFileApiOrigin:origin},undefined,parseManagedChatScopes(JSON.stringify({schemaVersion:1,authorizations:[scope]})))
   assert.equal(p.chatEngine,'app-server');runtime=new TypedInspectionProfileRuntime({profile:p,materializerRoot:p.typedInspectionRootDir,stateRoot:p.typedInspectionStateRoot})
-  const inbox=new PersistentChatInbox({rootDir:root,profile:p});inbox.initialize();const {key}=await inbox.accept(m),item=inbox.claim(key);parent=inbox.discussionCaptureSubject(key,false).parent
-  const result=await runClaimedDiscussion(p,m,{runtime,current:()=>true,bindingStore:bindingStore(),catalog:{apiOrigin:origin,nativeFetch:async()=>new Response(JSON.stringify({protocolVersion:1,requestId:'r1',code:'E0',msg:'ok',data:{schemaVersion:'1',tools:[],skills:[]}}),{status:200,headers:{'X-Request-Id':'r1'}})},
+  const inbox=new PersistentChatInbox({rootDir:root,profile:p});inbox.initialize();const store=bindingStore();const {key}=await inbox.accept(m),item=inbox.claim(key);parent=inbox.discussionCaptureSubject(key,false).parent
+  const result=await runClaimedDiscussion(p,m,{runtime,current:()=>true,bindingStore:store,catalog:{apiOrigin:origin,nativeFetch:async()=>new Response(JSON.stringify({protocolVersion:1,requestId:'r1',code:'E0',msg:'ok',data:{schemaVersion:'1',tools:[],skills:[]}}),{status:200,headers:{'X-Request-Id':'r1'}})},
     controls:{openDiscussion:(rt,current)=>rt.openDiscussionAdapter(inbox,key,current),markPrepared:x=>inbox.markPrepared(item,x),isCancelled:()=>false,markRunning:(_,x)=>inbox.markRunning(item,x),
       markFinalPrepared:x=>inbox.markFinalPrepared(item,x),markFinalPublication:x=>inbox.markFinalPublication(item,x)},sendProtocolFn:()=>true})
   assert.deepEqual(observations,[{path:'/custom/responses',method:'POST',keyMatched:true,model:'gpt-5.4',hasCaptureField:false,hasPrewrite:true}]);assert.equal(result.computationStatus,'completed');assert.equal(inbox.findByKey(key).record.finalPrepared.content,fixture.outcomes[0].text)
@@ -743,4 +744,23 @@ test('managed text discussion drives real isolated CLI through the source ledger
   assert.equal(localSeal.executionId,m.turnId);assert.equal(localSeal.runId,m.dispatchId)
   inbox.recoveryRequired(item,result.recoveryReason);const restored=new PersistentChatInbox({rootDir:root,profile:p});restored.initialize()
   const marker=await recoverStoppedDiscussionCapture(restored,key,()=>assert.equal(runtime.conversationOwners.size,0));assert.equal(marker.closeState,'SEALED_INCOMPLETE');assert.equal(calls,1)
+  const firstParent=parent, firstRecord=inbox.findByKey(key).record, firstThread=firstRecord.preparation.engineThreadId
+  const secondWire=JSON.parse(JSON.stringify(wire));secondWire.turnId+='-second';secondWire.dispatchId+='-second';secondWire.messageId+='-second';secondWire.dedupeKey+='-second'
+  const facts=secondWire.factsManifest
+  facts.taskUsageCapture={protocol:'METERED_CAPTURE_V2',captureId:canonicalSha256(['CAPTURE_V2',secondWire.turnId,secondWire.dispatchId]).slice(7)}
+  facts.contextDelivery={schemaVersion:1,mode:'DELTA',afterMessageId:'1',throughMessageId:'2',baseTurnId:m.turnId,engineThreadId:firstThread}
+  secondWire.contextSnapshot.facts=facts;secondWire.contextHash=secondWire.contextSnapshot.contextHash=canonicalSha256({sourceVector:secondWire.sourceVector,facts})
+  active=normalizeInboundMessage(JSON.stringify(secondWire))
+  const admitted=await inbox.accept(active), second=inbox.claim(admitted.key);parent=inbox.discussionCaptureSubject(admitted.key,false).parent
+  assert.notEqual(parent,firstParent)
+  const secondResult=await runClaimedDiscussion(p,active,{runtime,current:()=>true,bindingStore:store,catalog:{apiOrigin:origin,nativeFetch:async()=>new Response(JSON.stringify({protocolVersion:1,requestId:'r2',code:'E0',msg:'ok',data:{schemaVersion:'1',tools:[],skills:[]}}),{status:200,headers:{'X-Request-Id':'r2'}})},
+    controls:{openDiscussion:(rt,current)=>rt.openDiscussionAdapter(inbox,admitted.key,current),markPrepared:x=>inbox.markPrepared(second,x),isCancelled:()=>false,markRunning:(_,x)=>inbox.markRunning(second,x),
+      markFinalPrepared:x=>inbox.markFinalPrepared(second,x),markFinalPublication:x=>inbox.markFinalPublication(second,x)},sendProtocolFn:()=>true})
+  assert.equal(secondResult.computationStatus,'completed');assert.equal(calls,2);assert.equal(store.values.size,1)
+  assert.equal(inbox.findByKey(admitted.key).record.preparation.engineThreadId,firstThread)
+  const secondResponse=read(resolve(dir(),readdirSync(dir()).find(n=>/^response-.*-1\.json$/.test(n))))
+  assert.equal(secondResponse.executionId,active.turnId);assert.equal(secondResponse.runId,active.dispatchId)
+  assert.equal(secondResponse.observation.reportedUsage.input_tokens,12);assert.equal(secondResponse.observation.reportedUsage.output_tokens,3)
+  assert.equal(read(resolve(dir(),'usage-capture-finalized.json')).closeState,'SEALED_INCOMPLETE')
+  assert.equal(runtime.conversationOwners.size,0);assert.ok(observations.every(x=>x.hasPrewrite&&!x.hasCaptureField&&x.keyMatched))
 })

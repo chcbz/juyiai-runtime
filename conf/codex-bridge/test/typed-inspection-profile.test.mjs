@@ -626,9 +626,10 @@ test('discussion adapters never share an engine or cross a pending source waterm
   runtime.materializerRoot = root
   runtime.providerCaTrust = { path:resolve(root,'ca'), sha256:'sha256:'+createHash('sha256').update('fixture').digest('hex') }; writeFileSync(runtime.providerCaTrust.path,'fixture')
   const inbox = new PersistentChatInbox({ rootDir:root, profile:runtime.profile }); inbox.initialize()
-  const enroll = async suffix => {
+  const enroll = async (suffix, delivery = null) => {
     const m = structuredClone(wire); m.route='CHAT'; m.turnId+=suffix; m.dispatchId+=suffix; m.dedupeKey+=suffix
     const f=m.factsManifest; f.participantAgentIds=[m.targetAgentId]; f.typedDeliberation={schemaVersion:5}; f.contextDelivery={schemaVersion:1,mode:'BOOTSTRAP',afterMessageId:'0',throughMessageId:'1',baseTurnId:null,engineThreadId:null}
+    if(delivery) f.contextDelivery=delivery
     f.taskUsageCapture={protocol:'METERED_CAPTURE_V2',captureId:canonicalSha256(['CAPTURE_V2',m.turnId,m.dispatchId]).slice(7)}
     m.contextSnapshot.facts=f;m.contextHash=m.contextSnapshot.contextHash=canonicalSha256({sourceVector:m.sourceVector,facts:f})
     const { key }=await inbox.accept(validateChatDispatch(m));inbox.claim(key);return key
@@ -646,7 +647,11 @@ test('discussion adapters never share an engine or cross a pending source waterm
     const a={typedInspectionEngineState:engineState,child:{},childClosed:false,readback:{tools:{data:[]}},shutdown:async()=>{a.childClosed=true}};engines.push(a);return a
   }
   runtime._initializeAndSeal=async a=>rmSync(a.typedInspectionEngineState.authPath)
-  const a=await enroll('-a'), b=await enroll('-b'), first=await runtime.openDiscussionAdapter(inbox,a)
+  const delta={schemaVersion:1,mode:'DELTA',afterMessageId:'1',throughMessageId:'2',baseTurnId:'previous',engineThreadId:'original'}
+  const missing=await enroll('-missing',delta)
+  await assert.rejects(runtime.openDiscussionAdapter(inbox,missing),/CHAT_CONTEXT_BOOTSTRAP_REQUIRED/)
+  assert.equal(routes.length,0);assert.equal(engines.length,0)
+  const a=await enroll('-a'), b=await enroll('-b',delta), first=await runtime.openDiscussionAdapter(inbox,a)
   assert.equal(routes[0].runId,first.message.dispatchId);await assert.rejects(runtime.openDiscussionAdapter(inbox,b),/CONVERSATION_IN_USE/)
   const held=Promise.withResolvers(), admitted=Promise.withResolvers();const pending=routes[0].dispatch(async()=>{admitted.resolve();await held.promise});await admitted.promise
   const closing=first.close();await assert.rejects(runtime.openWarmChatAdapter(first.conversationKey,'ordinary'),/CONVERSATION_IN_USE/)

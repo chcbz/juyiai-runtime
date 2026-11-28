@@ -47,13 +47,20 @@ export class TypedInspectionProfileRuntime extends IsolatedEngineProfileRuntime 
   // Only the durable inbox supplies the message. Never publish this adapter to the shared profile.
   async openDiscussionAdapter(inbox, key, current = () => true) {
     const { message } = inbox.discussionCaptureSubject(key, false)
-    const facts = message.contextSnapshot.facts, profile = this.profile
+    const facts = message.contextSnapshot.facts, profile = this.profile, delivery = contextDeliveryPlan(message)
     if (this.disposed || message.targetAgentId !== profile.agentId || usesChatFiles(profile) ||
         ![5, 6].includes(facts.typedDeliberation?.schemaVersion) || 'materialsInput' in facts || 'typedInspection' in facts ||
-        contextDeliveryPlan(message)?.mode !== 'BOOTSTRAP' || facts.contextDelivery.replacesDispatchId ||
+        !delivery || delivery.replacesDispatchId ||
         profile.typedInspectionProviderNetwork !== 'restricted-proxy' ||
         message.dedupeKey !== `${message.tenantId}:${message.ownerJiacn}:${message.clientId}:${message.dispatchId}`) fail('CHAT_METERED_ROUTE_UNAVAILABLE')
     const conversation = chatConversationKey(profile, message)
+    // A delta may only resume its existing private conversation. Never replace lost
+    // native history with an empty HOME and send a partial context to the model.
+    if (delivery.mode === 'DELTA') {
+      const directory = this._conversationDirectory(conversation)
+      if (!existsSync(resolve(directory, 'binding.json')) || !existsSync(resolve(directory, 'codex-home')))
+        fail('CHAT_CONTEXT_BOOTSTRAP_REQUIRED')
+    }
     if (this.warmChatAdapters?.has(conversation)) await this._closeWarmChat(conversation)
     if (this.disposed || this.conversationOwners?.has(conversation)) fail('TYPED_INSPECTION_CONVERSATION_IN_USE')
     const slot = { conversation }
@@ -70,7 +77,7 @@ export class TypedInspectionProfileRuntime extends IsolatedEngineProfileRuntime 
       slot.egress = this._meteredEgress({ providerBaseUrl:profile.typedInspectionProviderBaseUrl,
         networkConnectTimeoutMs:profile.typedInspectionNetworkConnectTimeoutMs }, slot.capture)
       await slot.egress.start(); checkActive()
-      slot.state = this._prepareConversationState(conversation, { meteredEgress:slot.egress })
+      slot.state = this._prepareConversationState(conversation, { requireExistingState:delivery.mode === 'DELTA', meteredEgress:slot.egress })
       slot.inputs = ensurePrivateDirectory(mkdtempSync(resolve(this.materializerRoot, '.discussion-')))
       slot.spawnAttempted = true
       slot.adapter = await this._spawnAdapter({ inputDirectory:slot.inputs, engineState:slot.state, schemaMeasurement:schema,
