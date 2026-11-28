@@ -36,16 +36,23 @@ export function requestCostScope(budget,localArtifactCall) {
       if(['image_url','file_id','file_data','audio'].includes(key)){flags.add('REQUEST_NON_TEXT_INPUT');return 'skip'}
     } else if(parent==='reasoningOptions'&&['effort','summary'].includes(key)&&kind==='string')return 'skip'
     else if(parent==='reasoningOptions'&&key==='context'&&kind==='string')return 'reasoningContext'
+    else if(parent==='textOptions'&&key==='format'&&kind==='object')return {format:true}
+    else if(parent.format){
+      if(key==='type'&&kind==='string')return {formatOwner:parent}
+      // A JSON output schema describes text; its property names are not model inputs or tool calls.
+      if(['name','description'].includes(key)&&kind==='string'||key==='strict'&&kind==='atom'||key==='schema'&&kind==='object')return 'skip'
+    }
     else if(parent==='textOptions'&&key==='verbosity'&&kind==='string')return 'skip'
     else if(parent==='includes'&&kind==='string')return 'include'
     unknown();return 'skip'
   }
   const enums=new Set(['choice','partType','include','reasoningContext'])
-  const inspect={value,read:role=>!!role?.toolOwner||!!role?.itemOwner||enums.has(role),scalar(role,v){
+  const inspect={value,read:role=>!!role?.toolOwner||!!role?.itemOwner||!!role?.formatOwner||enums.has(role),scalar(role,v){
     if(role==='reasoningContext'&&v!=='all_turns')unknown()
     if(role==='choice'&&!['auto','none','required'].includes(v))unknown()
     if(role?.toolOwner){role.toolOwner[role.toolField]=v;role.toolOwner.namespace=role.toolOwner.type==='namespace'}
     if(role?.itemOwner)role.itemOwner[role.itemField]=v
+    if(role?.formatOwner)role.formatOwner.type=v
     if(role==='partType'&&!['input_text','output_text'].includes(v))flags.add('REQUEST_NON_TEXT_INPUT')
     if(role==='include'&&v!=='reasoning.encrypted_content')unknown()
   },close(role,keys){
@@ -68,6 +75,10 @@ export function requestCostScope(budget,localArtifactCall) {
       // invocation. Its actual call/output still fails closed as unknown history.
       if(!['namespace','custom','function'].includes(role.type)&&!(role.type==='tool_search'&&role.execution==='client'))flags.add('REQUEST_PROVIDER_TOOL_OR_UNKNOWN')
       if(keys.has('execution')&&role.type!=='tool_search')unknown()
+    }
+    if(role?.format){
+      if(role.type==='json_schema'){if(!keys.has('schema'))unknown()}
+      else if(!['text','json_object'].includes(role.type)||keys.size!==1)unknown()
     }
     if(role==='part'&&!keys.has('type'))unknown()
   }}

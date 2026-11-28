@@ -88,7 +88,9 @@ async function openSubject(parent, subject, { executionId, runId, executionConfi
       if(!sealed)await persist(dir,'producer-stopped',{...binding,...(epoch==='0'?{}:{epoch}),reservedHigh:String(next),writeFailed})
     })().catch(error=>{watermark=null;throw error})
   }
-  return Object.freeze({ ...binding, ...(deferred?{async enableAfterThreadResume(){if(stopped)bad('METERED_CAPTURE_ADMISSION_CLOSED');await register()}}:{}), textTokenProtocol:engineVersion==='codex-cli-0.167.0' && adapterVersion==='RESPONSES_TEXT_TOKENS_V1' && ['TEXT_MODEL_ONLY_V1','NATIVE_LOCAL_ARTIFACT_TEXT_V1','NATIVE_PINNED_IMAGE_V1'].includes(coveragePolicyVersion), stopAdmission() { stopped = true },
+  // Per-response text normalization is not proof of whole-capture cost coverage.
+  // Discussion still seals UNSUPPORTED_COST_SOURCE until its independent policy is proved.
+  return Object.freeze({ ...binding, ...(deferred?{async enableAfterThreadResume(){if(stopped)bad('METERED_CAPTURE_ADMISSION_CLOSED');await register()}}:{}), textTokenProtocol:engineVersion==='codex-cli-0.167.0' && adapterVersion==='RESPONSES_TEXT_TOKENS_V1' && ['TEXT_MODEL_ONLY_V1','NATIVE_LOCAL_ARTIFACT_TEXT_V1','NATIVE_PINNED_IMAGE_V1','CHAT_SOURCE_UNVERIFIED_V1'].includes(coveragePolicyVersion), stopAdmission() { stopped = true },
     async stopAndDrain(){stopped=true;if(inflight)await (drained??=new Promise(resolve=>{wake=resolve}));if(writeFailed)bad('METERED_CAPTURE_WRITE_INCOMPLETE')},
     // Called only after the owner has joined the engine and closed the egress. No re-opening after this point.
     markStopped,

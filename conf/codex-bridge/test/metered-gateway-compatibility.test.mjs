@@ -64,3 +64,14 @@ test('native developer tool catalogue is text only when every nested declaration
   assert.ok(scope([item],{context:'unknown'}).includes('REQUEST_COST_SCOPE_UNKNOWN'))
   assert.ok(scope([item,{role:'user',content:[{type:'input_image',image_url:'fixture'}]}]).includes('REQUEST_NON_TEXT_INPUT'))
 })
+
+
+test('structured text output schemas do not hide unbound tools, attachments or unknown output modalities',()=>{
+  const check=(format,extra={})=>{const p=requestCostScope(4096);const bytes=Buffer.from(JSON.stringify({model:'fixture',input:'text',text:{format},...extra}));for(let i=0;i<bytes.length;i+=7)p.push(bytes.subarray(i,i+7));return p.finish(true)}
+  const format={type:'json_schema',name:'answer',strict:true,schema:{type:'object',properties:{input_image:{type:'string'},tools:{type:'array',items:{type:'string'}}},additionalProperties:false}}
+  assert.deepEqual(check(format),[]);assert.deepEqual(check({type:'text'}),[]);assert.deepEqual(check({type:'json_object'}),[])
+  for(const f of [{...format,type:'audio'},{...format,type:'text'},{...format,schema:[]},{...format,schema:undefined},{...format,type:undefined},{...format,providerMode:'unknown'}])assert.ok(check(f).includes('REQUEST_COST_SCOPE_UNKNOWN'))
+  assert.ok(check(format,{input:[{role:'user',content:[{type:'input_image',image_url:'private'}]}]}).includes('REQUEST_NON_TEXT_INPUT'))
+  assert.ok(check(format,{tools:[{type:'web_search'}]}).includes('REQUEST_PROVIDER_TOOL_OR_UNKNOWN'))
+  assert.ok(check(format,{input:[{type:'function_call_output',call_id:'unknown',output:'text'}]}).includes('REQUEST_TOOL_HISTORY_UNBOUND'))
+})
