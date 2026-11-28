@@ -275,7 +275,7 @@ export function nativeCostConfiguration(binding, settings, {profileTools, costRe
   if (!nativeDispatchGroup(binding, settings) || !Array.isArray(profileTools) || !Array.isArray(costResources)
       || !hash(settings.binarySha256) || !hash(settings.instructionsSha256)
       || !['NATIVE_LOCAL_ARTIFACT_TEXT_V1','NATIVE_PINNED_IMAGE_V1'].includes(settings.coveragePolicyVersion)
-      || (binding.skills.length && !hash(settings.childRouteSha256)) || binding.skillConfiguration.length
+      || (binding.skills.length && settings.coveragePolicyVersion !== 'NATIVE_LOCAL_ARTIFACT_TEXT_V1' && !hash(settings.childRouteSha256)) || binding.skillConfiguration.length
       || binding.networkAccess || binding.networkOrigins.length || binding.webSearch || binding.businessApi) return null
   return {executionStrategyVersion:settings.toolPolicyRef,contextPolicyId:'native-execution-context-1',
       contextPolicyVersion:skillDigest(['native-execution-context-1',settings.binarySha256,settings.engineVersion,settings.effort,
@@ -298,7 +298,7 @@ export function measureProspectiveNativeGroup({ skills, skillConfiguration, tool
   if (!verifiedOnly || !group) return group
   // Both commitments derive from the same verified measurement. Normalize only the task-specific
   // output contract. A profile epoch is NOT a dispatch group: never persist it in the actual-use PLAN.
-  if (!Array.isArray(profileTools) || (skills.length && !hash(settings.childRouteSha256)) || skillConfiguration.length || networkAccess) return null
+  if (!Array.isArray(profileTools) || (skills.length && settings.coveragePolicyVersion !== 'NATIVE_LOCAL_ARTIFACT_TEXT_V1' && !hash(settings.childRouteSha256)) || skillConfiguration.length || networkAccess) return null
   const baseline = nativeDispatchGroup({...binding,tools:profileTools},settings)
   if (costResources) return nativeCostConfiguration(binding, settings, {profileTools, costResources})
   return {...group,profileSha256:skillDigest([settings.childRouteSha256 ? 'PREPARED_IMAGE_PROFILE_V1' : 'PREPARED_LOCAL_PROFILE_V1',baseline.executionConfigSha256])}

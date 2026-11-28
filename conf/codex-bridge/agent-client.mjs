@@ -49,7 +49,7 @@ import { SkillConversationLane } from './skill-conversation.mjs'
 import { comparePreparedImage, compareProspectiveTaskConfiguration, nativeExecutionRequestBinding, runNativeExecution } from './native-execution.mjs'
 import { installedCostProfiles } from './cost-profile-report.mjs'
 import { initializeNativeToolchain } from './native-document-toolchain.mjs'
-import { NATIVE_SKILL_SCRIPT_POLICY, readNativeSkillSubjectConfig, resolveNativeSkillConfiguration } from './native-skill-config.mjs'
+import { NATIVE_SKILL_SCRIPT_POLICY, readNativeSkillSubjectConfig, resolveNativeSkillConfiguration, resolvePreparedNativeSkillConfiguration } from './native-skill-config.mjs'
 import { createLocalScriptRunner } from './skill-runners/local-script.mjs'
 import { buildActionChatFinal, publishActionChatFinal } from './action-chat-final.mjs'
 import { resolveChatMaterials, prepareChatMaterials, chatConversationKey, materialsEngineBinding, buildMaterialsChatFinal, publishMaterialsChatFinal } from './materials-chat.mjs'
@@ -6368,7 +6368,8 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
         pricingProfiles: fence => {
           const state=entry.state, registry=state?.skillRegistry, catalog=registry?.declaration()
           if (!catalog || !state.nativeExecutionProfileRuntime || entry.closed || state.disposed || state.profileClosing) return measuredCostProfiles([])
-          const settings=state.profile.nativeImage ?? validateNativeImageSettings(readNativeSkillSubjectConfig({file:state.profile.skillExecutionConfigFile,scope:registry.scope})?.nativeImage)
+          const subjectConfig=readNativeSkillSubjectConfig({file:state.profile.skillExecutionConfigFile,scope:registry.scope})
+          const settings=state.profile.nativeImage ?? validateNativeImageSettings(subjectConfig?.nativeImage)
           const measurements=[]
           for (const item of catalog.skills) {
             if (!item.enabled) continue
@@ -6377,6 +6378,8 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
             // Use the same resource adapter as execution. Unsupported adapters return no complete
             // measurement; a catalogue entry alone never declares resource coverage or composition.
             const configuration=comparePreparedImage(state.nativeExecutionProfileRuntime,{mimeTypes:['image/png'],dataSchema:null},selected,settings,runtimeFileAuthProvider(state.profile),state.appServerAdapter?.readback?.config,true)
+              ?? compareProspectiveTaskConfiguration(state.nativeExecutionProfileRuntime,{scopeKind:'TASK',outputs:{dataSchema:null},entries:[selected],
+                skillConfiguration:resolvePreparedNativeSkillConfiguration([selected],subjectConfig),toolPolicyRef:NATIVE_SKILL_SCRIPT_POLICY,privateTools:null},true,true)
             if(configuration)measurements.push({descriptor:selected.descriptor,configuration})
           }
           return measuredCostProfiles(measurements)

@@ -271,3 +271,31 @@ test('metered ambiguous turn only stops; reconciling its original durable result
   await assert.rejects(runNativeExecution(f.request),{code:'SKILL_RESULT_UNKNOWN'});await runNativeExecution(f.request)
   assert.deepEqual(close,[[false,false],[true,true]]);assert.equal(f.runs(),1)
 })
+
+
+test('local shell cost history requires a completed event in the admitted execution turn', async t => {
+  const f = fixture(t); f.command.usageMode = 'RESPONSE_V2'
+  const open = f.request.profileRuntime.openNativeExecutionAdapter
+  let policy
+  f.request.profileRuntime.openNativeExecutionAdapter = async (...args) => {
+    policy = args[3].nativeExecution
+    return open(...args)
+  }
+  const run = f.adapter.runTurn
+  f.adapter.runTurn = async options => {
+    options.onAccepted({ threadId: 'thread1', turnId: 'turn1' })
+    const event = { threadId:'thread1', turnId:'turn1', itemId:'shell1', method:'item/completed', type:'commandExecution', status:'completed' }
+    assert.equal(policy.localArtifactCall('shell1'), undefined)
+    for (const change of [{threadId:'foreign'}, {turnId:'foreign'}, {method:'item/started'}, {status:'inProgress'}, {type:'mcpToolCall'}]) {
+      options.onToolEvent({...event,...change})
+      assert.equal(policy.localArtifactCall('shell1'), undefined)
+    }
+    options.onToolEvent(event)
+    assert.equal(policy.localArtifactCall('shell1'), 'exec_command')
+    assert.equal(policy.localArtifactCall('unobserved'), undefined)
+    return run(options)
+  }
+  await runNativeExecution(f.request)
+  assert.equal(policy.localArtifactCall('stage1'), 'artifact_stage')
+  assert.equal(policy.localArtifactCall('proposal1'), 'result_propose')
+})

@@ -962,3 +962,22 @@ test('cost semantics are independently reproducible from actual layout and exclu
     assert.equal(nativeCostConfiguration(layout.binding,settings,{profileTools:options.profileTools}),null)
   } finally {f.cleanup()}
 })
+
+
+test('local installed skill cost configuration shares actual package measurement without a provider child', () => {
+  const f=fixture()
+  try {
+    const settings={model:'model',effort:'medium',engineVersion:'codex-cli-0.167.0',instructionsSha256:'a'.repeat(64),
+      binarySha256:'b'.repeat(64),channelNamespace:'provider',toolPolicyRef:'NATIVE_SKILL_SCRIPT_V1',coveragePolicyVersion:'NATIVE_LOCAL_ARTIFACT_TEXT_V1'}
+    const {skills,toolchain,stateRoot,nativeExecution}=f.options
+    const options={profileTools:nativeExecution.tools,costResources:[]}
+    const prospective=measureProspectiveNativeGroup({skills,toolchain:validateNativeExecutionToolchain(toolchain),stateRoot,
+      skillConfiguration:[],tools:nativeExecution.tools,networkAccess:false,modelCatalogSha256:null,verifiedOnly:true,...options},settings)
+    const layout=prepareNativeExecutionLayout(f.options),actual=nativeCostConfiguration(layout.binding,settings,options)
+    assert.ok(actual);assert.deepEqual(actual,prospective);assert.equal(actual.routeRefs.length,1)
+    assert.notEqual(nativeCostConfiguration({...layout.binding,skills:[]},settings,options).toolPolicyVersion,actual.toolPolicyVersion)
+    for(const drift of [{networkAccess:true},{networkOrigins:['https://extra.invalid']},{webSearch:'live'},
+      {businessApi:true},{skillConfiguration:[{digest:'private'}]}])
+      assert.equal(nativeCostConfiguration({...layout.binding,...drift},settings,options),null)
+  } finally {f.cleanup()}
+})

@@ -24,13 +24,14 @@ const selectedNetworkAccess = configuration => configuration.some(item => item.n
 // Trusted, already resolved TASK preparation only: private conversation tools are not task capabilities.
 // An unfrozen output contract/skill selection cannot be priced as if the selection were empty.
 const onlyLocalArtifactTools = (scope, privateTools, entries, configuration, policy) =>
-  scope === 'TASK' && privateTools == null && entries.length === 0 && configuration.length === 0 && policy === NATIVE_LOCAL_FILES_POLICY
-export function compareProspectiveTaskConfiguration(profileRuntime, { scopeKind, outputs, entries, skillConfiguration, toolPolicyRef, privateTools }, preparedLocalBudget=false) {
+  scope === 'TASK' && privateTools == null && configuration.length === 0
+    && (policy === NATIVE_LOCAL_FILES_POLICY && entries.length === 0 || policy === NATIVE_SKILL_SCRIPT_POLICY && entries.length > 0)
+export function compareProspectiveTaskConfiguration(profileRuntime, { scopeKind, outputs, entries, skillConfiguration, toolPolicyRef, privateTools }, preparedLocalBudget=false, pricingDescriptor=false) {
   if (scopeKind !== 'TASK' || privateTools !== null || !outputs || !Object.hasOwn(outputs,'dataSchema')
       || !Array.isArray(entries) || !Array.isArray(skillConfiguration) || ![NATIVE_LOCAL_FILES_POLICY,NATIVE_SKILL_SCRIPT_POLICY].includes(toolPolicyRef)
       || (skillConfiguration.length && toolPolicyRef !== NATIVE_SKILL_SCRIPT_POLICY) || (toolPolicyRef === NATIVE_SKILL_SCRIPT_POLICY && !entries.length)) return null
   return profileRuntime.prospectiveNativeGroup({ preparedLocalBudget,
-    ...(preparedLocalBudget ? {profileTools:nativeArtifactOutputTools({dataSchema:null})} : {}), skills:selectedPackages(entries), skillConfiguration,
+    ...(preparedLocalBudget ? {profileTools:nativeArtifactOutputTools({dataSchema:null}), ...(pricingDescriptor ? {costResources:[]} : {})} : {}), skills:selectedPackages(entries), skillConfiguration,
     localArtifactOnly:onlyLocalArtifactTools(scopeKind, privateTools, entries, skillConfiguration, toolPolicyRef),
     networkAccess:selectedNetworkAccess(skillConfiguration), tools:nativeArtifactOutputTools(outputs), toolPolicyRef, instructionsSha256 })
 }
@@ -78,6 +79,16 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
     if (signal?.aborted) fail('SKILL_LEASE_UNCERTAIN')
     checkActive()
     const local = session.policy()
+    // Fixed-engine commandExecution IDs are the outgoing Responses call_id (proved
+    // by the real isolated engine fixture). Only completed events in this admitted
+    // turn can establish a local exec_command; names in model history cannot do so.
+    // This adds no writes: the original native-tool checkpoint below remains owner.
+    const localCommands = new Map(), artifactCall = local.localArtifactCall
+    const localCostCall = id => {
+      const artifact = artifactCall?.(id), command = localCommands.get(id)
+      return artifact && command ? undefined : artifact || command
+    }
+    if (local.localArtifactCall) local.localArtifactCall = localCostCall
     if (nativeImage) {
       const imageBinding = store.read('native-image-binding')
       const pinned = entries[0]?.descriptor
@@ -160,6 +171,14 @@ export async function runNativeExecution({ command, inputs, entries, store, chec
         if (!event.itemId) return
         // Keep only source association, not tool stdout, hidden reasoning or secrets.
         store.write(`native-tool-${skillDigest({ threadId: event.threadId, turnId: event.turnId, itemId: event.itemId })}`, { threadId: event.threadId, turnId: event.turnId, itemId: event.itemId, method: event.method, type: event.type || null, status: event.status || null })
+        if (artifactCall && skillId(event.itemId) && event.method === 'item/completed'
+            && event.type === 'commandExecution' && event.status === 'completed') {
+          const bound = store.read('native-turn')
+          if (bound?.executionId === command.executionId && bound.threadId === event.threadId && bound.turnId === event.turnId) {
+            if (localCommands.size >= 256 && !localCommands.has(event.itemId)) localCommands.delete(localCommands.keys().next().value)
+            localCommands.set(event.itemId, 'exec_command')
+          }
+        }
       } })
     // Reuse the existing durable terminal checkpoint; no per-token writes or second fsync.
     // requestedModel is configuration evidence, not a claim about the provider's actual model.

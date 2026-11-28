@@ -110,7 +110,7 @@ export class NativeExecutionProfileRuntime extends IsolatedEngineProfileRuntime 
         }
         const { channelNamespace, engineVersion, coveragePolicyVersion } = nativeMeteringRoute(this.profile, schema, slot.meteredAdmission.localArtifactOnly &&
           !layout.binding.networkAccess && !layout.binding.networkOrigins.length && !layout.binding.webSearch &&
-          !layout.binding.skills.length && !layout.binding.skillConfiguration.length && typeof nativeExecution.localArtifactCall === 'function',slot.meteredAdmission.childRouteSha256)
+          !layout.binding.skillConfiguration.length && typeof nativeExecution.localArtifactCall === 'function',slot.meteredAdmission.childRouteSha256)
         slot.costConfiguration = nativeCostConfiguration(layout.binding, {
           binarySha256:schema.binarySha256, engineVersion, channelNamespace, model, effort,
           childRouteSha256:slot.meteredAdmission.childRouteSha256,

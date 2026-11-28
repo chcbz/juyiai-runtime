@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { startMeteredRoot } from '../metered-request-capture.mjs'
 import { SkillExecutionStore } from '../skill-execution-store.mjs'
 import { skillDigest } from '../skill-executor.mjs'
+import { skillPackageTreeDigest } from '../skill-manifest.mjs'
 
 const openRoot = async (t, options = {}, deferred = false) => {
   const directory = await mkdtemp(join(tmpdir(), 'metered-'))
@@ -113,7 +114,7 @@ import { writeFile } from 'node:fs/promises'
 import { NativeExecutionProfileRuntime } from '../native-execution-runtime.mjs'
 import { measureMinimalNativeExecutionToolchain } from '../native-execution-profile.mjs'
 
-for (const admitted of [false,true,'artifact','answer','file','empty']) test(admitted==='file'?'real text file delivery keeps unbound native shell history out of complete cost samples':admitted==='answer'?'prepared LOCAL_ANSWER group matches the metered structured answer actually delivered':admitted==='empty'?'real engine missing empty thread stays unresolved without another source, turn or model call':admitted==='artifact'?'real metered native execution ties its second request to the successful result proposal':admitted ? 'admitted V2 profile measures the CLI, persists before real TLS and retains suspend watermark without false coverage' : 'real metered Codex native turn uses sealed temporary HOME, measured namespace and one durable request at the TLS fixture',
+for (const admitted of [false,true,'artifact','answer','file','skill-file','empty']) test(admitted==='skill-file'?'real installed local skill file delivery measures the same generic configuration as registration':['file','skill-file'].includes(admitted)?'real text file delivery binds completed local shell history to complete model cost samples':admitted==='answer'?'prepared LOCAL_ANSWER group matches the metered structured answer actually delivered':admitted==='empty'?'real engine missing empty thread stays unresolved without another source, turn or model call':admitted==='artifact'?'real metered native execution ties its second request to the successful result proposal':admitted ? 'admitted V2 profile measures the CLI, persists before real TLS and retains suspend watermark without false coverage' : 'real metered Codex native turn uses sealed temporary HOME, measured namespace and one durable request at the TLS fixture',
   {skip:process.env.CYF_NATIVE_EXECUTION_ISOLATION_PROBE !== '1',timeout:60000}, async t=>{
   const {capture,read,store}=await openRoot(t,{engineVersion:'codex-cli-0.167.0',adapterVersion:'RESPONSES_TEXT_TOKENS_V1',coveragePolicyVersion:'TEXT_MODEL_ONLY_V1'},admitted), root=await mkdtemp(join(tmpdir(),'mrt-'));t.after(()=>rm(root,{recursive:true,force:true}))
   const privateDir=async name=>{const path=join(root,name);await mkdir(path,{mode:0o700});return path}
@@ -122,11 +123,11 @@ for (const admitted of [false,true,'artifact','answer','file','empty']) test(adm
   const cert=join(root,'cert'),key=join(root,'key');execFileSync('/usr/bin/openssl',['req','-x509','-newkey','rsa:2048','-nodes','-keyout',key,'-out',cert,'-days','1','-subj','/CN=localhost','-addext','subjectAltName=IP:127.0.0.1'],{stdio:'ignore'})
   let actualRead=read;const calls=[];const upstream=createHttpsServer({key:await readFile(key),cert:await readFile(cert)},async(req,res)=>{
     const chunks=[];for await(const c of req)chunks.push(c);const body=JSON.parse(Buffer.concat(chunks));calls.push({path:req.url,auth:req.headers.authorization,pending:(await actualRead(`request-${calls.length+1}-1`)).observation.resolution})
-    if(admitted==='file')calls.at(-1).toolHistory=(body.input||[]).filter(x=>x.type!=='message').map(x=>({type:x.type,id:x.id,callId:x.call_id,name:x.name,namespace:x.namespace}))
+    if(['file','skill-file'].includes(admitted))calls.at(-1).toolHistory=(body.input||[]).filter(x=>x.type!=='message').map(x=>({type:x.type,id:x.id,callId:x.call_id,name:x.name,namespace:x.namespace}))
     const firstTool=['artifact','answer','empty'].includes(admitted)&&calls.length===1, id='resp-'+calls.length
     let item=firstTool?{id:'fc_1',type:'function_call',call_id:'call_local_1',name:'result_propose',arguments:JSON.stringify({summary:'fixture proposal',artifactRefs:[],data:admitted==='answer'?{answer:'fixture answer'}:null})}:
       {id:'msg-1',type:'message',role:'assistant',content:[{type:'output_text',text:'fixture complete'}]}
-    if(admitted==='file' && calls.length<=3){
+    if(['file','skill-file'].includes(admitted) && calls.length<=3){
       const call=(name,args,ns)=>({id:'fc_'+calls.length,type:'function_call',call_id:'file_call_'+calls.length,name,...(ns?{namespace:ns}:{}),arguments:JSON.stringify(args)})
       if(calls.length===1){
         const catalog=body.tools.flatMap(t=>t.type==='namespace'?t.tools.map(tool=>({...tool,ns:t.name})):[t]);
@@ -149,21 +150,28 @@ for (const admitted of [false,true,'artifact','answer','file','empty']) test(adm
   runtime._spawnAdapter=async args=>{if(args.nativeExecution.executionId!=='exec1')return spawn(args);const staged=JSON.parse(await readFile(args.engineState.authPath));assert.match(staged.OPENAI_API_KEY,/^[a-f0-9]{64}$/);assert.notEqual(staged.OPENAI_API_KEY,'upstream-fixture-only');inspected=true;return spawn(args)}
   const binding={schemaVersion:1,requestKey:'metered-request',authorizationId:'exec1',manifestDigest:'sha256:'+store.command.snapshotDigest,requestId:'req-1',turnId:'turn-1',inputPolicyDigest:'policy-1'}
   try {
-    if(['artifact','answer','file','empty'].includes(admitted)){
+    if(['artifact','answer','file','skill-file','empty'].includes(admitted)){
       const scope={kind:'TASK',taskId:admitted==='answer'?'billing-task':'task',conversationId:'42',conversationGeneration:'1'}
       // Actual Java request exported by the signed selection integration, not reconstructed from PLAN.
       const wire=admitted==='answer'?await readFile(new URL('./fixtures/selected-answer-probe.json',import.meta.url)):null
       const probe=wire?JSON.parse(wire):null
-      const command={...store.command,runId:'run-exec1',snapshotDigest:skillDigest({executionProtocolVersion:6,scope}),scope,commandId:'cmd',messageId:'msg',instruction:'fixture',parameters:{},inputRefs:[],outputs:probe?probe.data.outputs:admitted==='file'?{mimeTypes:['text/plain'],artifactsRequired:true,multiple:true}:{mimeTypes:[],artifactsRequired:false,multiple:false,dataSchema:null}}
+      const command={...store.command,runId:'run-exec1',snapshotDigest:skillDigest({executionProtocolVersion:6,scope}),scope,commandId:'cmd',messageId:'msg',instruction:'fixture',parameters:{},inputRefs:[],outputs:probe?probe.data.outputs:['file','skill-file'].includes(admitted)?{mimeTypes:['text/plain'],artifactsRequired:true,multiple:true}:{mimeTypes:[],artifactsRequired:false,multiple:false,dataSchema:null}}
+      const entries=[]
+      if(admitted==='skill-file'){
+        command.toolPolicyRef='NATIVE_SKILL_SCRIPT_V1'
+        const packageRoot=await privateDir('local-package')
+        await writeFile(join(packageRoot,'SKILL.md'),'---\nname: local-summary\ndescription: Local text fixture.\n---\nUse local tools to prepare the authorized text file.\n',{mode:0o600})
+        entries.push({descriptor:{skillKey:'local-summary',packageRoot,packageTreeDigest:skillPackageTreeDigest(packageRoot)}})
+      }
       const actual=new SkillExecutionStore({rootDirectory:root,scope:{agentId:runtime.profile.agentId},command})
       // Read this real execution's source records at the upstream, not the first harness's directory.
       actualRead=async key=>JSON.parse(await readFile(join(actual.directory,`usage-capture-${skillDigest(['CAPTURE_V2',command.executionId,command.runId])}`,key+'.json')))
       const {runNativeExecution,compareProspectiveTaskConfiguration}=await import('../native-execution.mjs')
       // Independent deployment measurement: no PLAN or source records exist yet.
       assert.ok(await runtime.measureNativeExecution(),JSON.stringify(runtime.nativeExecutionMeasurementFailure))
-      const comparisonOutputs=admitted==='file'?{...command.outputs,dataSchema:null}:command.outputs
-      const group=compareProspectiveTaskConfiguration(runtime,{scopeKind:'TASK',outputs:comparisonOutputs,entries:[],skillConfiguration:[],privateTools:null,toolPolicyRef:command.toolPolicyRef})
-      const compare=outputs=>compareProspectiveTaskConfiguration(runtime,{scopeKind:'TASK',outputs,entries:[],skillConfiguration:[],privateTools:null,toolPolicyRef:command.toolPolicyRef},true)
+      const comparisonOutputs=['file','skill-file'].includes(admitted)?{...command.outputs,dataSchema:null}:command.outputs
+      const group=compareProspectiveTaskConfiguration(runtime,{scopeKind:'TASK',outputs:comparisonOutputs,entries,skillConfiguration:[],privateTools:null,toolPolicyRef:command.toolPolicyRef})
+      const compare=outputs=>compareProspectiveTaskConfiguration(runtime,{scopeKind:'TASK',outputs,entries,skillConfiguration:[],privateTools:null,toolPolicyRef:command.toolPolicyRef},true)
       const sampled=compare(comparisonOutputs),alternate=compare({...comparisonOutputs,dataSchema:comparisonOutputs.dataSchema?null:{type:'object'}})
       assert.ok(group && sampled && alternate,'expected resolved prospective comparison');assert.match(sampled.profileSha256,/^[0-9a-f]{64}$/);assert.equal(sampled.executionConfigSha256,group.executionConfigSha256)
       assert.notEqual(alternate.toolConfigSha256,sampled.toolConfigSha256);assert.equal(alternate.profileSha256,sampled.profileSha256)
@@ -190,14 +198,16 @@ for (const admitted of [false,true,'artifact','answer','file','empty']) test(adm
         assert.deepEqual(actual.read('native-thread'),original);assert.equal(actual.read('native-start-attempt'),null);assert.equal(actual.read('native-turn'),null);assert.equal(calls.length,0)
         await assert.rejects(readRoot('epoch-1/source-1'),{code:'ENOENT'});return
       }
-      const result=await runNativeExecution({command,inputs:[],entries:[],store:actual,checkActive(){},profileRuntime:runtime,model:'gpt-5.4',effort:'medium'})
+      const pricing=compareProspectiveTaskConfiguration(runtime,{scopeKind:'TASK',outputs:comparisonOutputs,entries,skillConfiguration:[],privateTools:null,toolPolicyRef:command.toolPolicyRef},true,true)
+      const result=await runNativeExecution({command,inputs:[],entries,store:actual,checkActive(){},profileRuntime:runtime,model:'gpt-5.4',effort:'medium'})
       const actualConfiguration=(await actualRead('plan')).observation.costConfiguration
       assert.ok(actualConfiguration,'actual launch must write independently observed semantics into PLAN')
+      assert.deepEqual(actualConfiguration,pricing)
       assert.equal(actualConfiguration.capturePolicyVersion,'NATIVE_LOCAL_ARTIFACT_TEXT_V1')
       assert.equal(actualConfiguration.routeRefs[0].namespace,channel)
       assert.equal(actualConfiguration.routeRefs[0].modelOrTool,'gpt-5.4')
       assert.equal(JSON.stringify(actualConfiguration).includes(actual.directory),false)
-      if(admitted==='file'){
+      if(['file','skill-file'].includes(admitted)){
         assert.equal(result.result.data,null);assert.equal(result.result.artifacts.length,1)
         const [file]=result.result.artifacts;assert.equal(file.contentMimeType,'text/plain');assert.equal(file.displayName,'result.txt');assert.equal(actual.readBlob(file.outputId,file).toString(),'file-fixture')
         assert.equal(calls.length,4);assert.ok(calls.every(c=>c.pending==='PENDING'))
@@ -212,11 +222,11 @@ for (const admitted of [false,true,'artifact','answer','file','empty']) test(adm
         for(const seq of [1,2,3,4]){
           const linked=await actualRead(`request-${seq}-2`);const o=(await actualRead(`response-${linked.observation.sourceAttemptId}-1`)).observation
           assert.equal(o.reportedUsage.input_tokens,10);assert.equal(o.actualBillingIdentity,null)
-          if(seq===1)assert.deepEqual(o.measuredQuantities.tokens,{INPUT:'7',CACHED_INPUT:'3',OUTPUT:'2'})
-          else {assert.equal(o.measuredQuantities,null);assert.ok(o.reasonCodes.some(x=>x==='REQUEST_TOOL_HISTORY_UNBOUND'||x==='REQUEST_COST_SCOPE_UNKNOWN'),JSON.stringify(o.reasonCodes))}
+          assert.ok(o.measuredQuantities,JSON.stringify(o.reasonCodes))
+          assert.deepEqual(o.measuredQuantities.tokens,{INPUT:'7',CACHED_INPUT:'3',OUTPUT:'2'})
         }
         await recoverStoppedMeteredRoot(actual,()=>assert.equal(runtime.activeAdapters.size,0));assert.deepEqual((await actualRead('plan')).observation.dispatchGroup,group)
-        const close=(await actualRead('capture-final-1')).observation;assert.equal(close.closeState,'SEALED_INCOMPLETE');assert.ok(close.reasonCodes.includes('USAGE_INCOMPLETE'));return
+        const close=(await actualRead('capture-final-1')).observation;assert.equal(close.closeState,'DRAINED');assert.deepEqual(close.reasonCodes,[]);return
       }
       if(admitted==='answer'){
         assert.deepEqual(result.result.data,{answer:'fixture answer'});assert.deepEqual(result.result.artifacts,[])
