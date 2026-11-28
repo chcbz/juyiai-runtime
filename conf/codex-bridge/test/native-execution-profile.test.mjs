@@ -981,3 +981,22 @@ test('local installed skill cost configuration shares actual package measurement
       assert.equal(nativeCostConfiguration({...layout.binding,...drift},settings,options),null)
   } finally {f.cleanup()}
 })
+
+
+test('installed instruction adapter measures local selection and never downgrades a pinned provider', async () => {
+  const {comparePreparedInstructionConfiguration}=await import('../native-execution.mjs')
+  const entry={descriptor:{skillKey:'local-report',packageRoot:'/installed/report',packageTreeDigest:'a'.repeat(64),packageSha256:'b'.repeat(64)}}
+  const runtime={prospectiveNativeGroup:options=>options}, outputs={dataSchema:null}
+  const local=comparePreparedInstructionConfiguration(runtime,outputs,entry,[],null,null,null,true)
+  assert.equal(local.localArtifactOnly,true)
+  assert.equal(local.networkAccess,false)
+  assert.equal(local.skills[0].skillKey,'local-report')
+  assert.deepEqual(local.costResources,[])
+  const pinned={descriptor:{...entry.descriptor,skillKey:'image-generate'}}
+  const settings={generatePackageSha256:entry.descriptor.packageSha256,model:'image',channel:'standard',tier:'base',priceVersion:'v1',mountPinnedSkill:true}
+  assert.equal(comparePreparedInstructionConfiguration(runtime,outputs,pinned,[],settings,null,null,true),null,
+    'a pinned paid adapter cannot be declared as local merely because outputs do not match')
+  assert.equal(comparePreparedInstructionConfiguration(runtime,{mimeTypes:['image/png'],dataSchema:null},pinned,[{configuration:{},networkOrigins:[]}],settings,null,null,true),null,
+    'private mounted configuration cannot disappear from the provider measurement')
+  assert.equal(comparePreparedInstructionConfiguration(runtime,outputs,null,[],null,null,null),null)
+})

@@ -46,7 +46,7 @@ import { isManagementMessage } from './skill-management-wire.mjs'
 import { SkillInstallManager, WORK_RESULT_RECEIPT_TYPE, defaultSkillInstallStateRoot } from './skill-install-manager.mjs'
 import { materialProfileFromInputCarriers } from './skill-config-candidate.mjs'
 import { SkillConversationLane } from './skill-conversation.mjs'
-import { comparePreparedImage, compareProspectiveTaskConfiguration, nativeExecutionRequestBinding, runNativeExecution } from './native-execution.mjs'
+import { comparePreparedInstructionConfiguration, compareProspectiveTaskConfiguration, nativeExecutionRequestBinding, runNativeExecution } from './native-execution.mjs'
 import { installedCostProfiles } from './cost-profile-report.mjs'
 import { initializeNativeToolchain } from './native-document-toolchain.mjs'
 import { NATIVE_SKILL_SCRIPT_POLICY, readNativeSkillSubjectConfig, resolveNativeSkillConfiguration, resolvePreparedNativeSkillConfiguration } from './native-skill-config.mjs'
@@ -6377,9 +6377,9 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
             if (!selected?.descriptor.quoteSpecBindings?.length) continue
             // Use the same resource adapter as execution. Unsupported adapters return no complete
             // measurement; a catalogue entry alone never declares resource coverage or composition.
-            const configuration=comparePreparedImage(state.nativeExecutionProfileRuntime,{mimeTypes:['image/png'],dataSchema:null},selected,settings,runtimeFileAuthProvider(state.profile),state.appServerAdapter?.readback?.config,true)
-              ?? compareProspectiveTaskConfiguration(state.nativeExecutionProfileRuntime,{scopeKind:'TASK',outputs:{dataSchema:null},entries:[selected],
-                skillConfiguration:resolvePreparedNativeSkillConfiguration([selected],subjectConfig),toolPolicyRef:NATIVE_SKILL_SCRIPT_POLICY,privateTools:null},true,true)
+            const configuration=comparePreparedInstructionConfiguration(state.nativeExecutionProfileRuntime,
+              {mimeTypes:['image/png'],dataSchema:null},selected,resolvePreparedNativeSkillConfiguration([selected],subjectConfig),
+              settings,runtimeFileAuthProvider(state.profile),state.appServerAdapter?.readback?.config,true)
             if(configuration)measurements.push({descriptor:selected.descriptor,configuration})
           }
           return measuredCostProfiles(measurements)
@@ -6389,8 +6389,11 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
           if (!state?.nativeExecutionProfileRuntime || entry.closed || state.disposed || state.profileClosing) return null
           const selected=state.skillRegistry?.preparedInstruction(pin,fence)
           if (!selected) return null
-          const settings=state.profile.nativeImage ?? validateNativeImageSettings(readNativeSkillSubjectConfig({file:state.profile.skillExecutionConfigFile,scope:state.skillRegistry.scope})?.nativeImage)
-          return comparePreparedImage(state.nativeExecutionProfileRuntime,outputs,selected,settings,runtimeFileAuthProvider(state.profile),state.appServerAdapter?.readback?.config)
+          const subjectConfig=readNativeSkillSubjectConfig({file:state.profile.skillExecutionConfigFile,scope:state.skillRegistry.scope})
+          const settings=state.profile.nativeImage ?? validateNativeImageSettings(subjectConfig?.nativeImage)
+          return comparePreparedInstructionConfiguration(state.nativeExecutionProfileRuntime,outputs,selected,
+            resolvePreparedNativeSkillConfiguration([selected],subjectConfig),settings,runtimeFileAuthProvider(state.profile),
+            state.appServerAdapter?.readback?.config)
         },
         nativeWorkAvailable: () => { entry.state.conversationNativeWakeup?.wake() },
         matchesSkillManagementAck: envelope => entry.state?.skillInstallManager.matchesDurableAckEnvelope(envelope) === true,

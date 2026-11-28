@@ -166,12 +166,12 @@ for (const admitted of [false,true,'artifact','answer','file','skill-file','empt
       const actual=new SkillExecutionStore({rootDirectory:root,scope:{agentId:runtime.profile.agentId},command})
       // Read this real execution's source records at the upstream, not the first harness's directory.
       actualRead=async key=>JSON.parse(await readFile(join(actual.directory,`usage-capture-${skillDigest(['CAPTURE_V2',command.executionId,command.runId])}`,key+'.json')))
-      const {runNativeExecution,compareProspectiveTaskConfiguration}=await import('../native-execution.mjs')
+      const {runNativeExecution,compareProspectiveTaskConfiguration,comparePreparedInstructionConfiguration}=await import('../native-execution.mjs')
       // Independent deployment measurement: no PLAN or source records exist yet.
       assert.ok(await runtime.measureNativeExecution(),JSON.stringify(runtime.nativeExecutionMeasurementFailure))
       const comparisonOutputs=['file','skill-file'].includes(admitted)?{...command.outputs,dataSchema:null}:command.outputs
       const group=compareProspectiveTaskConfiguration(runtime,{scopeKind:'TASK',outputs:comparisonOutputs,entries,skillConfiguration:[],privateTools:null,toolPolicyRef:command.toolPolicyRef})
-      const compare=outputs=>compareProspectiveTaskConfiguration(runtime,{scopeKind:'TASK',outputs,entries,skillConfiguration:[],privateTools:null,toolPolicyRef:command.toolPolicyRef},true)
+      const compare=outputs=>admitted==='skill-file' ? comparePreparedInstructionConfiguration(runtime,outputs,entries[0],[],null,null,null) : compareProspectiveTaskConfiguration(runtime,{scopeKind:'TASK',outputs,entries,skillConfiguration:[],privateTools:null,toolPolicyRef:command.toolPolicyRef},true)
       const sampled=compare(comparisonOutputs),alternate=compare({...comparisonOutputs,dataSchema:comparisonOutputs.dataSchema?null:{type:'object'}})
       assert.ok(group && sampled && alternate,'expected resolved prospective comparison');assert.match(sampled.profileSha256,/^[0-9a-f]{64}$/);assert.equal(sampled.executionConfigSha256,group.executionConfigSha256)
       assert.notEqual(alternate.toolConfigSha256,sampled.toolConfigSha256);assert.equal(alternate.profileSha256,sampled.profileSha256)
@@ -198,7 +198,7 @@ for (const admitted of [false,true,'artifact','answer','file','skill-file','empt
         assert.deepEqual(actual.read('native-thread'),original);assert.equal(actual.read('native-start-attempt'),null);assert.equal(actual.read('native-turn'),null);assert.equal(calls.length,0)
         await assert.rejects(readRoot('epoch-1/source-1'),{code:'ENOENT'});return
       }
-      const pricing=compareProspectiveTaskConfiguration(runtime,{scopeKind:'TASK',outputs:comparisonOutputs,entries,skillConfiguration:[],privateTools:null,toolPolicyRef:command.toolPolicyRef},true,true)
+      const pricing=admitted==='skill-file' ? comparePreparedInstructionConfiguration(runtime,comparisonOutputs,entries[0],[],null,null,null,true) : compareProspectiveTaskConfiguration(runtime,{scopeKind:'TASK',outputs:comparisonOutputs,entries,skillConfiguration:[],privateTools:null,toolPolicyRef:command.toolPolicyRef},true,true)
       const result=await runNativeExecution({command,inputs:[],entries,store:actual,checkActive(){},profileRuntime:runtime,model:'gpt-5.4',effort:'medium'})
       const actualConfiguration=(await actualRead('plan')).observation.costConfiguration
       assert.ok(actualConfiguration,'actual launch must write independently observed semantics into PLAN')

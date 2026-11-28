@@ -53,6 +53,19 @@ export function comparePreparedImage(profileRuntime, outputs, entry, settings, p
     skillConfiguration:[],networkAccess:false,localArtifactOnly:false,childRouteSha256,tools:tools(outputs),profileTools:tools({dataSchema:null}),
     toolPolicyRef:NATIVE_SKILL_SCRIPT_POLICY,instructionsSha256})
 }
+// One selected installed instruction uses the same resource adapter for registration
+// and preparation. A recognized paid adapter must not silently become local when
+// its exact output contract cannot be served. No model or provider request here.
+export function comparePreparedInstructionConfiguration(profileRuntime, outputs, entry, skillConfiguration,
+    settings, provider, config, pricingDescriptor = false) {
+  if (!entry || !profileRuntime) return null
+  if (pinnedImageOperation(entry.descriptor, settings)) {
+    if (skillConfiguration.length) return null
+    return comparePreparedImage(profileRuntime, outputs, entry, settings, provider, config, pricingDescriptor)
+  }
+  return compareProspectiveTaskConfiguration(profileRuntime, {scopeKind:'TASK', outputs, entries:[entry],
+    skillConfiguration, toolPolicyRef:NATIVE_SKILL_SCRIPT_POLICY, privateTools:null}, true, pricingDescriptor)
+}
 export async function runNativeExecution({ command, inputs, entries, store, checkActive, signal, profileRuntime, model, effort, mayStartTurn = true, skillConfiguration = [], exchangeBusiness, bindInstallation, nativeImage = null }) {
   if (!profileRuntime?.openNativeExecutionAdapter) fail('NATIVE_EXECUTION_PROFILE_UNAVAILABLE')
   if (skillConfiguration.length && command.toolPolicyRef !== NATIVE_SKILL_SCRIPT_POLICY) fail('NATIVE_SKILL_CONFIG_POLICY_MISMATCH')
