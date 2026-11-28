@@ -122,6 +122,7 @@ for (const admitted of [false,true,'artifact','answer','file','empty']) test(adm
   const cert=join(root,'cert'),key=join(root,'key');execFileSync('/usr/bin/openssl',['req','-x509','-newkey','rsa:2048','-nodes','-keyout',key,'-out',cert,'-days','1','-subj','/CN=localhost','-addext','subjectAltName=IP:127.0.0.1'],{stdio:'ignore'})
   let actualRead=read;const calls=[];const upstream=createHttpsServer({key:await readFile(key),cert:await readFile(cert)},async(req,res)=>{
     const chunks=[];for await(const c of req)chunks.push(c);const body=JSON.parse(Buffer.concat(chunks));calls.push({path:req.url,auth:req.headers.authorization,pending:(await actualRead(`request-${calls.length+1}-1`)).observation.resolution})
+    if(admitted==='file')calls.at(-1).toolHistory=(body.input||[]).filter(x=>x.type!=='message').map(x=>({type:x.type,id:x.id,callId:x.call_id,name:x.name,namespace:x.namespace}))
     const firstTool=['artifact','answer','empty'].includes(admitted)&&calls.length===1, id='resp-'+calls.length
     let item=firstTool?{id:'fc_1',type:'function_call',call_id:'call_local_1',name:'result_propose',arguments:JSON.stringify({summary:'fixture proposal',artifactRefs:[],data:admitted==='answer'?{answer:'fixture answer'}:null})}:
       {id:'msg-1',type:'message',role:'assistant',content:[{type:'output_text',text:'fixture complete'}]}
@@ -200,6 +201,14 @@ for (const admitted of [false,true,'artifact','answer','file','empty']) test(adm
         assert.equal(result.result.data,null);assert.equal(result.result.artifacts.length,1)
         const [file]=result.result.artifacts;assert.equal(file.contentMimeType,'text/plain');assert.equal(file.displayName,'result.txt');assert.equal(actual.readBlob(file.outputId,file).toString(),'file-fixture')
         assert.equal(calls.length,4);assert.ok(calls.every(c=>c.pending==='PENDING'))
+        // Characterize the real fixed-engine source identifiers before extending local
+        // tool cost coverage. Synthetic fixture metadata only: never retain command text,
+        // output, credentials or user input. A tool name alone is not provenance.
+        const toolEvents=(await readdir(actual.directory)).filter(name=>/^native-tool-[a-f0-9]{64}\.json$/.test(name))
+          .map(name=>actual.read(name.slice(0,-5)))
+        assert.ok(toolEvents.some(event=>event.type==='commandExecution'&&event.method==='item/completed'), 'real shell execution must have a completed source event')
+        t.diagnostic('synthetic local-tool provenance: '+JSON.stringify({toolEvents,toolHistory:calls.map(call=>call.toolHistory)}))
+
         for(const seq of [1,2,3,4]){
           const linked=await actualRead(`request-${seq}-2`);const o=(await actualRead(`response-${linked.observation.sourceAttemptId}-1`)).observation
           assert.equal(o.reportedUsage.input_tokens,10);assert.equal(o.actualBillingIdentity,null)
