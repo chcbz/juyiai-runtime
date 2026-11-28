@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { costProfileReport, costProfileReporter, encodeCostProfileValue, installedSingleSkillCostProfiles } from '../cost-profile-report.mjs'
+import { costProfileReport, costProfileReporter, encodeCostProfileValue, installedCostProfiles } from '../cost-profile-report.mjs'
 
 const H = 'a'.repeat(64)
 const fixture = () => ({ profileId: 'summary', revision: '1', selectionPriority: '0',
@@ -122,7 +122,7 @@ const measuredInstallation = (capability = 'text.summary') => {
 }
 
 test('actual single-skill measurements use installed semantic bindings, never skill-name pricing or inferred composition', () => {
-  const publish = installedSingleSkillCostProfiles()
+  const publish = installedCostProfiles()
   const inputs = ['text.summary', 'document.extract', 'visual.asset'].map(measuredInstallation)
   const profiles = publish(inputs)
   assert.equal(profiles.length, 3)
@@ -136,22 +136,70 @@ test('actual single-skill measurements use installed semantic bindings, never sk
   }
   assert.deepEqual(publish([...inputs].reverse()), profiles)
   assert.equal(costProfileReport('1', profiles).profiles.length, 3)
-  assert.deepEqual(installedSingleSkillCostProfiles()([{ ...inputs[0], configuration: null }]), [])
-  assert.deepEqual(installedSingleSkillCostProfiles()([{ ...inputs[0], descriptor: { ...inputs[0].descriptor, quoteSpecBindings: [] } }]), [])
+  assert.deepEqual(installedCostProfiles()([{ ...inputs[0], configuration: null }]), [])
+  assert.deepEqual(installedCostProfiles()([{ ...inputs[0], descriptor: { ...inputs[0].descriptor, quoteSpecBindings: [] } }]), [])
 })
 
 test('measured profile revisions follow actual configuration and installed bytes, not call count or caller mutation', () => {
-  const publish = installedSingleSkillCostProfiles(), input = measuredInstallation()
+  const publish = installedCostProfiles(), input = measuredInstallation()
   const first = publish([input]); first[0].routeRefs[0].namespace = 'tampered'
   const unchanged = publish([input]); assert.equal(unchanged[0].revision, '1')
   assert.notEqual(unchanged[0].routeRefs[0].namespace, 'tampered')
   const moved = { ...input, descriptor: { ...input.descriptor, packageSha256: 'b'.repeat(64) } }
   assert.equal(publish([moved])[0].revision, '2'); assert.equal(publish([moved])[0].revision, '2')
   assert.deepEqual(publish([]), []); assert.equal(publish([input])[0].revision, '4')
-  assert.equal(installedSingleSkillCostProfiles()([input])[0].revision, '1')
+  assert.equal(installedCostProfiles()([input])[0].revision, '1')
   assert.throws(() => publish([input, input]), /Invalid runtime/)
   assert.equal(publish([input])[0].revision, '4')
   assert.throws(() => publish([{ ...input, descriptor: { ...input.descriptor, skillInstallationId: null } }]), /Invalid runtime/)
   assert.throws(() => publish(Array.from({ length: 33 }, (_, i) => measuredInstallation('capability-' + i))), /Invalid runtime/)
   assert.equal(publish([input])[0].revision, '4')
+})
+
+
+test('explicit measured composition preserves ordered dependencies and is never inferred from single profiles', () => {
+  const a = measuredInstallation('document.extract'), b = measuredInstallation('text.summary')
+  const slots = [
+    { descriptor: a.descriptor, binding: a.descriptor.quoteSpecBindings[0], dependsOn: [] },
+    { descriptor: b.descriptor, binding: b.descriptor.quoteSpecBindings[0], dependsOn: ['0'] }
+  ]
+  const publish = installedCostProfiles()
+  const separate = publish([a, b])
+  assert.equal(separate.length, 2)
+  assert.ok(separate.every(p => p.scopePattern.length === 1))
+  // Explicit synthetic adapter measurement, not evidence that a live executor supports this plan.
+  const configuration = { ...a.configuration, toolPolicyVersion: 'c'.repeat(64) }
+  const joined = publish([{ slots, configuration }])
+  assert.equal(joined.length, 1)
+  assert.equal(joined[0].scopePattern.length, 2)
+  assert.deepEqual(joined[0].scopePattern[1].dependsOn, ['0'])
+  assert.equal(joined[0].toolPolicyVersion, configuration.toolPolicyVersion)
+  assert.equal(joined[0].revision, '2')
+  joined[0].scopePattern[1].dependsOn.length = 0
+  assert.deepEqual(publish([{ slots, configuration }])[0].scopePattern[1].dependsOn, ['0'])
+  assert.deepEqual(publish([{ slots, configuration: null }]), [])
+})
+
+test('composition requires installed semantic bindings and rejects invalid dependencies without advancing revision', () => {
+  const a = measuredInstallation(), publish = installedCostProfiles()
+  const slot = { descriptor: a.descriptor, binding: a.descriptor.quoteSpecBindings[0], dependsOn: [] }
+  const valid = { slots: [slot, { ...slot, dependsOn: ['0'] }], configuration: a.configuration }
+  const first = publish([valid])
+  for (const slots of [[], Array(1), [slot, { ...slot, binding: { ...slot.binding, specSha: 'b'.repeat(64) } }],
+    [slot, { ...slot, dependsOn: ['1'] }], [slot, { ...slot, dependsOn: ['0', '0'] }]]) {
+    assert.throws(() => publish([{ ...valid, slots }]), /Invalid runtime/)
+    assert.deepEqual(publish([valid]), first)
+  }
+  assert.throws(() => publish([{ ...valid, descriptor: a.descriptor }]), /Invalid runtime/)
+  assert.deepEqual(publish([valid]), first)
+})
+
+
+test('composition dependency order has one identity and does not advance revision', () => {
+  const a = measuredInstallation(), publish = installedCostProfiles()
+  const slot = { descriptor: a.descriptor, binding: a.descriptor.quoteSpecBindings[0], dependsOn: [] }
+  const slots = [slot, slot, { ...slot, dependsOn: ['1', '0'] }]
+  const first = publish([{ slots, configuration: a.configuration }])
+  assert.deepEqual(first[0].scopePattern[2].dependsOn, ['0', '1'])
+  assert.deepEqual(publish([{ slots: [slot, slot, { ...slot, dependsOn: ['0', '1'] }], configuration: a.configuration }]), first)
 })

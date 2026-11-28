@@ -47,7 +47,7 @@ import { SkillInstallManager, WORK_RESULT_RECEIPT_TYPE, defaultSkillInstallState
 import { materialProfileFromInputCarriers } from './skill-config-candidate.mjs'
 import { SkillConversationLane } from './skill-conversation.mjs'
 import { comparePreparedImage, compareProspectiveTaskConfiguration, nativeExecutionRequestBinding, runNativeExecution } from './native-execution.mjs'
-import { installedSingleSkillCostProfiles } from './cost-profile-report.mjs'
+import { installedCostProfiles } from './cost-profile-report.mjs'
 import { initializeNativeToolchain } from './native-document-toolchain.mjs'
 import { NATIVE_SKILL_SCRIPT_POLICY, readNativeSkillSubjectConfig, resolveNativeSkillConfiguration } from './native-skill-config.mjs'
 import { createLocalScriptRunner } from './skill-runners/local-script.mjs'
@@ -6323,7 +6323,7 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
     createExecutor: ({ subjectKey }) => {
       const entry = entries.get(subjectKey)
       if (!entry || entry.closed || entry.state) throw new AgentProtocolError('RUNTIME_EXECUTOR_SUBJECT_INVALID', 'Executor subject is unknown or already attached')
-      let measuredCostProfiles = installedSingleSkillCostProfiles()
+      let measuredCostProfiles = installedCostProfiles()
       return {
         initialize: () => nativeInitializationGate.run(async () => {
           if (entry.state || entry.closed || runtimeExecutionOwner !== owner) throw new AgentProtocolError('RUNTIME_EXECUTOR_OWNERSHIP_LOST', 'Runtime executor ownership changed')
@@ -6431,7 +6431,7 @@ export const createRuntimeExecutionHost = ({ agents, runtimeInstanceId, apiOrigi
           }
         },
         suspendAdmission: () => { const state = entry.state; state.skillRegistry?.setSession(null); state.skillInstallManager?.bindSession(null); state.processor.pause(); stopNativeConversationPoller(state) },
-        disconnected: () => { measuredCostProfiles = installedSingleSkillCostProfiles(); const state = entry.state; state.skillRegistry?.setSession(null); state.skillInstallManager?.bindSession(null); state.e05CommandAbort?.abort(); state.processor.pause(); state.ws = null; stopNativeConversationPoller(state); state.workspaceFileRuntimeAuthHeader = '' },
+        disconnected: () => { measuredCostProfiles = installedCostProfiles(); const state = entry.state; state.skillRegistry?.setSession(null); state.skillInstallManager?.bindSession(null); state.e05CommandAbort?.abort(); state.processor.pause(); state.ws = null; stopNativeConversationPoller(state); state.workspaceFileRuntimeAuthHeader = '' },
         ready: () => Boolean(!entry.closed && entry.state && !entry.state.disposed && !entry.state.processor.failClosedError && entry.state.runtimeTransport?.ready?.()),
         pause: async () => { entry.state?.e05CommandAbort?.abort(); entry.state?.processor.pause(); if (entry.state) { entry.state.skillRegistry?.setSession(null); entry.state.skillInstallManager?.bindSession(null); entry.state.runtimeTransport = null; entry.state.workspaceFileRuntimeAuthHeader = '' } },
         close: () => closeEntry(entry),

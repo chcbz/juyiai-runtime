@@ -119,20 +119,38 @@ export function costProfileReporter() {
   }
 }
 
-// One publisher per execution subject/session. Each supplied entry is a single-skill
-// adapter measurement, not an inferred combination of installed skills. Unknown or
-// unmeasured adapters are omitted by the caller and do not acquire execution authority.
-export function installedSingleSkillCostProfiles() {
+// One publisher per execution subject/session. Single-skill measurements expand only
+// their own installed bindings. Composite slots must be explicitly supplied by the
+// actual execution adapter together with ONE measurement for that complete scope;
+// this codec never combines measurements, resource routes, or installed skills.
+const measuredSlot = ({ descriptor, binding, dependsOn }, index) => {
+  if (!object(descriptor) || !object(binding) || !Array.isArray(descriptor.quoteSpecBindings)
+      || !descriptor.quoteSpecBindings.some(b => b.capabilityId === binding.capabilityId
+        && b.capabilityVersion === binding.capabilityVersion && b.specSha === binding.specSha)) invalid()
+  return { slot: String(index), capabilityId: binding.capabilityId, capabilityVersion: binding.capabilityVersion,
+    specSha: binding.specSha, dependsOn: list(dependsOn, 128).map(d => decimal(d, INT_MAX)).sort((a, b) => Number(a) - Number(b)),
+    skillKey: descriptor.skillKey, skillVersion: descriptor.skillVersion,
+    packageSha: descriptor.packageSha256, installId: descriptor.skillInstallationId }
+}
+export function installedCostProfiles() {
   let revision = 0n, previous = null
   return measurements => {
     const profiles = []
-    for (const { descriptor, configuration } of measurements) {
+    for (const measurement of measurements) {
+      const { configuration } = measurement
       if (!configuration) continue
-      for (const binding of descriptor.quoteSpecBindings ?? []) {
-        const scopePattern = [{ slot: '0', capabilityId: binding.capabilityId, capabilityVersion: binding.capabilityVersion,
-          specSha: binding.specSha, dependsOn: [], skillKey: descriptor.skillKey, skillVersion: descriptor.skillVersion,
-          packageSha: descriptor.packageSha256, installId: descriptor.skillInstallationId }]
-        profiles.push({ ...configuration, profileId: digest([descriptor.skillKey, binding.capabilityId, binding.capabilityVersion]),
+      if (Object.hasOwn(measurement, 'slots') && Object.hasOwn(measurement, 'descriptor')) invalid()
+      const scopes = Object.hasOwn(measurement, 'slots')
+        ? [list(measurement.slots, 128, true)]
+        : (measurement.descriptor.quoteSpecBindings ?? []).map(binding =>
+          [{ descriptor: measurement.descriptor, binding, dependsOn: [] }])
+      for (const slots of scopes) {
+        const scopePattern = slots.map(measuredSlot)
+        const first = scopePattern[0]
+        const identity = scopePattern.length === 1
+          ? [first.skillKey, first.capabilityId, first.capabilityVersion]
+          : ['MEASURED_SCOPE_V1', scopePattern]
+        profiles.push({ ...configuration, profileId: digest(identity),
           revision: '1', selectionPriority: '0', scopePattern })
       }
     }
